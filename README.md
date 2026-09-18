@@ -132,7 +132,7 @@ arduino-cli core update-index --additional-urls https://espressif.github.io/ardu
 arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 arduino-cli lib install "LiquidCrystal I2C"
 
-cd ~/ssd/electronic
+cd ~/ssd/electronic/espoke
 FQBN="esp32:esp32:esp32c3:CDCOnBoot=cdc"   # XIAO は esp32:esp32:XIAO_ESP32C3:CDCOnBoot=cdc
 arduino-cli compile --fqbn "$FQBN" lcd1602_hello
 arduino-cli upload  --fqbn "$FQBN" -p /dev/ttyACM0 lcd1602_hello
