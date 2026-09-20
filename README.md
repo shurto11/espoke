@@ -2,22 +2,24 @@
 
 ESP32 で作るポケベル（pokebell）。電子工作の配線資料とファームウェアを置くリポジトリ。
 
+現在のターゲットは **ESP32-S3**。
+
 ## 構成
 
 | ディレクトリ | 内容 |
 |---|---|
-| `lcd1602_hello/` | ESP32-C3 + LCD1602A（I2C）の表示サンプル |
+| `lcd1602_hello/` | ESP32-S3 + LCD1602A（I2C）の表示サンプル |
 
 ## lcd1602_hello — LCD1602A に文字を表示する
 
-ESP32-C3 に I2C 接続した LCD1602A に文字を表示する最初のサンプル。
+ESP32-S3 に I2C 接続した LCD1602A に文字を表示する最初のサンプル。
 
-- 1行目: `Hello, ESP32!`（シリアルモニタから送った文字列に置き換わる）
+- 1行目: `Hello, ESP32-S3!`（シリアルモニタから送った文字列に置き換わる）
 - 2行目: 起動からの経過秒数
 
 ```
 +----------------+
-|Hello, ESP32!   |
+|Hello, ESP32-S3!|
 |uptime 12s      |
 +----------------+
 ```
@@ -28,11 +30,11 @@ ESP32-C3 に I2C 接続した LCD1602A に文字を表示する最初のサン�
 
 | 部品 | 数 | 備考 |
 |---|---|---|
-| ESP32-C3 開発ボード | 1 | ESP32-C3 SuperMini、XIAO ESP32C3、ESP32-C3-DevKitM-1 など |
+| ESP32-S3 開発ボード | 1 | ESP32-S3-DevKitC-1、ESP32-S3 SuperMini、XIAO ESP32S3 など |
 | LCD1602A + I2C バックパック（PCF8574） | 1 | LCD の裏に I2C 変換基板がはんだ付けされたもの。4ピン（GND/VCC/SDA/SCL） |
 | I2C 用双方向レベル変換モジュール | 1 | 推奨。BSS138 を使った 4ch 品など（理由は後述） |
 | ブレッドボード、ジャンパワイヤ | 適量 | |
-| USB ケーブル | 1 | ボードに合ったもの（micro-B / Type-C）。**データ通信対応のもの** |
+| USB ケーブル | 1 | ボードに合ったもの（Type-C が多い）。**データ通信対応のもの** |
 
 > I2C バックパックが付いていない LCD1602A（16ピンのみ）の場合は、PCF8574 バックパックを別途購入して LCD にはんだ付けすると配線が4本で済む。
 
@@ -41,57 +43,59 @@ ESP32-C3 に I2C 接続した LCD1602A に文字を表示する最初のサン�
 ### 2.1 電圧についての注意
 
 - LCD1602A は **5V 駆動**。3.3V では文字がほぼ見えないことが多い。
-- ESP32-C3 の GPIO は **3.3V**。5V 耐性は公式には保証されていない。
-- PCF8574 バックパックには SDA/SCL を VCC（5V）へ引き上げるプルアップ抵抗が載っていることが多く、そのまま ESP32-C3 につなぐと GPIO に 5V がかかる。
+- ESP32-S3 の GPIO は **3.3V**。5V 耐性はない。
+- PCF8574 バックパックには SDA/SCL を VCC（5V）へ引き上げるプルアップ抵抗が載っていることが多く、そのまま ESP32-S3 につなぐと GPIO に 5V がかかる。
 
 そのため、**レベル変換モジュールを挟む**構成を推奨する。
 
 ### 2.2 推奨配線（レベル変換あり）
 
 ```
-   ESP32-C3           レベル変換              LCD1602A (PCF8574)
+   ESP32-S3           レベル変換              LCD1602A (PCF8574)
                    ┌─────────────┐
    3V3 ────────────┤LV         HV├──┬───────── VCC
    5V ─────────────┼─────────────┼──┘
    GND ────────────┤GND       GND├──────────── GND
-   GPIO6 (SDA) ────┤LV1       HV1├──────────── SDA
-   GPIO7 (SCL) ────┤LV2       HV2├──────────── SCL
+   GPIO8 (SDA) ────┤LV1       HV1├──────────── SDA
+   GPIO9 (SCL) ────┤LV2       HV2├──────────── SCL
                    └─────────────┘
 ```
 
-| ESP32-C3 | レベル変換 LV 側 | レベル変換 HV 側 | LCD バックパック |
+| ESP32-S3 | レベル変換 LV 側 | レベル変換 HV 側 | LCD バックパック |
 |---|---|---|---|
 | 3V3 | LV | | |
 | 5V | | HV | VCC |
 | GND | GND | GND | GND |
-| GPIO6 | LV1 | HV1 | SDA |
-| GPIO7 | LV2 | HV2 | SCL |
+| GPIO8 | LV1 | HV1 | SDA |
+| GPIO9 | LV2 | HV2 | SCL |
 
 ボード別のピン表記:
 
-| ボード | SDA (GPIO6) | SCL (GPIO7) | 5V |
+| ボード | SDA | SCL | 5V |
 |---|---|---|---|
-| ESP32-C3 SuperMini | `6` | `7` | `5V` |
-| XIAO ESP32C3 | `D4` | `D5` | `5V` |
-| ESP32-C3-DevKitM-1 | `IO6` | `IO7` | `5V` |
+| ESP32-S3-DevKitC-1 | `IO8` | `IO9` | `5V` |
+| ESP32-S3 SuperMini | `8` | `9` | `5V` |
+| XIAO ESP32S3 | `D4`（GPIO5） | `D5`（GPIO6） | `5V` |
 
+- GPIO8 / GPIO9 は Arduino core が ESP32-S3 の既定 I2C ピンとして定義している組み合わせ。
+- **XIAO ESP32S3 だけ既定が異なる**（SDA=GPIO5 / SCL=GPIO6）。スケッチ冒頭の `PIN_SDA` / `PIN_SCL` を `5` / `6` に変更すること。XIAO の `D8`〜`D10` は GPIO7/8/9 とずれているので、GPIO 番号で合わせるのが安全。
+- 避けるピン: GPIO0・GPIO3・GPIO45・GPIO46（ストラッピングピン）、GPIO19・GPIO20（USB D-/D+）、GPIO26〜GPIO32（内蔵フラッシュ用）。PSRAM 付きモジュール（N16R8 など）では GPIO33〜GPIO37 も使えない。
 - `5V` ピンは USB 給電時に 5V が出ている。
-- GPIO8・GPIO9 は起動モードを決めるストラッピングピン（GPIO9 は BOOT ボタン）なので、I2C には使わず GPIO6/7 にしている。
 - GND は必ず全部共通にする。
 
 ### 2.3 簡易配線（レベル変換なし）
 
 手元にレベル変換がなく、とりあえず動作確認したい場合。
 
-| ESP32-C3 | LCD バックパック |
+| ESP32-S3 | LCD バックパック |
 |---|---|
 | 5V | VCC |
 | GND | GND |
-| GPIO6 | SDA |
-| GPIO7 | SCL |
+| GPIO8 | SDA |
+| GPIO9 | SCL |
 
-この構成で動く例は多いが、ESP32-C3 の GPIO に 5V のプルアップがかかるため**定格外**。長時間使う・本番に組み込む場合はレベル変換を入れること。
-（バックパック上のプルアップ抵抗を外し、ESP32-C3 側で 3.3V に 4.7kΩ でプルアップする方法もある。）
+この構成で動く例は多いが、ESP32-S3 の GPIO に 5V のプルアップがかかるため**定格外**。長時間使う・本番に組み込む場合はレベル変換を入れること。
+（バックパック上のプルアップ抵抗を外し、ESP32-S3 側で 3.3V に 4.7kΩ でプルアップする方法もある。）
 
 ### 2.4 コントラスト調整
 
@@ -109,10 +113,10 @@ ESP32-C3 に I2C 接続した LCD1602A に文字を表示する最初のサン�
      ```
      https://espressif.github.io/arduino-esp32/package_esp32_index.json
      ```
-   - `ツール` → `ボード` → `ボードマネージャ` で **esp32 by Espressif Systems** をインストール
+   - `ツール` → `ボード` → `ボードマネージャ` で **esp32 by Espressif Systems**（3.x）をインストール
 3. ライブラリを追加
    - `ツール` → `ライブラリを管理` で **LiquidCrystal I2C**（作者: Frank de Brabander）をインストール
-   - 「AVR 用」と警告が出ることがあるが ESP32-C3 でも動作する
+   - 「AVR 用」と警告が出ることがあるが ESP32-S3 でも動作する
 4. Linux の場合、シリアルポートの権限を付与（初回のみ、実行後に再ログイン）
    ```bash
    sudo usermod -aG dialout $USER
@@ -122,14 +126,19 @@ ESP32-C3 に I2C 接続した LCD1602A に文字を表示する最初のサン�
 
 1. `lcd1602_hello/lcd1602_hello.ino` を Arduino IDE で開く
 2. `ツール` → `ボード` → `esp32` → ボードを選択
-   - SuperMini / DevKitM-1: **ESP32C3 Dev Module**
-   - XIAO: **XIAO_ESP32C3**
+   - DevKitC-1 / SuperMini: **ESP32S3 Dev Module**
+   - XIAO: **XIAO_ESP32S3**
 3. `ツール` → **USB CDC On Boot** → **Enabled**
-   - SuperMini や XIAO は USB が ESP32-C3 に直結されているため、これを有効にしないとシリアルモニタに何も出ない
-   - DevKitM-1（USB-シリアル変換チップ付き）は Disabled のままでよい
-4. `ツール` → `ポート` で選択（USB 直結ボードは `/dev/ttyACM0`、変換チップ付きは `/dev/ttyUSB0`）
-5. `→`（書き込み）ボタンを押す
+   - SuperMini や XIAO、DevKitC-1 の `USB` 側ポートは USB が ESP32-S3 に直結されているため、これを有効にしないとシリアルモニタに何も出ない
+   - DevKitC-1 の `UART` 側ポート（USB-シリアル変換チップ経由）を使う場合は Disabled のままでよい
+4. `ESP32S3 Dev Module` を選んだ場合、モジュールに合わせて以下も設定する
+   - `Flash Size`: 実装容量（N16R8 なら 16MB）
+   - `PSRAM`: PSRAM なしなら **Disabled**、N8R2/N16R8 などは **OPI PSRAM**
+   - 設定が合っていないと起動時にブートループすることがある
+5. `ツール` → `ポート` で選択（USB 直結は `/dev/ttyACM0`、変換チップ経由は `/dev/ttyUSB0`）
+6. `→`（書き込み）ボタンを押す
    - ポートが出てこない・書き込みが始まらない場合は、**BOOT ボタンを押したまま RESET（または USB を挿し直し）→ BOOT を離す** でダウンロードモードに入れる
+   - 書き込み後、USB 直結ボードは自動でリセットされないことがある。RESET ボタンを押す
 
 ### arduino-cli を使う場合
 
@@ -139,10 +148,16 @@ arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.
 arduino-cli lib install "LiquidCrystal I2C"
 
 cd ~/ssd/electronic/espoke
-FQBN="esp32:esp32:esp32c3:CDCOnBoot=cdc"   # XIAO は esp32:esp32:XIAO_ESP32C3:CDCOnBoot=cdc
+FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc"   # XIAO は esp32:esp32:XIAO_ESP32S3
 arduino-cli compile --fqbn "$FQBN" lcd1602_hello
 arduino-cli upload  --fqbn "$FQBN" -p /dev/ttyACM0 lcd1602_hello
 arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
+```
+
+PSRAM 付きモジュールを `esp32s3` FQBN で使う場合はオプションを足す:
+
+```bash
+FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi,FlashSize=16M"
 ```
 
 ## 5. 動かし方
@@ -155,7 +170,7 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
    LCD address: 0x27
    Type text and press Enter to show it on the LCD.
    ```
-3. LCD の1行目に `Hello, ESP32!`、2行目に経過秒数が表示される
+3. LCD の1行目に `Hello, ESP32-S3!`、2行目に経過秒数が表示される
 4. シリアルモニタに文字を入力して Enter → LCD の1行目がその文字列に変わる（16文字まで、英数字・記号のみ）
 
 ## 6. 設定の変更
@@ -164,8 +179,8 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 
 | 定数 | 既定値 | 内容 |
 |---|---|---|
-| `PIN_SDA` | 6 | I2C SDA ピン |
-| `PIN_SCL` | 7 | I2C SCL ピン |
+| `PIN_SDA` | 8 | I2C SDA ピン（XIAO ESP32S3 は 5） |
+| `PIN_SCL` | 9 | I2C SCL ピン（XIAO ESP32S3 は 6） |
 | `LCD_COLS` / `LCD_ROWS` | 16 / 2 | LCD の桁数・行数（2004 なら 20 / 4） |
 | `LCD_ADDR_DEFAULT` | 0x27 | スキャンで見つからなかったときに使うアドレス |
 
@@ -180,6 +195,7 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 | 上段に黒い四角が並ぶだけ | I2C 通信できていない。SDA/SCL の入れ違い、GND 共通化を確認 |
 | シリアルに `no device found` | SDA/SCL 配線、レベル変換の LV/HV の電源を確認 |
 | 文字化けする | 配線の接触不良。ジャンパワイヤを短くする・挿し直す |
-| ポートが出てこない | 充電専用の USB ケーブルになっていないか確認。BOOT ボタンを押しながら挿し直す |
+| ポートが出てこない | 充電専用の USB ケーブルになっていないか確認。DevKitC-1 なら挿すポート（UART / USB）が合っているか確認。BOOT ボタンを押しながら挿し直す |
 | シリアルモニタに何も出ない | `USB CDC On Boot` を Enabled にして書き込み直す |
+| 起動を繰り返す（ブートループ） | `PSRAM` / `Flash Size` の設定がモジュールと合っていない |
 | 日本語が表示できない | LCD1602A は英数字とカタカナ（独自コード）のみ。漢字・ひらがなは不可 |

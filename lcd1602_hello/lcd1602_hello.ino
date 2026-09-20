@@ -1,7 +1,7 @@
 /*
  * LCD1602A (I2Cバックパック PCF8574 付き) に文字を表示する
  *
- * 対応ボード: ESP32-C3 (ESP32-C3 SuperMini / XIAO ESP32C3 / ESP32-C3-DevKitM-1 など)
+ * 対応ボード: ESP32-S3 (ESP32-S3-DevKitC-1 / ESP32-S3 SuperMini / XIAO ESP32S3 など)
  * ライブラリ: LiquidCrystal I2C (Frank de Brabander)
  *
  * 動作:
@@ -14,15 +14,15 @@
 #include <LiquidCrystal_I2C.h>
 
 // --- 設定 ---
-const int     PIN_SDA   = 6;   // XIAO ESP32C3 では D4
-const int     PIN_SCL   = 7;   // XIAO ESP32C3 では D5
+const int     PIN_SDA   = 8;   // XIAO ESP32S3 では 5 (D4)
+const int     PIN_SCL   = 9;   // XIAO ESP32S3 では 6 (D5)
 const uint8_t LCD_COLS  = 16;
 const uint8_t LCD_ROWS  = 2;
 const uint8_t LCD_ADDR_DEFAULT = 0x27;  // スキャンで見つからなかった場合に使う
 // ------------
 
 LiquidCrystal_I2C *lcd = nullptr;
-String line1 = "Hello, ESP32!";
+String line1 = "Hello, ESP32-S3!";
 unsigned long lastUpdate = 0;
 
 // I2C バスをスキャンし、最初に応答したアドレスを返す (見つからなければ 0)
