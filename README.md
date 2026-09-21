@@ -287,12 +287,105 @@ volume: 62%
 |---|---|---|
 | `LOCAL_NAME` | `espoke` | イヤホン側に表示される名前 |
 | `TARGET_NAME` | `""` | 接続先の名前（前方一致）。空なら最初に見つかった機器 |
+| `TARGET_ADDR` | MACアドレス | **空でなければスキャンせず直接接続する**（推奨） |
 | `SCAN_SECONDS` | 8 | スキャン時間 |
 | `TONE_HZ` | 880 | 通知音の高さ |
 | `TONE_LEVEL` | 6000 | 振幅（16bit なので最大 32767） |
 
-> **イヤホンは必ずペアリングモードにしてから**スキャンさせること。
-> 既にスマホなどと接続済みだと、そもそもスキャン結果に出てこない。
+`TARGET_ADDR` を設定すると 8 秒のインクワイアリを飛ばせる。相手がペアリングモードにいる
+時間は数分しかないので、アドレスが分かっているなら直接繋いだほうが確実に間に合う。
+アドレスは一度スキャンすれば分かる。
+
+```
+  [0] OpenRun by Shokz         a0:0c:e2:c6:1d:04  rssi=-52
+```
+
+## 6.1 ペアリングの仕組みとハマりどころ
+
+**ここが一番つまずく。** 実機で4つの問題を踏んだので、順に記録しておく。
+
+### `gap_ssp_set_auto_accept(true)` が必須
+
+**これを呼ばないと、入力装置を持たない機器同士では永久に接続できない。**
+
+イヤホンも Pico も画面もキーパッドも持たないので、SSP（Secure Simple Pairing）は
+**Just Works** になる。このとき BTstack は `HCI_EVENT_USER_CONFIRMATION_REQUEST` を
+アプリに投げるが、**自分では応答しない**（`hci.c` の `ssp_auto_accept` の既定値が 0）。
+arduino-pico の `BluetoothAudio` ライブラリもこのイベントを処理していないため、
+誰も確認応答を返さないまま止まる。
+
+```cpp
+a2dp.begin();
+{
+  BluetoothLock b;               // BTstack API を叩く前にロックを取る
+  gap_ssp_set_auto_accept(true);
+}
+```
+
+症状は「接続要求は通るが、そのまま無反応」。デバッグ出力を有効にすると、
+User Confirmation Request（HCI イベント `0x33`）の直後で止まっているのが見える。
+
+```
+EVT <= 2B 04 ... 03 00 04     IO Capability Request Reply (NoInputNoOutput)
+EVT <= 32 09 ... 03 00 04     相手も NoInputNoOutput → Just Works
+EVT <= 33 0A ... 30 85 06 00  User Confirmation Request ← 誰も応答しない
+```
+
+### `connect()` の戻り値は接続成立を意味しない
+
+`A2DPSource::connect()` が返すのは「接続要求が受理されたか」だけ。実際の接続は
+**AVDTP シグナリング → SBC コーデック交渉 → ストリーム開始**と非同期に進み、
+そこまで到達して初めて `connected()` が `true` になる。戻り値だけで判定すると、
+成功しているのに失敗と誤判定する。
+
+```cpp
+if (!a2dp.connect(addr)) { /* 要求そのものが弾かれた */ }
+unsigned long start = millis();
+while (!a2dp.connected() && millis() - start < 15000) delay(50);
+```
+
+### `clearPairing()` を毎回呼んではいけない
+
+`clearPairing()` は `gap_delete_all_link_keys()` を呼ぶ。毎回の接続前に呼ぶと
+保存済みのリンクキーが消え、**ペアリング済みの機器にも再接続できなくなる**。
+明示的にペアリングをやり直したいときだけ呼ぶこと。
+
+### ファームウェアを書き込むとリンクキーは失われる
+
+リンクキーはフラッシュ上の TLV バンクに保存されるが（`btstack_link_key_db_tlv`）、
+実機で確認したところ**スケッチを書き込み直すと消える**。書き込みのたびに
+イヤホンをペアリングモードに入れ直す必要がある。
+
+## 6.2 接続できないときの調べ方
+
+Bluetooth のデバッグ出力を有効にしてビルドすると、HCI レベルのやり取りが全部出る。
+
+```bash
+FQBN="rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble,dbgport=Serial,dbglvl=Bluetooth"
+```
+
+`A2DP Source: Connection failed, status 0xNN` のコードで原因が切り分けられる。
+
+| status | 意味 | 原因 |
+|---|---|---|
+| `0x04` | Page Timeout | 相手が応答しない。**電源オフ・スリープ・他機器に接続中**。範囲外 |
+| `0x18` | Pairing Not Allowed | **ペアリングモードに入っていない**。新規の鍵交換を拒否された |
+| `0x66` | L2CAP 接続失敗 | 上記の結果として AVDTP のチャンネルが開けなかった（二次的な症状） |
+
+成功時はこう出る。
+
+```
+pairing complete, status 00
+A2DP Source: Received SBC codec configuration, sampling frequency 44100
+A2DP Source: Stream established a2dp_cid 0x08
+A2DP Source: Stream started, a2dp_cid 0x08
+A2DP connected: A0:0C:E2:C6:1D:04
+volume: 80%
+```
+
+> **イヤホンは必ずペアリングモードにしてから**接続させること。
+> 既にスマホなどと接続済みだと `0x04` か `0x18` で撥ねられる。
+> スマホ側の Bluetooth を切ってから試すのが確実。
 
 ## 7. espoke — Wi-Fi で取得した音声をイヤホンで鳴らす
 
@@ -335,6 +428,14 @@ $EDITOR espoke/arduino_secrets.h
 22050Hz モノラルなら 44.1KB/s なので、Wi-Fi と Bluetooth を同時に使っても余裕がある。
 44100Hz ステレオ（176KB/s）は帯域が厳しく、`warning: audio underflow` が出やすい。
 
+実機での動作ログ。
+
+```
+wifi=1 ip=192.168.40.104 bt=1
+playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
+[done] 34KB played
+```
+
 ### 7.3 シリアルコマンド
 
 | コマンド | 動作 |
@@ -352,6 +453,9 @@ BOOTSEL ボタンでも `play` と同じことができる。
 |---|---|---|
 | `BT_LOCAL_NAME` | `espoke` | イヤホン側に表示される名前 |
 | `BT_TARGET_NAME` | `""` | 接続先の名前（前方一致）。空なら最初の1台 |
+| `BT_TARGET_ADDR` | MACアドレス | 空でなければスキャンせず直接繋ぐ（6章参照） |
+| `WIFI_TIMEOUT_MS` | 30000 | Wi-Fi 接続を待つ上限 |
+| `WIFI_RETRY_MS` | 30000 | Wi-Fi が切れているとき再接続を試みる間隔 |
 | `A2DP_RATE` | 44100 | A2DP の送出レート。44100 か 48000 |
 | `A2DP_BUFFER` | 32768 | 約185ms 分。通信のゆらぎを吸収する |
 
@@ -387,8 +491,15 @@ ffmpeg -i source.mp3 -ac 1 -ar 22050 -sample_fmt s16 tools/audio/voice.wav
 | `BluetoothAudio.h: No such file` / `_needsbt.h` のエラー | FQBN に `ipbtstack=ipv4btcble` が入っていない |
 | `'WavInfo' has not been declared` | `.ino` はビルド時に関数プロトタイプが先頭へ自動生成される。引数に使う構造体は**ファイル冒頭**で定義する |
 | スキャンに何も出ない | イヤホンがペアリングモードになっていない。既に他機器と接続済みだと出てこない。スマホ側の接続を切る |
+| **接続要求は通るが無反応のまま固まる** | **`gap_ssp_set_auto_accept(true)` を呼んでいない。**6.1 参照。これが最頻出 |
+| `Connection failed, status 0x04` | Page Timeout。イヤホンの電源が入っていない、スリープ、他機器に接続中 |
+| `Connection failed, status 0x18` | Pairing Not Allowed。ペアリングモードに入っていない |
+| 書き込み直したら繋がらなくなった | リンクキーは書き込みで消える。ペアリングモードに入れ直す |
+| `connect()` が false を返すが実は繋がっている | 戻り値は要求の受理可否のみ。`connected()` を待つ（6.1 参照） |
+| 一度失敗すると以降ずっと `rejected` | 中途半端なシグナリング接続が残り `a2dp_cid` が埋まっている。再起動で解消 |
 | 接続はするが音が出ない | イヤホン側の音量。`volume:` のログが出ていれば A2DP は繋がっている |
 | `warning: audio underflow` | Wi-Fi が追いついていない。素材を 22050Hz モノラルに落とすか、`A2DP_BUFFER` を増やす |
+| Wi-Fi に繋がらないことがある | 起動時の1回だけでは不安定。`WIFI_RETRY_MS` ごとに `loop()` から張り直している |
 | 音がブツブツ切れる | 同上。Wi-Fi と Bluetooth が CYW43439 を共有しているため。ルータとの距離も効く |
 | `http error 404` など | `AUDIO_URL` の IP が PC の LAN IP になっているか確認。`tools/serve_audio.py` が表示する URL を使う |
 | `unsupported: 48000Hz 2ch 16bit` | 7.2 のフォーマット制約。`ffmpeg -ar 22050 -ac 1` で変換する |

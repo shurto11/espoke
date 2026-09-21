@@ -317,6 +317,10 @@ static void playUrl(const String &url) {
   uint32_t played    = 0;
   unsigned long lastLcd = 0;
 
+  // A2DP ストリームは接続直後から流れ続けているので、play を打つまでの無音区間でも
+  // underflow フラグが立つ。再生直前に一度読み捨てて、以降の取りこぼしだけを見る
+  a2dp.getUnderflow();
+
   while (a2dp.connected()) {
     if ((size_t)a2dp.availableForWrite() < outBytesMax) {
       delay(1);
