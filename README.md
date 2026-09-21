@@ -40,6 +40,7 @@ ESP32-S3-WROOM-1 の型番は `N<フラッシュ容量>R<PSRAM容量>` で、**N
 
 ここが後の Arduino IDE 設定（`Flash Size` = 8MB、`PSRAM` = OPI PSRAM）に直結する。
 **N8R2 や N16R8 と設定を間違えるとブートループする**ので、モジュール表面のシルク印刷で型番を確認しておくこと。
+シルクが読めない場合は [esptool で実機から読める](#書き込み前にモジュールを実機で確認する)。
 
 このモジュールを載せた開発ボードとしては **ESP32-S3-DevKitC-1（N8R8 版）** が代表的で、本書はそれを前提に書いている。
 素の WROOM-1 モジュール単体で使う場合は、別途 USB-シリアル変換・自動リセット回路・3.3V 電源が必要。
@@ -144,17 +145,27 @@ ESP32-S3-WROOM-1 の型番は `N<フラッシュ容量>R<PSRAM容量>` で、**N
 
    | 項目 | N8R8 での設定 |
    |---|---|
-   | `USB CDC On Boot` | **Enabled** |
+   | `USB CDC On Boot` | **挿したポートによる**（下記 4. を参照） |
    | `Flash Size` | **8MB (64Mb)** |
    | `Flash Mode` | `QIO 80MHz`（Flash は Quad） |
    | `PSRAM` | **OPI PSRAM** |
    | `Partition Scheme` | `8M with spiffs (3MB APP/1.5MB SPIFFS)` |
    | `Upload Speed` | 921600（不安定なら 115200） |
 
-   - `USB CDC On Boot` は、DevKitC-1 の `USB` 側ポート（ESP32-S3 直結）を使う場合に必須。これが Disabled だとシリアルモニタに何も出ない。`UART` 側ポート（USB-シリアル変換チップ経由）なら Disabled のままでよい。
    - `Flash Size` と `PSRAM` が実物と合っていないと**起動時にブートループする**。N8R8 で `PSRAM` を `QSPI PSRAM` にするのも誤り（N8R8 は Octal）。
-4. `ツール` → `ポート` で選択（USB 直結は `/dev/ttyACM0`、変換チップ経由は `/dev/ttyUSB0`）
-5. `→`（書き込み）ボタンを押す
+4. **挿したポートに合わせて `USB CDC On Boot` を決める**
+
+   DevKitC-1 系のボードには USB-C ポートが2つある。`Serial` の出力先がこの設定で切り替わるので、**挿したポートと一致していないとシリアルモニタに何も出ない**。
+
+   | 挿したポート | デバイス | `USB CDC On Boot` | `Serial` の行き先 |
+   |---|---|---|---|
+   | `UART` 側（USB-シリアル変換チップ経由） | CH343 なら `/dev/ttyACM0`、CH340・CP2102 なら `/dev/ttyUSB0` | **Disabled**（既定） | UART0 → 変換チップ → PC |
+   | `USB` 側（ESP32-S3 直結） | `/dev/ttyACM0` | **Enabled** | native USB CDC → PC |
+
+   - デバイス名は変換チップの種類で変わる。**CH343（`1a86:55d3`）は CDC-ACM クラスなので `/dev/ttyACM0`** になり、`ttyUSB0` にはならない。どちらか分からなければ `ls /dev/ttyACM* /dev/ttyUSB*` と `lsusb` で確認する。
+   - `USB` 側は、書き込み済みファームが USB CDC を有効にしている場合しか列挙されない。未書き込みのボードで何も出ないのは正常なので、**最初は `UART` 側から試すほうが確実**。
+5. `ツール` → `ポート` で 4. のデバイスを選択
+6. `→`（書き込み）ボタンを押す
    - ポートが出てこない・書き込みが始まらない場合は、**BOOT ボタンを押したまま RESET（または USB を挿し直し）→ BOOT を離す** でダウンロードモードに入れる
    - 書き込み後、USB 直結ポートでは自動リセットされないことがある。RESET ボタンを押す
 
@@ -166,12 +177,21 @@ arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.
 arduino-cli lib install "LiquidCrystal I2C"
 
 cd ~/ssd/electronic/espoke
-# ESP32-S3-WROOM-1 N8R8 向けの FQBN
-FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,FlashMode=qio,PSRAM=opi,PartitionScheme=default_8MB"
+
+# ESP32-S3-WROOM-1 N8R8 / UART 側ポート（USB-シリアル変換チップ経由）
+FQBN="esp32:esp32:esp32s3:FlashSize=8M,FlashMode=qio,PSRAM=opi,PartitionScheme=default_8MB"
+
+# native USB 側ポートに挿した場合はこちら（CDCOnBoot=cdc を足す）
+# FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,FlashMode=qio,PSRAM=opi,PartitionScheme=default_8MB"
+
+arduino-cli board list          # ポートの確認
 arduino-cli compile --fqbn "$FQBN" lcd1602_hello
 arduino-cli upload  --fqbn "$FQBN" -p /dev/ttyACM0 lcd1602_hello
 arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 ```
+
+`CDCOnBoot` を省略すると Disabled（`Serial` = UART0）になる。**UART 側ポートに挿しているなら省略が正しい。**
+`CDCOnBoot=cdc` を付けると `Serial` が native USB に回るため、UART 側ポートのシリアルモニタには何も出なくなる。
 
 指定できるオプション名は次で確認できる。
 
@@ -179,18 +199,59 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 arduino-cli board details --fqbn esp32:esp32:esp32s3
 ```
 
+### 書き込み前にモジュールを実機で確認する
+
+型番のシルクが読めない場合や、ブートループを起こしている場合は、esptool で実物の構成を読める。
+
+```bash
+ESPTOOL=~/.arduino15/packages/esp32/tools/esptool_py/*/esptool
+$ESPTOOL --chip esp32s3 --port /dev/ttyACM0 --baud 115200 --after hard-reset flash-id
+```
+
+N8R8 なら次のように出る。ここが一致していれば上の FQBN で問題ない。
+
+```
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)
+Detected flash size: 8MB
+Flash type set in eFuse: quad (4 data lines)
+```
+
+- `Embedded PSRAM 8MB` … `PSRAM=opi`（OPI PSRAM）で正しい
+- `Detected flash size: 8MB` … `FlashSize=8M` で正しい
+- `Flash type ... quad` … `FlashMode=qio` で正しい（`opi` にしてはいけない）
+
+### Linux でのポート権限
+
+`/dev/ttyACM0` は `root:dialout` 所有のため、`dialout` グループに入っていないと書き込めない。
+
+```bash
+sudo usermod -aG dialout $USER   # 恒久対応。反映には再ログインが必要
+sudo chmod a+rw /dev/ttyACM0     # 今すぐ書き込みたいとき（挿し直すと戻る）
+```
+
 ## 5. 動かし方
 
 1. 書き込み後、シリアルモニタを **115200 bps**、改行コード「LF」または「CR+LF」で開く
-2. 起動時に I2C スキャン結果が表示される
+2. **RESET ボタンを押す**。I2C スキャンは `setup()` でしか走らないため、書き込み直後の起動を逃すとログが見られない
+3. 起動ログで I2C スキャン結果を確認する
    ```
+   rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
+   ...
+   entry 0x403c88b8
    I2C scan...
      found: 0x27
    LCD address: 0x27
    Type text and press Enter to show it on the LCD.
    ```
-3. LCD の1行目に `Hello, ESP32-S3!`、2行目に経過秒数が表示される
-4. シリアルモニタに文字を入力して Enter → LCD の1行目がその文字列に変わる（16文字まで、英数字・記号のみ）
+   - `found: 0x27` … LCD が見えている。配線OK
+   - `no device found` … **LCD が繋がっていない**。スケッチは既定の `0x27` にフォールバックして動き続けるので、シリアルは正常に見えるが LCD には何も出ない。配線を確認すること
+4. LCD の1行目に `Hello, ESP32-S3!`、2行目に経過秒数が表示される
+5. シリアルモニタに文字を入力して Enter → LCD の1行目がその文字列に変わる（16文字まで、英数字・記号のみ）
+   ```
+   LCD <- "ESPOKE TEST"
+   ```
+   この応答が返れば、LCD が未接続でもファームウェア自体は正常に動作している
 
 ## 6. 設定の変更
 
@@ -214,8 +275,10 @@ arduino-cli board details --fqbn esp32:esp32:esp32s3
 | 上段に黒い四角が並ぶだけ | I2C 通信できていない。SDA/SCL の入れ違い、GND 共通化を確認 |
 | シリアルに `no device found` | SDA/SCL 配線、レベル変換の LV/HV の電源を確認 |
 | 文字化けする | 配線の接触不良。ジャンパワイヤを短くする・挿し直す |
-| ポートが出てこない | 充電専用の USB ケーブルになっていないか確認。DevKitC-1 なら挿すポート（UART / USB）が合っているか確認。BOOT ボタンを押しながら挿し直す |
-| シリアルモニタに何も出ない | `USB CDC On Boot` を Enabled にして書き込み直す |
+| ポートが出てこない | 充電専用の USB ケーブルになっていないか確認。USBハブ経由をやめてPC本体に直挿し。DevKitC-1 なら挿すポート（UART / USB）を替える。BOOT ボタンを押しながら挿し直す。`lsusb` に何も増えないならデバイスとして列挙されていない |
+| `Permission denied` で書き込めない | `dialout` グループに入っていない。`sudo usermod -aG dialout $USER` して再ログイン（応急処置は `sudo chmod a+rw /dev/ttyACM0`） |
+| シリアルモニタに何も出ない | `USB CDC On Boot` と挿したポートが食い違っている（4.の表を参照）。UART 側なら **Disabled**、native USB 側なら **Enabled** |
+| 起動ログだけ出ず入力の応答はある | 正常。I2C スキャンは `setup()` のみで実行される。RESET ボタンを押し直す |
 | 起動を繰り返す（ブートループ） | **N8R8 の設定ミスが最有力**。`Flash Size` = 8MB、`PSRAM` = OPI PSRAM、`Flash Mode` = QIO を確認 |
 | `Sketch too big` | `Partition Scheme` が 4MB 用のままになっている。`8M with spiffs` に変更 |
 | PSRAM が認識されない（`ESP.getPsramSize()` が 0） | `PSRAM` が `Disabled` か `QSPI PSRAM` になっている。**OPI PSRAM** にする |
