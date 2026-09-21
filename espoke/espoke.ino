@@ -29,6 +29,7 @@
 // --- 設定 ---
 static const char *BT_LOCAL_NAME  = "espoke";  // イヤホン側に見える名前
 static const char *BT_TARGET_NAME = "";        // 接続先の名前 (前方一致)。空なら最初の1台
+static const char *BT_TARGET_ADDR = "a0:0c:e2:c6:1d:04";  // 空でなければスキャンせず直接繋ぐ
 static const int    SCAN_SECONDS  = 8;
 static const int    A2DP_RATE     = 44100;     // A2DPSource は 44100 か 48000 のみ
 static const size_t A2DP_BUFFER   = 32768;     // 約185ms 分。通信のゆらぎを吸収する
@@ -57,7 +58,11 @@ static int16_t inBuf[IN_FRAMES * 2];       // 最大ステレオ
 static int16_t outBuf[IN_FRAMES * 4 * 2];  // 最大4倍アップサンプル × ステレオ
 
 static unsigned long lastScan = 0;
-static const unsigned long RETRY_MS = 15000;
+static const unsigned long RETRY_MS = 15000;           // 未接続時に再試行する間隔
+static const unsigned long CONNECT_TIMEOUT_MS = 15000; // ストリーム開始を待つ上限
+static const unsigned long WIFI_TIMEOUT_MS = 30000;    // Wi-Fi 接続を待つ上限
+static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi 再接続を試みる間隔
+static unsigned long lastWiFiTry = 0;
 
 // ---------------- LCD ----------------
 
@@ -107,7 +112,55 @@ static void onConnect(void *, bool connected) {
   }
 }
 
+// "aa:bb:cc:dd:ee:ff" を 6バイトに変換する
+static bool parseAddr(const char *str, uint8_t *out) {
+  unsigned v[6];
+  if (sscanf(str, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; i++) out[i] = (uint8_t)v[i];
+  return true;
+}
+
+// 接続要求を出し、ストリーム開始まで待つ
+static bool connectTo(const uint8_t *addr, const char *label) {
+  status("BT connecting", label);
+  if (!a2dp.connect(addr)) {
+    status("BT rejected", label);
+    return false;
+  }
+
+  // connect() の戻り値は「要求が受理されたか」だけ。ここから先は非同期で
+  // AVDTP シグナリング → SBC ネゴシエーション → ストリーム開始 と進み、
+  // そこまで到達して初めて connected() が true になる
+  unsigned long start = millis();
+  while (!a2dp.connected() && millis() - start < CONNECT_TIMEOUT_MS) {
+    delay(50);
+  }
+  if (!a2dp.connected()) {
+    status("BT timeout", label);
+    return false;
+  }
+  status("BT ready", label);
+  return true;
+}
+
+static bool scanAndConnect();
+
 static bool findAndConnect() {
+  // アドレスが分かっているならスキャンを飛ばす。8秒のインクワイアリを挟まない分、
+  // 相手が応答できる状態のうちに繋ぎにいける
+  if (BT_TARGET_ADDR[0] != '\0') {
+    uint8_t addr[6];
+    if (parseAddr(BT_TARGET_ADDR, addr)) {
+      return connectTo(addr, BT_TARGET_ADDR);
+    }
+    Serial.printf("BT_TARGET_ADDR \"%s\" を解釈できない\n", BT_TARGET_ADDR);
+  }
+  return scanAndConnect();
+}
+
+static bool scanAndConnect() {
   status("BT scanning", String(SCAN_SECONDS) + "s ...");
   auto found = a2dp.scan(BluetoothHCI::speaker_cod, SCAN_SECONDS);
 
@@ -130,13 +183,7 @@ static bool findAndConnect() {
     return false;
   }
 
-  status("BT connecting", found[pick].name());
-  if (!a2dp.connect(found[pick].address())) {
-    status("BT failed", found[pick].name());
-    return false;
-  }
-  status("BT ready", found[pick].name());
-  return true;
+  return connectTo(found[pick].address(), found[pick].name());
 }
 
 // ---------------- WAV ----------------
@@ -325,18 +372,19 @@ static void playUrl(const String &url) {
 
 // ---------------- setup / loop ----------------
 
-static void connectWiFi() {
+static bool connectWiFi() {
   status("WiFi", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
     delay(250);
   }
   if (WiFi.status() == WL_CONNECTED) {
     status("WiFi ok", WiFi.localIP().toString());
-  } else {
-    status("WiFi failed", WIFI_SSID);
+    return true;
   }
+  status("WiFi failed", WIFI_SSID);
+  return false;
 }
 
 void setup() {
@@ -348,12 +396,22 @@ void setup() {
   status("espoke", "booting...");
 
   connectWiFi();
+  lastWiFiTry = millis();
 
   a2dp.setName(BT_LOCAL_NAME);
   a2dp.setFrequency(A2DP_RATE);
   a2dp.setBufferSize(A2DP_BUFFER);
   a2dp.onConnect(onConnect);
   a2dp.begin();
+
+  // BTstack は User Confirmation Request をアプリに投げるだけで、既定では自動応答
+  // しない (hci.c の ssp_auto_accept は 0)。イヤホンも Pico も入力装置を持たない
+  // NoInputNoOutput なので Just Works ペアリングになり、ここを自動承認しないと
+  // SSP が確認待ちのまま止まる
+  {
+    BluetoothLock b;
+    gap_ssp_set_auto_accept(true);
+  }
 
   findAndConnect();
   lastScan = millis();
@@ -362,6 +420,12 @@ void setup() {
 }
 
 void loop() {
+  // Wi-Fi は起動時に落ちることがあるので、切れていれば定期的に張り直す
+  if (WiFi.status() != WL_CONNECTED && millis() - lastWiFiTry >= WIFI_RETRY_MS) {
+    lastWiFiTry = millis();
+    connectWiFi();
+  }
+
   if (!a2dp.connected() && millis() - lastScan >= RETRY_MS) {
     lastScan = millis();
     findAndConnect();

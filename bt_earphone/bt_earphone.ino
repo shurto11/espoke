@@ -20,6 +20,7 @@
 // --- 設定 ---
 static const char *LOCAL_NAME   = "espoke";  // イヤホン側に見える名前
 static const char *TARGET_NAME  = "";        // 接続先の名前 (前方一致)。空なら最初の1台
+static const char *TARGET_ADDR  = "a0:0c:e2:c6:1d:04";  // 空でなければスキャンせず直接繋ぐ
 static const int   SCAN_SECONDS = 8;
 static const int   SAMPLE_RATE  = 44100;     // A2DPSource は 44100 か 48000 のみ
 static const int   TONE_HZ      = 880;       // 通知音の高さ
@@ -36,8 +37,13 @@ static uint32_t sampleNo  = 0;  // 通算サンプル数。鳴動パターンの
 static const size_t FRAMES = 64;
 static int16_t pcm[FRAMES * 2];  // インタリーブされた L,R
 
-static const unsigned long RETRY_MS = 15000;  // 未接続時に再スキャンする間隔
+static const unsigned long RETRY_MS = 8000;            // 未接続時に再試行する間隔
+static const int REJECT_LIMIT = 2;                    // 連続 rejected で再起動する回数
+static const unsigned long CONNECT_TIMEOUT_MS = 15000; // ストリーム開始を待つ上限
 static unsigned long lastScan = 0;
+static int rejectCount = 0;  // 連続 rejected 回数
+
+static bool scanAndConnect();
 
 // 鳴動パターン: 1.6秒を1周期として「ピッ(120ms) 休(80ms) ピッ(120ms) 休(1280ms)」
 static bool beepOn(uint32_t n) {
@@ -68,8 +74,68 @@ static void onVolume(void *, int pct) {
   Serial.printf("volume: %d%%\n", pct);
 }
 
+// "aa:bb:cc:dd:ee:ff" を 6バイトに変換する
+static bool parseAddr(const char *str, uint8_t *out) {
+  unsigned v[6];
+  if (sscanf(str, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; i++) out[i] = (uint8_t)v[i];
+  return true;
+}
+
+// 接続要求を出し、ストリーム開始まで待つ
+static bool connectTo(const uint8_t *addr, const char *label) {
+  Serial.printf("connecting to %s ...\n", label);
+  if (!a2dp.connect(addr)) {
+    // 前の接続が中途半端に残っていて a2dp_cid が埋まっている状態
+    Serial.println("  rejected (接続要求そのものが受理されなかった)");
+    rejectCount++;
+  } else {
+    // connect() の戻り値は「要求が受理されたか」だけ。ここから先は非同期で
+    // AVDTP シグナリング → SBC ネゴシエーション → ストリーム開始 と進み、
+    // そこまで到達して初めて connected() が true になる
+    unsigned long start = millis();
+    while (!a2dp.connected() && millis() - start < CONNECT_TIMEOUT_MS) {
+      delay(50);
+    }
+    if (a2dp.connected()) {
+      Serial.println("  ok");
+      rejectCount = 0;
+      return true;
+    }
+    // 相手が応答しない (電源オフ・他機器に接続中など) 場合はここに来る。
+    // dbglvl=Bluetooth でビルドすると HCI のステータスが出る (0x04 = Page Timeout)
+    Serial.println("  timeout (相手が応答しない。電源とペアリング状態を確認)");
+    rejectCount = 0;
+  }
+
+  // rejected が続くのは、中途半端に張られたシグナリング接続が残って a2dp_cid が
+  // 埋まっているとき。ライブラリ側からは解放できないので再起動で状態を捨てる。
+  // 単なる応答なし (timeout) では再起動しない — 何度やっても同じなので意味がない
+  if (rejectCount >= REJECT_LIMIT) {
+    Serial.println("  stuck, rebooting to reset the Bluetooth state");
+    delay(200);
+    rp2040.reboot();
+  }
+  return false;
+}
+
 // スキャンして接続する。成功したら true
 static bool findAndConnect() {
+  // アドレスが分かっているならスキャンを飛ばす。8秒のインクワイアリを挟まない分
+  // 相手がペアリングモードにいるうちに繋ぎにいける
+  if (TARGET_ADDR[0] != '\0') {
+    uint8_t addr[6];
+    if (parseAddr(TARGET_ADDR, addr)) {
+      return connectTo(addr, TARGET_ADDR);
+    }
+    Serial.printf("TARGET_ADDR \"%s\" を解釈できない\n", TARGET_ADDR);
+  }
+  return scanAndConnect();
+}
+
+static bool scanAndConnect() {
   Serial.printf("scanning for %d seconds...\n", SCAN_SECONDS);
   auto found = a2dp.scan(BluetoothHCI::speaker_cod, SCAN_SECONDS);
 
@@ -92,13 +158,7 @@ static bool findAndConnect() {
     return false;
   }
 
-  Serial.printf("connecting to [%d] %s ...\n", pick, found[pick].name());
-  if (!a2dp.connect(found[pick].address())) {
-    Serial.println("  failed");
-    return false;
-  }
-  Serial.println("  ok");
-  return true;
+  return connectTo(found[pick].address(), found[pick].name());
 }
 
 void setup() {
@@ -119,9 +179,18 @@ void setup() {
   a2dp.onVolume(onVolume);
   a2dp.begin();
 
+  // BTstack は User Confirmation Request をアプリに投げるだけで、既定では自動応答
+  // しない (hci.c の ssp_auto_accept は 0)。イヤホンも Pico も入力装置を持たない
+  // NoInputNoOutput なので Just Works ペアリングになり、ここを自動承認しないと
+  // SSP が確認待ちのまま止まる
+  {
+    BluetoothLock b;
+    gap_ssp_set_auto_accept(true);
+  }
+
   findAndConnect();
   lastScan = millis();
-  Serial.println("未接続なら15秒ごとに自動で再スキャンする (BOOTSEL でペアリング破棄 + 即再スキャン)");
+  Serial.println("未接続なら8秒ごとに自動で再試行する (BOOTSEL でペアリング破棄 + 即再試行)");
 }
 
 void loop() {
