@@ -1,59 +1,74 @@
 # espoke
 
-ESP32 で作るポケベル（pokebell）。電子工作の配線資料とファームウェアを置くリポジトリ。
+Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線資料とファームウェアを置くリポジトリ。
 
-現在のターゲットは **ESP32-S3-WROOM-1 N8R8**（8MB Flash / 8MB OPI PSRAM）。
+現在のターゲットは **Raspberry Pi Pico WH**（RP2040 / Wi-Fi・Bluetooth 付き / ピンヘッダ実装済み）。
+開発は **MicroPython + mpremote（CLI）** で行う。Arduino IDE は使わない。
 
 ## 構成
 
 | ディレクトリ | 内容 |
 |---|---|
-| `lcd1602_hello/` | ESP32-S3-WROOM-1 N8R8 + LCD1602A（I2C）の表示サンプル |
+| `lcd1602_hello/` | Raspberry Pi Pico WH + LCD1602A（I2C）の表示サンプル |
 
 ## lcd1602_hello — LCD1602A に文字を表示する
 
-ESP32-S3 に I2C 接続した LCD1602A に文字を表示する最初のサンプル。
+Pico WH に I2C 接続した LCD1602A に文字を表示する最初のサンプル。
 
-- 1行目: `Hello, ESP32-S3!`（シリアルモニタから送った文字列に置き換わる）
+- 1行目: `Hello, Pico WH!`（シリアル／REPL から送った文字列に置き換わる）
 - 2行目: 起動からの経過秒数
 
 ```
 +----------------+
-|Hello, ESP32-S3!|
+|Hello, Pico WH! |
 |uptime 12s      |
 +----------------+
 ```
 
+| ファイル | 内容 |
+|---|---|
+| `lcd1602_hello/main.py` | アプリ本体。I2C スキャン → LCD 初期化 → 表示ループ |
+| `lcd1602_hello/lcd1602.py` | PCF8574 バックパック経由で HD44780 を叩く最小ドライバ（外部ライブラリ不要） |
+
 ---
 
-## 0. ターゲットモジュールについて
+## 0. ターゲットボードについて
 
-ESP32-S3-WROOM-1 の型番は `N<フラッシュ容量>R<PSRAM容量>` で、**N8R8** は次の構成。
+**Raspberry Pi Pico WH** は Pico W にピンヘッダとデバッグ用3ピンコネクタをはんだ付け済みにしたもの。
+基板・機能は Pico W と同一なので、**ファームウェアも情報も「Pico W」のものをそのまま使う**。
 
-| 項目 | N8R8 の値 |
+| 項目 | Pico WH の値 |
 |---|---|
-| チップ | ESP32-S3（Xtensa LX7 デュアルコア 240MHz） |
-| Flash | 8MB / Quad SPI（3.3V） |
-| PSRAM | 8MB / **Octal SPI（OPI）** |
-| アンテナ | PCB アンテナ（`-1U` は外部アンテナ） |
-| 使えない GPIO | GPIO26〜GPIO32（Flash）、**GPIO33〜GPIO37（OPI PSRAM）** |
+| チップ | RP2040（Cortex-M0+ デュアルコア 133MHz） |
+| Flash | 2MB（外付け QSPI） |
+| SRAM | 264KB |
+| 無線 | Infineon CYW43439（Wi-Fi 4 2.4GHz / Bluetooth 5.2） |
+| USB | **micro-B**（Type-C ではない） |
+| GPIO | 3.3V。**5V 耐性はない** |
+| 使える GPIO | GP0〜GP22、GP26〜GP28（GP26〜28 は ADC 兼用） |
+| 使えない GPIO | **GP23・GP24・GP25・GP29**（CYW43439 と電源制御が専有） |
+| リセットボタン | **なし**（RUN ピンか USB 抜き差し、または `mpremote reset`） |
 
-ここが後の Arduino IDE 設定（`Flash Size` = 8MB、`PSRAM` = OPI PSRAM）に直結する。
-**N8R2 や N16R8 と設定を間違えるとブートループする**ので、モジュール表面のシルク印刷で型番を確認しておくこと。
-シルクが読めない場合は [esptool で実機から読める](#書き込み前にモジュールを実機で確認する)。
+- 「W」= 無線あり、「H」= ヘッダ実装済み。`WH` は両方。
+- **オンボード LED は GP25 ではない。** Pico W/WH では LED が CYW43439 側に繋がっているため、MicroPython では `Pin("LED", Pin.OUT)` で扱う。Pico（無印）向けの `Pin(25)` のコードはそのままでは光らない。
+- RP2040 は **I2C0 / I2C1 で使えるピンが決まっている**（ESP32 のようにどのピンにでも割り当てることはできない）。
 
-このモジュールを載せた開発ボードとしては **ESP32-S3-DevKitC-1（N8R8 版）** が代表的で、本書はそれを前提に書いている。
-素の WROOM-1 モジュール単体で使う場合は、別途 USB-シリアル変換・自動リセット回路・3.3V 電源が必要。
+  | ペリフェラル | SDA に使えるピン | SCL に使えるピン |
+  |---|---|---|
+  | I2C0 | GP0, GP4, GP8, GP12, GP16, GP20, GP28 | GP1, GP5, GP9, GP13, GP17, GP21 |
+  | I2C1 | GP2, GP6, GP10, GP14, GP18, GP22, GP26 | GP3, GP7, GP11, GP15, GP19, GP27 |
+
+  （GP 番号を4で割った余りが 0・1 なら I2C0、2・3 なら I2C1。偶数が SDA、奇数が SCL。上の表は Pico W/WH で使えないピンを除いたもの。）
 
 ## 1. 必要なもの
 
 | 部品 | 数 | 備考 |
 |---|---|---|
-| ESP32-S3-WROOM-1 N8R8 搭載ボード | 1 | ESP32-S3-DevKitC-1（N8R8）など |
+| Raspberry Pi Pico WH | 1 | Pico W + ヘッダでも同じ |
 | LCD1602A + I2C バックパック（PCF8574） | 1 | LCD の裏に I2C 変換基板がはんだ付けされたもの。4ピン（GND/VCC/SDA/SCL） |
 | I2C 用双方向レベル変換モジュール | 1 | 推奨。BSS138 を使った 4ch 品など（理由は後述） |
-| ブレッドボード、ジャンパワイヤ | 適量 | |
-| USB ケーブル | 1 | Type-C。**データ通信対応のもの** |
+| ブレッドボード、ジャンパワイヤ | 適量 | Pico WH は 40ピン。ブレッドボードに跨がせて挿す |
+| USB ケーブル | 1 | **micro-B**。**データ通信対応のもの**（充電専用だと認識しない） |
 
 > I2C バックパックが付いていない LCD1602A（16ピンのみ）の場合は、PCF8574 バックパックを別途購入して LCD にはんだ付けすると配線が4本で済む。
 
@@ -62,54 +77,52 @@ ESP32-S3-WROOM-1 の型番は `N<フラッシュ容量>R<PSRAM容量>` で、**N
 ### 2.1 電圧についての注意
 
 - LCD1602A は **5V 駆動**。3.3V では文字がほぼ見えないことが多い。
-- ESP32-S3-WROOM-1 の GPIO は **3.3V**。5V 耐性はない。
+- Pico WH の GPIO は **3.3V**。5V 耐性はない。
 - PCF8574 バックパックには SDA/SCL を VCC（5V）へ引き上げるプルアップ抵抗が載っていることが多く、そのままつなぐと GPIO に 5V がかかる。
 
 そのため、**レベル変換モジュールを挟む**構成を推奨する。
 
 ### 2.2 推奨配線（レベル変換あり）
 
+Pico WH を **USB コネクタが上** になるように置くと、左上が1番ピン、そこから左側を下へ数えていく。
+
 ```
- ESP32-S3-WROOM-1       レベル変換              LCD1602A (PCF8574)
-      (N8R8)         ┌─────────────┐
-   3V3 ──────────────┤LV         HV├──┬───────── VCC
-   5V ───────────────┼─────────────┼──┘
-   GND ──────────────┤GND       GND├──────────── GND
-   GPIO8 (SDA) ──────┤LV1       HV1├──────────── SDA
-   GPIO9 (SCL) ──────┤LV2       HV2├──────────── SCL
-                     └─────────────┘
+   Raspberry Pi Pico WH     レベル変換              LCD1602A (PCF8574)
+                         ┌─────────────┐
+   3V3(OUT) pin36 ───────┤LV         HV├──┬───────── VCC
+   VBUS     pin40 ───────┼─────────────┼──┘
+   GND      pin38 ───────┤GND       GND├──────────── GND
+   GP0(SDA) pin1  ───────┤LV1       HV1├──────────── SDA
+   GP1(SCL) pin2  ───────┤LV2       HV2├──────────── SCL
+                         └─────────────┘
 ```
 
-| ESP32-S3-WROOM-1 | レベル変換 LV 側 | レベル変換 HV 側 | LCD バックパック |
-|---|---|---|---|
-| 3V3 | LV | | |
-| 5V | | HV | VCC |
-| GND | GND | GND | GND |
-| GPIO8（DevKitC-1 のシルクは `IO8`） | LV1 | HV1 | SDA |
-| GPIO9（同 `IO9`） | LV2 | HV2 | SCL |
+| Pico WH | 物理ピン番号 | レベル変換 LV 側 | レベル変換 HV 側 | LCD バックパック |
+|---|---|---|---|---|
+| `3V3(OUT)` | 36 | LV | | |
+| `VBUS`（USB の 5V） | 40 | | HV | VCC |
+| `GND` | 38（3, 8, 13… でも可） | GND | GND | GND |
+| `GP0` | 1 | LV1 | HV1 | SDA |
+| `GP1` | 2 | LV2 | HV2 | SCL |
 
-- GPIO8 / GPIO9 は Arduino core が ESP32-S3 の既定 I2C ピンとして定義している組み合わせ。スケッチもこの値で書いてある。
-- 別のピンに変えたい場合、N8R8 で**避けるピン**は以下。
-  - GPIO26〜GPIO32 … 内蔵 Flash 用
-  - **GPIO33〜GPIO37 … 内蔵 OPI PSRAM 用（N8R8 では使用不可）**
-  - GPIO0・GPIO3・GPIO45・GPIO46 … ストラッピングピン
-  - GPIO19・GPIO20 … USB D-/D+
-- `5V` ピンは USB 給電時に 5V が出ている。
+- GP0 / GP1 は I2C0 の組み合わせ。`main.py` もこの値で書いてある。
+- `VBUS`（pin40）は **USB 給電中のみ 5V**。電池駆動に変える場合は 5V を別途用意する。
 - GND は必ず全部共通にする。
+- 別のピンに変えたい場合は、0章の I2C ピン対応表から **同じペリフェラル（I2C0 なら I2C0）の SDA/SCL の組** を選ぶ。**GP23/24/25/29 は使えない。**
 
 ### 2.3 簡易配線（レベル変換なし）
 
 手元にレベル変換がなく、とりあえず動作確認したい場合。
 
-| ESP32-S3-WROOM-1 | LCD バックパック |
-|---|---|
-| 5V | VCC |
-| GND | GND |
-| GPIO8 | SDA |
-| GPIO9 | SCL |
+| Pico WH | 物理ピン番号 | LCD バックパック |
+|---|---|---|
+| `VBUS` | 40 | VCC |
+| `GND` | 38 | GND |
+| `GP0` | 1 | SDA |
+| `GP1` | 2 | SCL |
 
 この構成で動く例は多いが、GPIO に 5V のプルアップがかかるため**定格外**。長時間使う・本番に組み込む場合はレベル変換を入れること。
-（バックパック上のプルアップ抵抗を外し、ESP32-S3 側で 3.3V に 4.7kΩ でプルアップする方法もある。）
+（バックパック上のプルアップ抵抗を外し、Pico 側で 3.3V に 4.7kΩ でプルアップする方法もある。）
 
 ### 2.4 コントラスト調整
 
@@ -119,168 +132,180 @@ ESP32-S3-WROOM-1 の型番は `N<フラッシュ容量>R<PSRAM容量>` で、**N
 - 何も見えない → 回していくと文字が現れる
 - 上段に黒い四角が16個並ぶ → 電源は来ているが初期化できていない（I2C 配線・アドレスを確認）
 
-## 3. ソフトウェアの準備（Arduino IDE）
+## 3. 開発環境
 
-1. [Arduino IDE 2.x](https://www.arduino.cc/en/software) をインストール
-2. ESP32 ボードを追加
-   - `ファイル` → `基本設定` → `追加のボードマネージャのURL` に以下を追加
-     ```
-     https://espressif.github.io/arduino-esp32/package_esp32_index.json
-     ```
-   - `ツール` → `ボード` → `ボードマネージャ` で **esp32 by Espressif Systems**（3.x）をインストール
-3. ライブラリを追加
-   - `ツール` → `ライブラリを管理` で **LiquidCrystal I2C**（作者: Frank de Brabander）をインストール
-   - 「AVR 用」と警告が出ることがあるが ESP32-S3 でも動作する
-4. Linux の場合、シリアルポートの権限を付与（初回のみ、実行後に再ログイン）
+### 3.1 言語とツールの選定
+
+**Arduino IDE は不要。** GUI は一切使わず、**MicroPython + `mpremote`（CLI）** で開発する。
+
+| 選択肢 | 判定 | 理由 |
+|---|---|---|
+| **MicroPython + mpremote** | **採用** | REPL で1行ずつ試せる。コンパイル・リンク・UF2 生成が不要で、転送は `.py` のコピーだけ。Wi-Fi/HTTP/JSON が標準ライブラリで書けるので、ポケベル（文字を受信して LCD に出す）用途に直結する。RP2040 は MicroPython の本家ターゲットでドキュメントも公式 |
+| C/C++（pico-sdk） | 見送り | 最速・最小だが、CMake と `arm-none-eabi` ツールチェーンの用意が要り、1文字直すたびにビルド → UF2 転送 → 再起動。LCD 表示程度に速度は要らない |
+| Arduino core（arduino-pico） | 見送り | 既存の `.ino` を流用できるが、IDE を使わなくても arduino-cli + core の数百MB が必要。Pico では純正の MicroPython のほうが情報が新しい |
+| CircuitPython | 見送り | USB ドライブに D&D できて手軽だが、REPL 越しの自動化（CI やスクリプトからの流し込み）は mpremote のほうが素直 |
+
+この方針変更に伴い、旧 ESP32 版の `lcd1602_hello.ino` は削除し、`main.py` + `lcd1602.py` に置き換えた。
+
+### 3.2 MicroPython ファームウェアの書き込み（初回のみ）
+
+Pico WH には **Pico W 用（`RPI_PICO_W`）のビルド**を使う。無印 Pico 用（`RPI_PICO`）を焼くと無線が使えないので注意。
+
+1. ファームウェアを取得する（最新版は <https://micropython.org/download/RPI_PICO_W/> で確認）
+
    ```bash
-   sudo usermod -aG dialout $USER
+   curl -LO https://micropython.org/resources/firmware/RPI_PICO_W-20260824-v1.29.0.uf2
    ```
 
-## 4. 書き込み
+2. **BOOTSEL ボタンを押しながら** USB を挿す。`RPI-RP2` という USB マスストレージとして見える
 
-1. `lcd1602_hello/lcd1602_hello.ino` を Arduino IDE で開く
-2. `ツール` → `ボード` → `esp32` → **ESP32S3 Dev Module** を選択
-   （`ESP32-S3-DevKitC-1` という項目がある版ならそれでもよい）
-3. `ツール` の設定を **N8R8 に合わせる**
+   ```bash
+   lsusb | grep 2e8a          # 2e8a:0003 Raspberry Pi RP2 Boot なら BOOTSEL 状態
+   lsblk -o NAME,LABEL        # RPI-RP2 のパーティションを探す
+   ```
 
-   | 項目 | N8R8 での設定 |
-   |---|---|
-   | `USB CDC On Boot` | **挿したポートによる**（下記 4. を参照） |
-   | `Flash Size` | **8MB (64Mb)** |
-   | `Flash Mode` | `QIO 80MHz`（Flash は Quad） |
-   | `PSRAM` | **OPI PSRAM** |
-   | `Partition Scheme` | `8M with spiffs (3MB APP/1.5MB SPIFFS)` |
-   | `Upload Speed` | 921600（不安定なら 115200） |
+   自動マウントされない場合は手動でマウントする。
 
-   - `Flash Size` と `PSRAM` が実物と合っていないと**起動時にブートループする**。N8R8 で `PSRAM` を `QSPI PSRAM` にするのも誤り（N8R8 は Octal）。
-4. **挿したポートに合わせて `USB CDC On Boot` を決める**
+   ```bash
+   udisksctl mount -b /dev/sdc1      # デバイス名は lsblk で確認したもの
+   ```
 
-   DevKitC-1 系のボードには USB-C ポートが2つある。`Serial` の出力先がこの設定で切り替わるので、**挿したポートと一致していないとシリアルモニタに何も出ない**。
+3. UF2 をコピーする。コピーが終わると**ボードが自動で再起動**し、ドライブは消える
 
-   | 挿したポート | デバイス | `USB CDC On Boot` | `Serial` の行き先 |
-   |---|---|---|---|
-   | `UART` 側（USB-シリアル変換チップ経由） | CH343 なら `/dev/ttyACM0`、CH340・CP2102 なら `/dev/ttyUSB0` | **Disabled**（既定） | UART0 → 変換チップ → PC |
-   | `USB` 側（ESP32-S3 直結） | `/dev/ttyACM0` | **Enabled** | native USB CDC → PC |
+   ```bash
+   cp RPI_PICO_W-*.uf2 /media/$USER/RPI-RP2/ && sync
+   ```
 
-   - デバイス名は変換チップの種類で変わる。**CH343（`1a86:55d3`）は CDC-ACM クラスなので `/dev/ttyACM0`** になり、`ttyUSB0` にはならない。どちらか分からなければ `ls /dev/ttyACM* /dev/ttyUSB*` と `lsusb` で確認する。
-   - `USB` 側は、書き込み済みファームが USB CDC を有効にしている場合しか列挙されない。未書き込みのボードで何も出ないのは正常なので、**最初は `UART` 側から試すほうが確実**。
-5. `ツール` → `ポート` で 4. のデバイスを選択
-6. `→`（書き込み）ボタンを押す
-   - ポートが出てこない・書き込みが始まらない場合は、**BOOT ボタンを押したまま RESET（または USB を挿し直し）→ BOOT を離す** でダウンロードモードに入れる
-   - 書き込み後、USB 直結ポートでは自動リセットされないことがある。RESET ボタンを押す
+4. MicroPython として認識されたことを確認する
 
-### arduino-cli を使う場合
+   ```bash
+   lsusb | grep 2e8a          # 2e8a:0005 MicroPython Board in FS mode
+   ls /dev/ttyACM*            # /dev/ttyACM0
+   ```
+
+> 2回目以降に BOOTSEL へ入り直したいときは、ボタンを押さずに `mpremote bootloader` でも入れる。
+
+### 3.3 mpremote のインストール
 
 ```bash
-arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-arduino-cli lib install "LiquidCrystal I2C"
+pipx install mpremote        # または: pip3 install --user mpremote
+mpremote version
+```
 
+### 3.4 Linux でのポート権限
+
+`/dev/ttyACM0` は `root:dialout` 所有のため、`dialout` グループに入っていないと `mpremote` が `Permission denied` になる。
+
+```bash
+sudo usermod -aG dialout $USER   # 恒久対応。反映には再ログイン（または再起動）が必要
+sudo chmod a+rw /dev/ttyACM0     # 今すぐ使いたいとき（挿し直すと戻る）
+```
+
+## 4. 転送と実行
+
+Pico のファイルシステムに `.py` を置くだけで動く。コンパイルは不要。
+
+```bash
 cd ~/ssd/electronic/espoke
 
-# ESP32-S3-WROOM-1 N8R8 / UART 側ポート（USB-シリアル変換チップ経由）
-FQBN="esp32:esp32:esp32s3:FlashSize=8M,FlashMode=qio,PSRAM=opi,PartitionScheme=default_8MB"
-
-# native USB 側ポートに挿した場合はこちら（CDCOnBoot=cdc を足す）
-# FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,FlashMode=qio,PSRAM=opi,PartitionScheme=default_8MB"
-
-arduino-cli board list          # ポートの確認
-arduino-cli compile --fqbn "$FQBN" lcd1602_hello
-arduino-cli upload  --fqbn "$FQBN" -p /dev/ttyACM0 lcd1602_hello
-arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
+mpremote devs                                   # 接続されているボードの確認
+mpremote cp lcd1602_hello/lcd1602.py :          # ドライバをボードへ転送
+mpremote run lcd1602_hello/main.py              # 実行（ボードには保存しない）
 ```
 
-`CDCOnBoot` を省略すると Disabled（`Serial` = UART0）になる。**UART 側ポートに挿しているなら省略が正しい。**
-`CDCOnBoot=cdc` を付けると `Serial` が native USB に回るため、UART 側ポートのシリアルモニタには何も出なくなる。
+`mpremote run` は**実行中の出力がそのままターミナルに出る**。停止は `Ctrl-C`。
 
-指定できるオプション名は次で確認できる。
+電源を入れたら自動で動くようにするには、`main.py` という名前でボードに保存する。
 
 ```bash
-arduino-cli board details --fqbn esp32:esp32:esp32s3
+mpremote cp lcd1602_hello/main.py :main.py      # 起動時に自動実行される
+mpremote reset                                  # ハードリセット
+mpremote repl                                   # 起動ログを見る（抜けるのは Ctrl-]）
 ```
 
-### 書き込み前にモジュールを実機で確認する
+> 自動実行を止めたいときは、REPL に入って `Ctrl-C` で中断し、`mpremote rm :main.py` で消す。
 
-型番のシルクが読めない場合や、ブートループを起こしている場合は、esptool で実物の構成を読める。
+### 開発中のループを速くする
+
+ローカルのディレクトリをボードのファイルシステムとしてマウントすると、コピーせずにその場の編集を実行できる。
 
 ```bash
-ESPTOOL=~/.arduino15/packages/esp32/tools/esptool_py/*/esptool
-$ESPTOOL --chip esp32s3 --port /dev/ttyACM0 --baud 115200 --after hard-reset flash-id
-```
-
-N8R8 なら次のように出る。ここが一致していれば上の FQBN で問題ない。
-
-```
-Chip type:          ESP32-S3 (QFN56) (revision v0.2)
-Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)
-Detected flash size: 8MB
-Flash type set in eFuse: quad (4 data lines)
-```
-
-- `Embedded PSRAM 8MB` … `PSRAM=opi`（OPI PSRAM）で正しい
-- `Detected flash size: 8MB` … `FlashSize=8M` で正しい
-- `Flash type ... quad` … `FlashMode=qio` で正しい（`opi` にしてはいけない）
-
-### Linux でのポート権限
-
-`/dev/ttyACM0` は `root:dialout` 所有のため、`dialout` グループに入っていないと書き込めない。
-
-```bash
-sudo usermod -aG dialout $USER   # 恒久対応。反映には再ログインが必要
-sudo chmod a+rw /dev/ttyACM0     # 今すぐ書き込みたいとき（挿し直すと戻る）
+mpremote mount lcd1602_hello exec "import main"
 ```
 
 ## 5. 動かし方
 
-1. 書き込み後、シリアルモニタを **115200 bps**、改行コード「LF」または「CR+LF」で開く
-2. **RESET ボタンを押す**。I2C スキャンは `setup()` でしか走らないため、書き込み直後の起動を逃すとログが見られない
-3. 起動ログで I2C スキャン結果を確認する
+1. 上の `mpremote run` または `mpremote repl` でシリアル出力を開く（**ボーレート設定は不要**。USB CDC なので速度指定は意味を持たない）
+2. 起動ログで I2C スキャン結果を確認する
+
    ```
-   rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
-   ...
-   entry 0x403c88b8
    I2C scan...
      found: 0x27
    LCD address: 0x27
-   Type text and press Enter to show it on the LCD.
+   Type text and press Enter to show it on the LCD. (Ctrl-C to stop)
    ```
+
    - `found: 0x27` … LCD が見えている。配線OK
-   - `no device found` … **LCD が繋がっていない**。スケッチは既定の `0x27` にフォールバックして動き続けるので、シリアルは正常に見えるが LCD には何も出ない。配線を確認すること
-4. LCD の1行目に `Hello, ESP32-S3!`、2行目に経過秒数が表示される
-5. シリアルモニタに文字を入力して Enter → LCD の1行目がその文字列に変わる（16文字まで、英数字・記号のみ）
+   - `no device found` … **LCD が繋がっていない**。スクリプトは既定の `0x27` にフォールバックして動き続けるので、シリアルは正常に見えるが LCD には何も出ない。配線を確認すること
+3. LCD の1行目に `Hello, Pico WH!`、2行目に経過秒数が表示される
+4. ターミナルに文字を入力して Enter → LCD の1行目がその文字列に変わる（16文字まで、英数字・記号のみ）
+
    ```
    LCD <- "ESPOKE TEST"
    ```
+
    この応答が返れば、LCD が未接続でもファームウェア自体は正常に動作している
+
+> I2C スキャンは起動時にしか走らない。やり直すには `Ctrl-C` → 再実行するか、`mpremote reset` でリセットする。
 
 ## 6. 設定の変更
 
-`lcd1602_hello.ino` 冒頭の定数で変更する。
+`main.py` 冒頭の定数で変更する。
 
 | 定数 | 既定値 | 内容 |
 |---|---|---|
-| `PIN_SDA` | 8 | I2C SDA ピン |
-| `PIN_SCL` | 9 | I2C SCL ピン |
+| `I2C_ID` | 0 | 使う I2C ペリフェラル（0 or 1）。ピンと組み合わせが対応している必要がある |
+| `PIN_SDA` | 0 | I2C SDA の GP 番号 |
+| `PIN_SCL` | 1 | I2C SCL の GP 番号 |
 | `LCD_COLS` / `LCD_ROWS` | 16 / 2 | LCD の桁数・行数（2004 なら 20 / 4） |
 | `LCD_ADDR_DEFAULT` | 0x27 | スキャンで見つからなかったときに使うアドレス |
 
 アドレスは起動時に自動検出するので、通常は変更不要（PCF8574 は `0x27`、PCF8574A は `0x3F` が多い）。
 
-## 7. トラブルシューティング
+## 7. mpremote チートシート
+
+| やりたいこと | コマンド |
+|---|---|
+| ボード一覧 | `mpremote devs` |
+| REPL に入る（抜けるのは `Ctrl-]`） | `mpremote repl` |
+| ポートを明示して接続 | `mpremote connect /dev/ttyACM0 repl`（短縮形 `mpremote a0 repl`） |
+| ファイル一覧 | `mpremote ls` |
+| 転送 / 取得 | `mpremote cp local.py :` / `mpremote cp :main.py .` |
+| 削除 | `mpremote rm :main.py` |
+| ローカルのスクリプトを実行 | `mpremote run script.py` |
+| 一行だけ実行 | `mpremote exec "from machine import Pin; Pin('LED', Pin.OUT).on()"` |
+| 値を表示 | `mpremote eval "1+1"` |
+| 空き容量 | `mpremote df` |
+| ハード／ソフトリセット | `mpremote reset` / `mpremote soft-reset` |
+| BOOTSEL に入る（ボタンを押さずに） | `mpremote bootloader` |
+| ライブラリ導入（micropython-lib） | `mpremote mip install <パッケージ名>` |
+
+## 8. トラブルシューティング
 
 | 症状 | 原因と対処 |
 |---|---|
-| バックライトも点かない | VCC/GND の配線、5V が来ているか確認 |
+| バックライトも点かない | VCC/GND の配線、`VBUS`（pin40）から 5V が来ているか確認 |
 | バックライトは点くが何も表示されない | コントラスト調整（青い半固定抵抗を回す） |
 | 上段に黒い四角が並ぶだけ | I2C 通信できていない。SDA/SCL の入れ違い、GND 共通化を確認 |
-| シリアルに `no device found` | SDA/SCL 配線、レベル変換の LV/HV の電源を確認 |
+| `no device found` | SDA/SCL 配線、レベル変換の LV/HV の電源を確認。GP0/GP1 以外に挿していないか確認 |
 | 文字化けする | 配線の接触不良。ジャンパワイヤを短くする・挿し直す |
-| ポートが出てこない | 充電専用の USB ケーブルになっていないか確認。USBハブ経由をやめてPC本体に直挿し。DevKitC-1 なら挿すポート（UART / USB）を替える。BOOT ボタンを押しながら挿し直す。`lsusb` に何も増えないならデバイスとして列挙されていない |
-| `Permission denied` で書き込めない | `dialout` グループに入っていない。`sudo usermod -aG dialout $USER` して再ログイン（応急処置は `sudo chmod a+rw /dev/ttyACM0`） |
-| シリアルモニタに何も出ない | `USB CDC On Boot` と挿したポートが食い違っている（4.の表を参照）。UART 側なら **Disabled**、native USB 側なら **Enabled** |
-| 起動ログだけ出ず入力の応答はある | 正常。I2C スキャンは `setup()` のみで実行される。RESET ボタンを押し直す |
-| 起動を繰り返す（ブートループ） | **N8R8 の設定ミスが最有力**。`Flash Size` = 8MB、`PSRAM` = OPI PSRAM、`Flash Mode` = QIO を確認 |
-| `Sketch too big` | `Partition Scheme` が 4MB 用のままになっている。`8M with spiffs` に変更 |
-| PSRAM が認識されない（`ESP.getPsramSize()` が 0） | `PSRAM` が `Disabled` か `QSPI PSRAM` になっている。**OPI PSRAM** にする |
-| GPIO33〜37 につないだ部品が動かない | N8R8 では OPI PSRAM が占有していて使えない。別のピンを使う |
+| `ValueError: bad SCL pin` | I2C0/I2C1 で使えないピンを指定している。0章の対応表を参照 |
+| `/dev/ttyACM0` が出てこない | 充電専用の micro-B ケーブルになっていないか確認。USBハブ経由をやめて PC 本体に直挿し。`lsusb` が `2e8a:0003`（RP2 Boot）なら **MicroPython が入っていない**ので 3.2 を実施 |
+| `Permission denied` | `dialout` グループに入っていない。`sudo usermod -aG dialout $USER` して再ログイン（応急処置は `sudo chmod a+rw /dev/ttyACM0`） |
+| `mpremote: no device found` | 他のプロセスがポートを掴んでいる（別ターミナルの `mpremote repl`、Thonny、`screen` など）。閉じてから再実行 |
+| REPL に入ると `main.py` の出力が流れ続ける | 自動起動している。`Ctrl-C` で止める。消すなら `mpremote rm :main.py` |
+| `Ctrl-C` が効かない | `mpremote repl` で入り直し、`Ctrl-C` → `Ctrl-D`（ソフトリセット）。それでも駄目なら USB 抜き差し |
+| リセットボタンがない | Pico には無い。`mpremote reset` か、`RUN`（pin30）と `GND`（pin28）を一瞬ショートする（タクトスイッチを付けると楽） |
+| オンボード LED が光らない | Pico W/WH の LED は GP25 ではない。`Pin("LED", Pin.OUT)` を使う |
+| Wi-Fi が使えない（`network` が無い等） | 無印 Pico 用の `RPI_PICO` ファームウェアを焼いている。`RPI_PICO_W` を焼き直す |
 | 日本語が表示できない | LCD1602A は英数字とカタカナ（独自コード）のみ。漢字・ひらがなは不可 |
