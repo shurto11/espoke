@@ -3,60 +3,59 @@
 Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線資料とファームウェアを置くリポジトリ。
 
 現在のターゲットは **Raspberry Pi Pico WH**（RP2040 / Wi-Fi・Bluetooth 付き / ピンヘッダ実装済み）。
-開発は **MicroPython + mpremote（CLI）** で行う。Arduino IDE は使わない。
+開発は **arduino-pico（C++）+ arduino-cli** で行う。Arduino IDE は使わない。
+
+やりたいこと:
+
+- LCD1602A にメッセージを表示する
+- **Bluetooth イヤホンに接続して通知音を鳴らす**（A2DP）
+- 鳴らす音声を **Wi-Fi 経由で取得する**
 
 ## 構成
 
 | ディレクトリ | 内容 |
 |---|---|
-| `lcd1602_hello/` | Raspberry Pi Pico WH + LCD1602A（I2C）の表示サンプル |
+| `lcd1602_hello/` | LCD1602A（I2C）の表示サンプル |
+| `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
+| `espoke/` | 本体。Wi-Fi で WAV を取得して Bluetooth イヤホンで再生し、LCD に状態を出す |
+| `tools/` | PC 側で音声を用意して HTTP 配信する補助スクリプト |
 
-## lcd1602_hello — LCD1602A に文字を表示する
+ビルド実測値（`rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble`）:
 
-Pico WH に I2C 接続した LCD1602A に文字を表示する最初のサンプル。
-
-- 1行目: `Hello, Pico WH!`（シリアル／REPL から送った文字列に置き換わる）
-- 2行目: 起動からの経過秒数
-
-```
-+----------------+
-|Hello, Pico WH! |
-|uptime 12s      |
-+----------------+
-```
-
-| ファイル | 内容 |
-|---|---|
-| `lcd1602_hello/main.py` | アプリ本体。I2C スキャン → LCD 初期化 → 表示ループ |
-| `lcd1602_hello/lcd1602.py` | PCF8574 バックパック経由で HD44780 を叩く最小ドライバ（外部ライブラリ不要） |
+| スケッチ | Flash | RAM（グローバル） |
+|---|---|---|
+| `lcd1602_hello` | 319KB / 2093KB (15%) | 69KB / 256KB (26%) |
+| `bt_earphone` | 514KB (24%) | 96KB (36%) |
+| `espoke` | 578KB (27%) | 103KB (39%) |
 
 ---
 
 ## 0. ターゲットボードについて
 
 **Raspberry Pi Pico WH** は Pico W にピンヘッダとデバッグ用3ピンコネクタをはんだ付け済みにしたもの。
-基板・機能は Pico W と同一なので、**ファームウェアも情報も「Pico W」のものをそのまま使う**。
+基板・機能は Pico W と同一なので、**ボード定義もファームウェアも「Pico W」のものをそのまま使う**。
 
 | 項目 | Pico WH の値 |
 |---|---|
-| チップ | RP2040（Cortex-M0+ デュアルコア。MicroPython 既定 125MHz / 最大 133MHz） |
+| チップ | RP2040（Cortex-M0+ デュアルコア。arduino-pico の既定は 200MHz、データシート上の定格は 133MHz） |
 | Flash | 2MB（外付け QSPI） |
 | SRAM | 264KB |
-| 無線 | Infineon CYW43439（Wi-Fi 4 2.4GHz / Bluetooth 5.2） |
+| 無線 | Infineon CYW43439（Wi-Fi 4 2.4GHz / **Bluetooth 5.2 Classic + LE**） |
 | USB | **micro-B**（Type-C ではない） |
 | GPIO | 3.3V。**5V 耐性はない** |
 | 使える GPIO | GP0〜GP22、GP26〜GP28（GP26〜28 は ADC 兼用） |
 | 使えない GPIO | **GP23・GP24・GP25・GP29**（CYW43439 と電源制御が専有） |
-| リセットボタン | **なし**（RUN ピンか USB 抜き差し、または `mpremote reset`） |
+| リセットボタン | **なし**（RUN ピンか USB 抜き差し） |
 
 - 「W」= 無線あり、「H」= ヘッダ実装済み。`WH` は両方。
-- **オンボード LED は GP25 ではない。** Pico W/WH では LED が CYW43439 側に繋がっているため、MicroPython では `Pin("LED", Pin.OUT)` で扱う。Pico（無印）向けの `Pin(25)` のコードはそのままでは光らない。
+- **Wi-Fi と Bluetooth は同じ CYW43439 を共有する。** 同時に使うと帯域を取り合うので、音声ストリーミング中は Wi-Fi のスループットが落ちる。
+- **オンボード LED は GP25 ではない。** Pico W/WH では LED が CYW43439 側に繋がっているため、`LED_BUILTIN` を使う。Pico（無印）向けの `digitalWrite(25, ...)` は効かない。
 - RP2040 は **I2C0 / I2C1 で使えるピンが決まっている**（ESP32 のようにどのピンにでも割り当てることはできない）。
 
   | ペリフェラル | SDA に使えるピン | SCL に使えるピン |
   |---|---|---|
-  | I2C0 | GP0, GP4, GP8, GP12, GP16, GP20, GP28 | GP1, GP5, GP9, GP13, GP17, GP21 |
-  | I2C1 | GP2, GP6, GP10, GP14, GP18, GP22, GP26 | GP3, GP7, GP11, GP15, GP19, GP27 |
+  | I2C0 (`Wire`) | GP0, GP4, GP8, GP12, GP16, GP20, GP28 | GP1, GP5, GP9, GP13, GP17, GP21 |
+  | I2C1 (`Wire1`) | GP2, GP6, GP10, GP14, GP18, GP22, GP26 | GP3, GP7, GP11, GP15, GP19, GP27 |
 
   （GP 番号を4で割った余りが 0・1 なら I2C0、2・3 なら I2C1。偶数が SDA、奇数が SCL。上の表は Pico W/WH で使えないピンを除いたもの。）
 
@@ -65,6 +64,7 @@ Pico WH に I2C 接続した LCD1602A に文字を表示する最初のサンプ
 | 部品 | 数 | 備考 |
 |---|---|---|
 | Raspberry Pi Pico WH | 1 | Pico W + ヘッダでも同じ |
+| Bluetooth イヤホン / スピーカー | 1 | **A2DP 対応のもの**（普通のワイヤレスイヤホンなら対応している） |
 | LCD1602A + I2C バックパック（PCF8574） | 1 | LCD の裏に I2C 変換基板がはんだ付けされたもの。4ピン（GND/VCC/SDA/SCL） |
 | I2C 用双方向レベル変換モジュール | 1 | 推奨。BSS138 を使った 4ch 品など（理由は後述） |
 | ブレッドボード、ジャンパワイヤ | 適量 | Pico WH は 40ピン。ブレッドボードに跨がせて挿す |
@@ -105,10 +105,10 @@ Pico WH を **USB コネクタが上** になるように置くと、左上が1�
 | `GP0` | 1 | LV1 | HV1 | SDA |
 | `GP1` | 2 | LV2 | HV2 | SCL |
 
-- GP0 / GP1 は I2C0 の組み合わせ。`main.py` もこの値で書いてある。
+- GP0 / GP1 は I2C0（`Wire`）の組み合わせ。スケッチもこの値で書いてある。
 - `VBUS`（pin40）は **USB 給電中のみ 5V**。電池駆動に変える場合は 5V を別途用意する。
 - GND は必ず全部共通にする。
-- 別のピンに変えたい場合は、0章の I2C ピン対応表から **同じペリフェラル（I2C0 なら I2C0）の SDA/SCL の組** を選ぶ。**GP23/24/25/29 は使えない。**
+- 別のピンに変えたい場合は、0章の I2C ピン対応表から **同じペリフェラルの SDA/SCL の組** を選ぶ。**GP23/24/25/29 は使えない。**
 
 ### 2.3 簡易配線（レベル変換なし）
 
@@ -122,206 +122,284 @@ Pico WH を **USB コネクタが上** になるように置くと、左上が1�
 | `GP1` | 2 | SCL |
 
 この構成で動く例は多いが、GPIO に 5V のプルアップがかかるため**定格外**。長時間使う・本番に組み込む場合はレベル変換を入れること。
-（バックパック上のプルアップ抵抗を外し、Pico 側で 3.3V に 4.7kΩ でプルアップする方法もある。）
 
 ### 2.4 コントラスト調整
 
-バックパック裏の**青い半固定抵抗（ポテンショメータ）**でコントラストを調整する。
-初回はほぼ確実に調整が必要。
+バックパック裏の**青い半固定抵抗（ポテンショメータ）**でコントラストを調整する。初回はほぼ確実に調整が必要。
 
 - 何も見えない → 回していくと文字が現れる
 - 上段に黒い四角が16個並ぶ → 電源は来ているが初期化できていない（I2C 配線・アドレスを確認）
 
 ## 3. 開発環境
 
-### 3.1 言語とツールの選定
+### 3.1 なぜ MicroPython をやめたか
 
-**Arduino IDE は不要。** GUI は一切使わず、**MicroPython + `mpremote`（CLI）** で開発する。
+当初は MicroPython + mpremote で開発していたが、**Bluetooth イヤホンを鳴らすために C++ へ移行した**。
+
+MicroPython の `bluetooth` モジュールは実機で確認したところ **BLE 専用**で、イヤホンに音を飛ばす A2DP が存在しない。
+
+```
+bluetooth attrs: ['BLE', 'FLAG_INDICATE', 'FLAG_NOTIFY', 'FLAG_READ', 'FLAG_WRITE',
+                  'FLAG_WRITE_NO_RESPONSE', 'UUID']
+BLE attrs: ['active', 'config', 'gap_advertise', 'gap_connect', 'gap_disconnect',
+            'gap_scan', 'gattc_*', 'gatts_*', 'irq']
+```
+
+CYW43439 は**ハードとしては Bluetooth Classic に対応している**が、MicroPython 側が ACL/SCO を実装していないため、A2DP を載せる土台がない。
 
 | 選択肢 | 判定 | 理由 |
 |---|---|---|
-| **MicroPython + mpremote** | **採用** | REPL で1行ずつ試せる。コンパイル・リンク・UF2 生成が不要で、転送は `.py` のコピーだけ。Wi-Fi/HTTP/JSON が標準ライブラリで書けるので、ポケベル（文字を受信して LCD に出す）用途に直結する。RP2040 は MicroPython の本家ターゲットでドキュメントも公式 |
-| C/C++（pico-sdk） | 見送り | 最速・最小だが、CMake と `arm-none-eabi` ツールチェーンの用意が要り、1文字直すたびにビルド → UF2 転送 → 再起動。LCD 表示程度に速度は要らない |
-| Arduino core（arduino-pico） | 見送り | 既存の `.ino` を流用できるが、IDE を使わなくても arduino-cli + core の数百MB が必要。Pico では純正の MicroPython のほうが情報が新しい |
-| CircuitPython | 見送り | USB ドライブに D&D できて手軽だが、REPL 越しの自動化（CI やスクリプトからの流し込み）は mpremote のほうが素直 |
+| **arduino-pico（earlephilhower）** | **採用** | 同梱の `BluetoothAudio` ライブラリに `A2DPSource` があり、スキャン・接続・PCM 書き込みが数行で書ける。`WiFi` / `HTTPClient` も同梱。ビルドは arduino-cli だけで完結し、IDE は要らない |
+| pico-sdk + BTstack を直接 | 見送り | 同じことはできるが、CMake と BTstack のイベントハンドラを自前で書く必要があり記述量が多い |
+| MicroPython | **不可** | BLE のみ。A2DP なし（上記の実機確認） |
+| CircuitPython | **不可** | 同じく Bluetooth Classic 非対応 |
 
-この方針変更に伴い、旧 ESP32 版の `lcd1602_hello.ino` は削除し、`main.py` + `lcd1602.py` に置き換えた。
-
-### 3.2 MicroPython ファームウェアの書き込み（初回のみ）
-
-Pico WH には **Pico W 用（`RPI_PICO_W`）のビルド**を使う。無印 Pico 用（`RPI_PICO`）を焼くと無線が使えないので注意。
-
-1. ファームウェアを取得する（最新版は <https://micropython.org/download/RPI_PICO_W/> で確認）
-
-   ```bash
-   curl -LO https://micropython.org/resources/firmware/RPI_PICO_W-20260824-v1.29.0.uf2
-   ```
-
-2. **BOOTSEL ボタンを押しながら** USB を挿す。`RPI-RP2` という USB マスストレージとして見える
-
-   ```bash
-   lsusb | grep 2e8a          # 2e8a:0003 Raspberry Pi RP2 Boot なら BOOTSEL 状態
-   lsblk -o NAME,LABEL        # RPI-RP2 のパーティションを探す
-   ```
-
-   自動マウントされない場合は手動でマウントする。
-
-   ```bash
-   udisksctl mount -b /dev/sdc1      # デバイス名は lsblk で確認したもの
-   ```
-
-3. UF2 をコピーする。コピーが終わると**ボードが自動で再起動**し、ドライブは消える
-
-   ```bash
-   cp RPI_PICO_W-*.uf2 /media/$USER/RPI-RP2/ && sync
-   ```
-
-4. MicroPython として認識されたことを確認する
-
-   ```bash
-   lsusb | grep 2e8a          # 2e8a:0005 MicroPython Board in FS mode
-   ls /dev/ttyACM*            # /dev/ttyACM0
-   ```
-
-> 2回目以降に BOOTSEL へ入り直したいときは、ボタンを押さずに `mpremote bootloader` でも入れる。
-
-### 3.3 mpremote のインストール
+### 3.2 インストール
 
 ```bash
-pipx install mpremote        # または: pip3 install --user mpremote
-mpremote version
+# arduino-cli 本体（未導入の場合）
+curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+
+URL=https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+arduino-cli core update-index --additional-urls "$URL"
+arduino-cli core install rp2040:rp2040 --additional-urls "$URL"
+arduino-cli lib install "LiquidCrystal I2C"
+```
+
+core は約 1.5GB ある（ツールチェーンと pico-sdk を含むため）。`~/.arduino15` の空き容量に注意。
+
+### 3.3 FQBN — Bluetooth を有効にする
+
+**ここが最重要。** 既定では Bluetooth スタックが入らないので、`ipbtstack` を指定する。
+
+```
+rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble
+```
+
+| 指定 | 意味 |
+|---|---|
+| `rpipicow` | Raspberry Pi Pico W（WH も同じ） |
+| `ipbtstack=ipv4btcble` | **IPv4 + Bluetooth**。これがないと `BluetoothAudio.h` がコンパイルエラーになる |
+
+Arduino IDE を使う場合は `ツール` → `IP/Bluetooth Stack` → `IPv4 + Bluetooth` が同じ意味。
+選べる値の一覧は次で確認できる。
+
+```bash
+arduino-cli board details --fqbn rp2040:rp2040:rpipicow
 ```
 
 ### 3.4 Linux でのポート権限
 
-`/dev/ttyACM0` は `root:dialout` 所有のため、`dialout` グループに入っていないと `mpremote` が `Permission denied` になる。
+`/dev/ttyACM0` は `root:dialout` 所有のため、`dialout` グループに入っていないと書き込みもシリアルも使えない。
 
 ```bash
 sudo usermod -aG dialout $USER   # 恒久対応。反映には再ログイン（または再起動）が必要
 sudo chmod a+rw /dev/ttyACM0     # 今すぐ使いたいとき（挿し直すと戻る）
 ```
 
-`/dev/ttyACM0` は USB を挿し直すたび・`mpremote reset` のたびに作り直されるので、`chmod` はそのつど消える。
+`/dev/ttyACM0` は USB を挿し直すたび・リセットのたびに作り直されるので、`chmod` はそのつど消える。
 `usermod` 済みで**まだ再ログインしていない**なら、`sg` でそのシェルだけグループを切り替えると待たずに使える（パスワード不要）。
 
 ```bash
-sg dialout -c "mpremote a0 ls"
+sg dialout -c "arduino-cli upload --fqbn ... -p /dev/ttyACM0 espoke"
 ```
 
-## 4. 転送と実行
-
-Pico のファイルシステムに `.py` を置くだけで動く。コンパイルは不要。
+## 4. ビルドと書き込み
 
 ```bash
 cd ~/ssd/electronic/espoke
+FQBN="rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble"
 
-mpremote devs                                   # 接続されているボードの確認
-mpremote cp lcd1602_hello/lcd1602.py :          # ドライバをボードへ転送
-mpremote run lcd1602_hello/main.py              # 実行（ボードには保存しない）
+arduino-cli compile --fqbn "$FQBN" bt_earphone
+arduino-cli upload  --fqbn "$FQBN" -p /dev/ttyACM0 bt_earphone
 ```
 
-`mpremote run` は**実行中の出力がそのままターミナルに出る**。停止は `Ctrl-C`。
-ただし `run` はボードからの出力を流すだけで、**こちらのキー入力はボードに届かない**。
-LCD に文字を送って試すときは `mpremote repl` を使う。
+書き込みは **UF2 方式**（`.uf2` を `RPI-RP2` ドライブにコピーする）。ボードを BOOTSEL 状態にする必要がある。
 
-また `exec` / `eval` / `cp` / `ls` などのコマンドは実行時に raw REPL へ入るため、**ボード上で動いているスクリプトを中断する**。
-動かしたまま覗きたいときは `mpremote repl` だけを使うこと。
+- **BOOTSEL ボタンを押しながら USB を挿す**のが確実
+- 既に arduino-pico のスケッチが載っていれば、`arduino-cli upload` が自動でリセットしてくれる
+- ドライブが自動マウントされない場合は手動で行う
 
-電源を入れたら自動で動くようにするには、`main.py` という名前でボードに保存する。
+  ```bash
+  lsblk -o NAME,LABEL                     # RPI-RP2 を探す
+  udisksctl mount -b /dev/sdc1
+  arduino-cli compile --fqbn "$FQBN" --output-dir /tmp/build bt_earphone
+  cp /tmp/build/*.uf2 /media/$USER/RPI-RP2/ && sync
+  ```
+
+書き込み後は `2e8a:f00a Raspberry Pi Pico W` として `/dev/ttyACM0` に出てくる。
 
 ```bash
-mpremote cp lcd1602_hello/main.py :main.py      # 起動時に自動実行される
-mpremote reset                                  # ハードリセット
-mpremote repl                                   # 起動ログを見る（抜けるのは Ctrl-]）
+arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 ```
 
-> 自動実行を止めたいときは、REPL に入って `Ctrl-C` で中断し、`mpremote rm :main.py` で消す。
+USB CDC なのでボーレートの値自体に意味はない。
 
-### 開発中のループを速くする
+## 5. lcd1602_hello — LCD に文字を表示する
 
-ローカルのディレクトリをボードのファイルシステムとしてマウントすると、コピーせずにその場の編集を実行できる。
+- 1行目: `Hello, Pico WH!`（シリアルから送った文字列に置き換わる）
+- 2行目: 起動からの経過秒数
 
-```bash
-mpremote mount lcd1602_hello exec "import main"
+```
++----------------+
+|Hello, Pico WH! |
+|uptime 12s      |
++----------------+
 ```
 
-## 5. 動かし方
+起動時に I2C をスキャンするので、アドレスの設定は不要（PCF8574 は `0x27`、PCF8574A は `0x3F` が多い）。
 
-1. シリアルを開く（**ボーレート設定は不要**。USB CDC なので速度指定は意味を持たない）
-   - 出力を眺めるだけなら `mpremote run lcd1602_hello/main.py`
-   - **文字を送って試すなら `mpremote repl`**（`run` ではキー入力が届かない）。ボードに `main.py` を保存済みなら `mpremote reset` の直後に `mpremote repl` で繋ぐと、起動ログから見られる
-2. 起動ログで I2C スキャン結果を確認する
+```
+I2C scan...
+  found: 0x27
+LCD address: 0x27
+Type text and press Enter to show it on the LCD.
+```
 
-   ```
-   I2C scan...
-     found: 0x27
-   LCD address: 0x27
-   Type text and press Enter to show it on the LCD. (Ctrl-C to stop)
-   ```
-
-   - `found: 0x27` … LCD が見えている。配線OK
-   - `no device found` … **LCD が繋がっていない**。スクリプトは既定の `0x27` にフォールバックして動き続けるので、シリアルは正常に見えるが LCD には何も出ない。配線を確認すること
-3. LCD の1行目に `Hello, Pico WH!`、2行目に経過秒数が表示される
-4. ターミナルに文字を入力して Enter → LCD の1行目がその文字列に変わる（16文字まで、英数字・記号のみ）
-
-   ```
-   LCD <- "ESPOKE TEST"
-   ```
-
-   この応答が返れば、LCD が未接続でもファームウェア自体は正常に動作している
-
-> I2C スキャンは起動時にしか走らない。やり直すには `Ctrl-C` → 再実行するか、`mpremote reset` でリセットする。
-
-## 6. 設定の変更
-
-`main.py` 冒頭の定数で変更する。
+`no device found` が出た場合、スケッチは既定の `0x27` にフォールバックして動き続ける。
+シリアルは正常に見えるのに LCD に何も出ないときは配線を疑うこと。
 
 | 定数 | 既定値 | 内容 |
 |---|---|---|
-| `I2C_ID` | 0 | 使う I2C ペリフェラル（0 or 1）。ピンと組み合わせが対応している必要がある |
-| `PIN_SDA` | 0 | I2C SDA の GP 番号 |
-| `PIN_SCL` | 1 | I2C SCL の GP 番号 |
+| `PIN_SDA` / `PIN_SCL` | 0 / 1 | I2C0 のピン（GP 番号） |
 | `LCD_COLS` / `LCD_ROWS` | 16 / 2 | LCD の桁数・行数（2004 なら 20 / 4） |
 | `LCD_ADDR_DEFAULT` | 0x27 | スキャンで見つからなかったときに使うアドレス |
 
-アドレスは起動時に自動検出するので、通常は変更不要（PCF8574 は `0x27`、PCF8574A は `0x3F` が多い）。
+## 6. bt_earphone — イヤホンに繋いで通知音を鳴らす
 
-## 7. mpremote チートシート
+Bluetooth まわりだけを切り出したサンプル。**Wi-Fi も LCD も使わない。**
 
-| やりたいこと | コマンド |
+1. 周囲の A2DP 機器をスキャンして一覧表示
+2. `TARGET_NAME` に前方一致する機器（空なら最初の1台）へ接続
+3. 接続できたら「ピピッ」というポケベル風の通知音を鳴らし続ける
+4. 未接続なら15秒ごとに自動で再スキャン。BOOTSEL でペアリング破棄 + 即再スキャン
+
+```
+scanning for 8 seconds...
+  [0] WF-1000XM5              38:18:4c:xx:xx:xx  rssi=-52
+connecting to [0] WF-1000XM5 ...
+  ok
+A2DP connected: 38:18:4c:xx:xx:xx
+volume: 62%
+```
+
+| 定数 | 既定値 | 内容 |
+|---|---|---|
+| `LOCAL_NAME` | `espoke` | イヤホン側に表示される名前 |
+| `TARGET_NAME` | `""` | 接続先の名前（前方一致）。空なら最初に見つかった機器 |
+| `SCAN_SECONDS` | 8 | スキャン時間 |
+| `TONE_HZ` | 880 | 通知音の高さ |
+| `TONE_LEVEL` | 6000 | 振幅（16bit なので最大 32767） |
+
+> **イヤホンは必ずペアリングモードにしてから**スキャンさせること。
+> 既にスマホなどと接続済みだと、そもそもスキャン結果に出てこない。
+
+## 7. espoke — Wi-Fi で取得した音声をイヤホンで鳴らす
+
+本体。`bt_earphone` に Wi-Fi と LCD を足したもの。
+
+1. Wi-Fi に接続
+2. Bluetooth イヤホンをスキャンして接続
+3. シリアルに `play` と打つか BOOTSEL を押すと、`AUDIO_URL` から WAV を取得して再生
+4. LCD に状態を表示
+
+### 7.1 設定ファイル
+
+`espoke/arduino_secrets.h` を作る（`.gitignore` 済み。パスワードをコミットしないため）。
+
+```bash
+cp espoke/arduino_secrets.h.example espoke/arduino_secrets.h
+$EDITOR espoke/arduino_secrets.h
+```
+
+```c
+#define WIFI_SSID "your-ssid"
+#define WIFI_PASS "your-password"
+#define AUDIO_URL "http://192.168.1.10:8000/notify.wav"
+```
+
+### 7.2 音声フォーマットの制約
+
+`A2DPSource` は **44100Hz か 48000Hz の 16bit ステレオ**しか受け取らない。
+このスケッチは 44100Hz で動かし、取得した WAV を整数倍のサンプル&ホールドで引き伸ばして流す。
+
+| 項目 | 対応 |
 |---|---|
-| ボード一覧 | `mpremote devs` |
-| REPL に入る（抜けるのは `Ctrl-]`） | `mpremote repl` |
-| ポートを明示して接続 | `mpremote connect /dev/ttyACM0 repl`（短縮形 `mpremote a0 repl`） |
-| ファイル一覧 | `mpremote ls` |
-| 転送 / 取得 | `mpremote cp local.py :` / `mpremote cp :main.py .` |
-| 削除 | `mpremote rm :main.py` |
-| ローカルのスクリプトを実行 | `mpremote run script.py` |
-| 一行だけ実行 | `mpremote exec "from machine import Pin; Pin('LED', Pin.OUT).on()"` |
-| 値を表示 | `mpremote eval "1+1"` |
-| 空き容量 | `mpremote df` |
-| ハード／ソフトリセット | `mpremote reset` / `mpremote soft-reset` |
-| BOOTSEL に入る（ボタンを押さずに） | `mpremote bootloader` |
-| ライブラリ導入（micropython-lib） | `mpremote mip install <パッケージ名>` |
+| 形式 | **16bit PCM の WAV のみ**（`fmt` タグ 1）。MP3 などは不可 |
+| チャンネル | モノラル / ステレオ（モノラルは左右へ複製） |
+| サンプリングレート | **44100 / 22050 / 11025**（44100 の整数分の1のみ） |
+| 非対応 | 48000、8bit、24bit、可変長リサンプルが要るもの |
 
-## 8. トラブルシューティング
+48000Hz を通したい場合は `A2DP_RATE` を 48000 にして、素材側も 48000・24000・12000 に揃える。
+
+22050Hz モノラルなら 44.1KB/s なので、Wi-Fi と Bluetooth を同時に使っても余裕がある。
+44100Hz ステレオ（176KB/s）は帯域が厳しく、`warning: audio underflow` が出やすい。
+
+### 7.3 シリアルコマンド
+
+| コマンド | 動作 |
+|---|---|
+| `play` | `AUDIO_URL` を取得して再生 |
+| `play <url>` | 指定した URL を再生 |
+| `scan` | ペアリングを破棄して Bluetooth を再スキャン |
+| `status` | Wi-Fi / IP / Bluetooth の接続状態を表示 |
+
+BOOTSEL ボタンでも `play` と同じことができる。
+
+### 7.4 主な定数
+
+| 定数 | 既定値 | 内容 |
+|---|---|---|
+| `BT_LOCAL_NAME` | `espoke` | イヤホン側に表示される名前 |
+| `BT_TARGET_NAME` | `""` | 接続先の名前（前方一致）。空なら最初の1台 |
+| `A2DP_RATE` | 44100 | A2DP の送出レート。44100 か 48000 |
+| `A2DP_BUFFER` | 32768 | 約185ms 分。通信のゆらぎを吸収する |
+
+## 8. tools/serve_audio.py — PC 側で音声を配る
+
+Pico に渡す WAV を用意して HTTP で配信する。
+
+```bash
+python3 tools/serve_audio.py
+```
+
+- `tools/audio/notify.wav` がなければ、ポケベル風の「ピピッ」（22050Hz モノラル 16bit / 0.8秒）を生成する
+- そのディレクトリを `0.0.0.0:8000` で配信し、**LAN 側の IP を含む URL を表示する**
+- 表示された URL をそのまま `AUDIO_URL` に書く
+
+```
+serving /home/you/ssd/electronic/espoke/tools/audio on http://192.168.40.115:8000/
+  http://192.168.40.115:8000/notify.wav
+```
+
+手持ちの音声を使う場合は、対応フォーマットに変換して同じディレクトリに置く。
+
+```bash
+ffmpeg -i source.mp3 -ac 1 -ar 22050 -sample_fmt s16 tools/audio/voice.wav
+```
+
+`--dir` で別のディレクトリを配信することもできる。生成物は `.gitignore` 済み。
+
+## 9. トラブルシューティング
 
 | 症状 | 原因と対処 |
 |---|---|
+| `BluetoothAudio.h: No such file` / `_needsbt.h` のエラー | FQBN に `ipbtstack=ipv4btcble` が入っていない |
+| `'WavInfo' has not been declared` | `.ino` はビルド時に関数プロトタイプが先頭へ自動生成される。引数に使う構造体は**ファイル冒頭**で定義する |
+| スキャンに何も出ない | イヤホンがペアリングモードになっていない。既に他機器と接続済みだと出てこない。スマホ側の接続を切る |
+| 接続はするが音が出ない | イヤホン側の音量。`volume:` のログが出ていれば A2DP は繋がっている |
+| `warning: audio underflow` | Wi-Fi が追いついていない。素材を 22050Hz モノラルに落とすか、`A2DP_BUFFER` を増やす |
+| 音がブツブツ切れる | 同上。Wi-Fi と Bluetooth が CYW43439 を共有しているため。ルータとの距離も効く |
+| `http error 404` など | `AUDIO_URL` の IP が PC の LAN IP になっているか確認。`tools/serve_audio.py` が表示する URL を使う |
+| `unsupported: 48000Hz 2ch 16bit` | 7.2 のフォーマット制約。`ffmpeg -ar 22050 -ac 1` で変換する |
+| `bad wav header` | WAV ではない（MP3 を .wav にリネームしただけ等）。`file` コマンドで確認 |
+| Wi-Fi に繋がらない | Pico W は **2.4GHz のみ**。5GHz 専用の SSID には繋がらない |
 | バックライトも点かない | VCC/GND の配線、`VBUS`（pin40）から 5V が来ているか確認 |
 | バックライトは点くが何も表示されない | コントラスト調整（青い半固定抵抗を回す） |
 | 上段に黒い四角が並ぶだけ | I2C 通信できていない。SDA/SCL の入れ違い、GND 共通化を確認 |
-| `no device found` | SDA/SCL 配線、レベル変換の LV/HV の電源を確認。GP0/GP1 以外に挿していないか確認 |
-| 文字化けする | 配線の接触不良。ジャンパワイヤを短くする・挿し直す |
-| `ValueError: bad SCL pin` | I2C0/I2C1 で使えないピンを指定している。0章の対応表を参照 |
-| `/dev/ttyACM0` が出てこない | 充電専用の micro-B ケーブルになっていないか確認。USBハブ経由をやめて PC 本体に直挿し。`lsusb` が `2e8a:0003`（RP2 Boot）なら **MicroPython が入っていない**ので 3.2 を実施 |
-| `Permission denied` | `dialout` グループに入っていない。`sudo usermod -aG dialout $USER` して再ログイン（応急処置は `sudo chmod a+rw /dev/ttyACM0`） |
-| `mpremote: no device found` | 他のプロセスがポートを掴んでいる（別ターミナルの `mpremote repl`、Thonny、`screen` など）。閉じてから再実行 |
-| 挿し直したら再び `Permission denied` | `/dev/ttyACM0` は再列挙のたびに作り直されるので `chmod` は消える。`sg dialout -c "mpremote ..."` なら再ログインせずに通る |
-| `mpremote repl` で文字を打っても LCD が変わらない | `mpremote run` で起動していないか確認。`run` はキー入力を転送しない。また、途中で `mpremote exec` などを叩くとスクリプト自体が止まっている |
-| REPL に入ると `main.py` の出力が流れ続ける | 自動起動している。`Ctrl-C` で止める。消すなら `mpremote rm :main.py` |
-| `Ctrl-C` が効かない | `mpremote repl` で入り直し、`Ctrl-C` → `Ctrl-D`（ソフトリセット）。それでも駄目なら USB 抜き差し |
-| リセットボタンがない | Pico には無い。`mpremote reset` か、`RUN`（pin30）と `GND`（pin28）を一瞬ショートする（タクトスイッチを付けると楽） |
-| オンボード LED が光らない | Pico W/WH の LED は GP25 ではない。`Pin("LED", Pin.OUT)` を使う |
-| Wi-Fi が使えない（`network` が無い等） | 無印 Pico 用の `RPI_PICO` ファームウェアを焼いている。`RPI_PICO_W` を焼き直す |
+| `ValueError` / I2C が動かない | I2C0/I2C1 で使えないピンを指定している。0章の対応表を参照 |
+| `/dev/ttyACM0` が出てこない | 充電専用の micro-B ケーブルになっていないか確認。USBハブ経由をやめて PC 本体に直挿し |
+| `Permission denied` | `dialout` グループに入っていない。`sg dialout -c "..."` なら再ログインせずに通る |
+| 書き込みが始まらない | BOOTSEL ボタンを押しながら USB を挿し直す。`RPI-RP2` ドライブが出たら手動で `.uf2` をコピー |
+| オンボード LED が光らない | Pico W/WH の LED は GP25 ではない。`LED_BUILTIN` を使う |
 | 日本語が表示できない | LCD1602A は英数字とカタカナ（独自コード）のみ。漢字・ひらがなは不可 |
