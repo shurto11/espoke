@@ -39,7 +39,7 @@ Pico WH に I2C 接続した LCD1602A に文字を表示する最初のサンプ
 
 | 項目 | Pico WH の値 |
 |---|---|
-| チップ | RP2040（Cortex-M0+ デュアルコア 133MHz） |
+| チップ | RP2040（Cortex-M0+ デュアルコア。MicroPython 既定 125MHz / 最大 133MHz） |
 | Flash | 2MB（外付け QSPI） |
 | SRAM | 264KB |
 | 無線 | Infineon CYW43439（Wi-Fi 4 2.4GHz / Bluetooth 5.2） |
@@ -201,6 +201,13 @@ sudo usermod -aG dialout $USER   # 恒久対応。反映には再ログイン（
 sudo chmod a+rw /dev/ttyACM0     # 今すぐ使いたいとき（挿し直すと戻る）
 ```
 
+`/dev/ttyACM0` は USB を挿し直すたび・`mpremote reset` のたびに作り直されるので、`chmod` はそのつど消える。
+`usermod` 済みで**まだ再ログインしていない**なら、`sg` でそのシェルだけグループを切り替えると待たずに使える（パスワード不要）。
+
+```bash
+sg dialout -c "mpremote a0 ls"
+```
+
 ## 4. 転送と実行
 
 Pico のファイルシステムに `.py` を置くだけで動く。コンパイルは不要。
@@ -214,6 +221,11 @@ mpremote run lcd1602_hello/main.py              # 実行（ボードには保存
 ```
 
 `mpremote run` は**実行中の出力がそのままターミナルに出る**。停止は `Ctrl-C`。
+ただし `run` はボードからの出力を流すだけで、**こちらのキー入力はボードに届かない**。
+LCD に文字を送って試すときは `mpremote repl` を使う。
+
+また `exec` / `eval` / `cp` / `ls` などのコマンドは実行時に raw REPL へ入るため、**ボード上で動いているスクリプトを中断する**。
+動かしたまま覗きたいときは `mpremote repl` だけを使うこと。
 
 電源を入れたら自動で動くようにするには、`main.py` という名前でボードに保存する。
 
@@ -235,7 +247,9 @@ mpremote mount lcd1602_hello exec "import main"
 
 ## 5. 動かし方
 
-1. 上の `mpremote run` または `mpremote repl` でシリアル出力を開く（**ボーレート設定は不要**。USB CDC なので速度指定は意味を持たない）
+1. シリアルを開く（**ボーレート設定は不要**。USB CDC なので速度指定は意味を持たない）
+   - 出力を眺めるだけなら `mpremote run lcd1602_hello/main.py`
+   - **文字を送って試すなら `mpremote repl`**（`run` ではキー入力が届かない）。ボードに `main.py` を保存済みなら `mpremote reset` の直後に `mpremote repl` で繋ぐと、起動ログから見られる
 2. 起動ログで I2C スキャン結果を確認する
 
    ```
@@ -303,6 +317,8 @@ mpremote mount lcd1602_hello exec "import main"
 | `/dev/ttyACM0` が出てこない | 充電専用の micro-B ケーブルになっていないか確認。USBハブ経由をやめて PC 本体に直挿し。`lsusb` が `2e8a:0003`（RP2 Boot）なら **MicroPython が入っていない**ので 3.2 を実施 |
 | `Permission denied` | `dialout` グループに入っていない。`sudo usermod -aG dialout $USER` して再ログイン（応急処置は `sudo chmod a+rw /dev/ttyACM0`） |
 | `mpremote: no device found` | 他のプロセスがポートを掴んでいる（別ターミナルの `mpremote repl`、Thonny、`screen` など）。閉じてから再実行 |
+| 挿し直したら再び `Permission denied` | `/dev/ttyACM0` は再列挙のたびに作り直されるので `chmod` は消える。`sg dialout -c "mpremote ..."` なら再ログインせずに通る |
+| `mpremote repl` で文字を打っても LCD が変わらない | `mpremote run` で起動していないか確認。`run` はキー入力を転送しない。また、途中で `mpremote exec` などを叩くとスクリプト自体が止まっている |
 | REPL に入ると `main.py` の出力が流れ続ける | 自動起動している。`Ctrl-C` で止める。消すなら `mpremote rm :main.py` |
 | `Ctrl-C` が効かない | `mpremote repl` で入り直し、`Ctrl-C` → `Ctrl-D`（ソフトリセット）。それでも駄目なら USB 抜き差し |
 | リセットボタンがない | Pico には無い。`mpremote reset` か、`RUN`（pin30）と `GND`（pin28）を一瞬ショートする（タクトスイッチを付けると楽） |
