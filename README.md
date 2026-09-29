@@ -513,7 +513,7 @@ BOOTSEL ボタンは状況で意味が変わる。
 - 抵抗は要らない。Pico 内蔵のプルアップ（`INPUT_PULLUP`）を使うので、離すと HIGH・押すと LOW になる
 - 4本足のタクトスイッチは、**対角の2本**を使えば向きを間違えない
 - チャタリングはソフトで 30ms 待って吸収している
-- はんだ付けで取り付ける手順は [docs/button_soldering.md](docs/button_soldering.md)
+- ユニバーサル基板にはんだ付けして組み立てる手順は [docs/universal_board.md](docs/universal_board.md)
 
 | ページ | 1行目 | 2行目 |
 |---|---|---|
