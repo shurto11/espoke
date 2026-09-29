@@ -10,6 +10,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 - LCD1602A にメッセージを表示する
 - **Bluetooth イヤホンに接続して通知音を鳴らす**（A2DP）
 - 鳴らす音声を **Wi-Fi 経由で取得する**
+- **PC に置いた音楽ファイル（mp3 / m4a）を Wi-Fi 経由で聞く**
 
 ## 構成
 
@@ -18,7 +19,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `lcd1602_hello/` | LCD1602A（I2C）の表示サンプル |
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
 | `espoke/` | 本体。Wi-Fi で WAV を取得して Bluetooth イヤホンで再生し、LCD に状態を出す |
-| `tools/` | PC 側で音声を用意して HTTP 配信する補助スクリプト |
+| `tools/` | PC 側で通知音や音楽ライブラリを HTTP 配信する補助スクリプト |
 
 ビルド実測値（`rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble`）:
 
@@ -26,7 +27,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 |---|---|---|
 | `lcd1602_hello` | 319KB / 2093KB (15%) | 69KB / 256KB (26%) |
 | `bt_earphone` | 514KB (24%) | 96KB (36%) |
-| `espoke` | 578KB (27%) | 103KB (39%) |
+| `espoke` | 580KB (27%) | 118KB (45%) |
 
 ---
 
@@ -218,6 +219,8 @@ arduino-cli upload  --fqbn "$FQBN" -p /dev/ttyACM0 bt_earphone
 
 - **BOOTSEL ボタンを押しながら USB を挿す**のが確実
 - 既に arduino-pico のスケッチが載っていれば、`arduino-cli upload` が自動でリセットしてくれる
+- この自動リセットは `/dev/ttyACM0` を 1200bps で開いて行う。**ポートを開けないと無言で失敗し、
+  `No drive to deploy.` になる**（3.4 参照）。`id` に `dialout` が出ていなければ `sg dialout -c` 経由で叩く
 - ドライブが自動マウントされない場合は手動で行う
 
   ```bash
@@ -393,8 +396,9 @@ volume: 80%
 
 1. Wi-Fi に接続
 2. Bluetooth イヤホンをスキャンして接続
-3. シリアルに `play` と打つか BOOTSEL を押すと、`AUDIO_URL` から WAV を取得して再生
-4. LCD に状態を表示
+3. シリアルに `music` と打つか BOOTSEL を押すと、`MUSIC_URL` の音楽サーバから曲を順に取ってきて流し続ける
+4. シリアルに `play` と打つと `AUDIO_URL` の通知音を1回だけ鳴らす
+5. LCD に曲名と状態を表示
 
 ### 7.1 設定ファイル
 
@@ -408,7 +412,12 @@ $EDITOR espoke/arduino_secrets.h
 ```c
 #define WIFI_SSID "your-ssid"
 #define WIFI_PASS "your-password"
+
+// 通知音。tools/serve_audio.py が配る
 #define AUDIO_URL "http://192.168.1.10:8000/notify.wav"
+
+// 音楽サーバ。tools/serve_music.py が配る。末尾にスラッシュは付けない
+#define MUSIC_URL "http://192.168.1.20:8000"
 ```
 
 ### 7.2 音声フォーマットの制約
@@ -425,8 +434,17 @@ $EDITOR espoke/arduino_secrets.h
 
 48000Hz を通したい場合は `A2DP_RATE` を 48000 にして、素材側も 48000・24000・12000 に揃える。
 
-22050Hz モノラルなら 44.1KB/s なので、Wi-Fi と Bluetooth を同時に使っても余裕がある。
-44100Hz ステレオ（176KB/s）は帯域が厳しく、`warning: audio underflow` が出やすい。
+Wi-Fi と Bluetooth は CYW43439 を共有しているので、HTTP の帯域は素直に効く。
+
+| 形式 | 帯域 | 用途 |
+|---|---|---|
+| 22050Hz モノラル | 44 KB/s | 通知音。余裕がある |
+| **44100Hz モノラル** | **88 KB/s** | **音楽の既定。**高音を削らずに帯域を半分にできる |
+| 44100Hz ステレオ | 176 KB/s | 電波が良ければ。`serve_music.py --stereo` |
+
+音楽で帯域を削るなら、22050Hz に落として高音を捨てるよりモノラルにするほうが音の劣化が小さい。
+ステレオが欲しくて `warning: audio underflow` が出るなら、ルータとの距離を詰めるか
+`A2DP_BUFFER` を増やす。
 
 実機での動作ログ。
 
@@ -440,12 +458,32 @@ playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
 
 | コマンド | 動作 |
 |---|---|
-| `play` | `AUDIO_URL` を取得して再生 |
-| `play <url>` | 指定した URL を再生 |
+| `music` | `MUSIC_URL` から曲を順に取ってきて**流し続ける** |
+| `next` | 次の曲へ（`music` と同じ。再生中でも効く） |
+| `prev` | 前の曲へ |
+| `rand` | ランダムな曲へ |
+| `stop` | 連続再生をやめる |
+| `list` | 曲一覧をシリアルに出す（番号・LCD 用の名前・パス） |
+| `now` | 今かかっている曲を表示 |
+| `shuffle` | サーバ側のシャッフルを ON/OFF |
+| `play` | `AUDIO_URL` の通知音を1回鳴らす |
+| `play <url>` | 指定した URL を1回鳴らす |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
-| `status` | Wi-Fi / IP / Bluetooth の接続状態を表示 |
+| `status` | Wi-Fi / IP / Bluetooth / 連続再生の状態を表示 |
 
-BOOTSEL ボタンでも `play` と同じことができる。
+**再生中に受け付けるのは `stop` / `next` / `prev` / `rand` だけ。**
+他のコマンドは曲が終わるまで処理されない。
+
+BOOTSEL ボタンは状況で意味が変わる。
+
+| 状況 | BOOTSEL |
+|---|---|
+| 止まっているとき | 連続再生を始める（`music`） |
+| 再生中 | 次の曲へ送る（`next`） |
+
+> BOOTSEL の読み取りは一瞬だけフラッシュと割り込みを止めるので、再生中は
+> 250ms に1回しか見に行かない。それでも音が乱れるようなら `BOOTSEL_SKIP` を
+> `false` にすると、再生中は一切触らなくなる。
 
 ### 7.4 主な定数
 
@@ -456,10 +494,13 @@ BOOTSEL ボタンでも `play` と同じことができる。
 | `BT_TARGET_ADDR` | MACアドレス | 空でなければスキャンせず直接繋ぐ（6章参照） |
 | `WIFI_TIMEOUT_MS` | 30000 | Wi-Fi 接続を待つ上限 |
 | `WIFI_RETRY_MS` | 30000 | Wi-Fi が切れているとき再接続を試みる間隔 |
+| `HTTP_TIMEOUT_MS` | 15000 | サーバの応答を待つ上限 |
 | `A2DP_RATE` | 44100 | A2DP の送出レート。44100 か 48000 |
-| `A2DP_BUFFER` | 32768 | 約185ms 分。通信のゆらぎを吸収する |
+| `A2DP_BUFFER` | 65536 | 約370ms 分。通信のゆらぎを吸収する。曲を流し続けるので厚めに取ってある |
+| `IN_FRAMES` | 1024 | 1回の読み取りで扱うフレーム数。小刻みに読むとスループットが落ちる |
+| `BOOTSEL_SKIP` | `true` | 再生中の BOOTSEL で次の曲へ送るか |
 
-## 8. tools/serve_audio.py — PC 側で音声を配る
+## 8. tools/serve_audio.py — 通知音を配る
 
 Pico に渡す WAV を用意して HTTP で配信する。
 
@@ -484,11 +525,155 @@ ffmpeg -i source.mp3 -ac 1 -ar 22050 -sample_fmt s16 tools/audio/voice.wav
 
 `--dir` で別のディレクトリを配信することもできる。生成物は `.gitignore` 済み。
 
-## 9. トラブルシューティング
+## 9. tools/serve_music.py — 音楽ライブラリを配る
+
+PC に置いてある mp3 や m4a を、Pico が読める 16bit PCM の WAV に**変換しながら**配る。
+ここでは音楽ファイルが dynabook の `~/media/music/` にある前提で書く。
+
+### 9.1 なぜ PC 側で変換するのか
+
+Pico WH には mp3 を解く余裕がない。RP2040 は FPU を持たず、A2DP の SBC
+エンコードと Wi-Fi の受信で既に手一杯になる。
+一方 PC 側なら ffmpeg に通すだけで済むので、**デコードもリサンプルも PC で終わらせて、
+Pico には生の PCM だけを渡す**。Pico 側は WAV ヘッダを読んで A2DP に流すだけになる。
+
+変換し終えるのを待たずに、変換した先から少しずつ流す。曲の頭が鳴り始めるまで待たされない。
+
+### 9.2 Tailscale と Pico の関係
+
+**Pico W/WH に Tailscale は載らない。** WireGuard クライアントを動かす余裕がないので、
+Pico は tailnet に参加できない。したがって `100.x.x.x` のアドレスも
+`dynabook.tail....ts.net` という名前も Pico からは使えない。
+
+Pico が使うのは **サーバの LAN IP** だけ。Tailscale は、サーバを操作する人間が
+`ssh dynabook` で入るための経路であって、音声は通らない。
+
+```
+   Pico WH ──── Wi-Fi/LAN ────> 192.168.40.195:8000 ── dynabook
+                                  serve_music.py          ~/media/music/
+                                  ffmpeg で mp3 → PCM
+                                       ↑
+                                  Tailscale
+                                  (ssh dynabook で起動・停止するのはこちら)
+```
+
+つまり **dynabook と Pico が同じ LAN にいる必要がある**。dynabook を外に持ち出すと
+Pico からは届かなくなる。
+
+サーバの IP は `MUSIC_URL` に直接書くので、**DHCP で変わると繋がらなくなる**。
+ルータで IP 固定（DHCP 予約）しておくと安定する。
+
+### 9.3 dynabook 側の準備
+
+必要なのは **ffmpeg だけ**。サーバ本体は python3 の標準ライブラリしか使わない。
+
+```bash
+ssh dynabook
+sudo apt install --no-install-recommends ffmpeg
+```
+
+> 推奨パッケージ込みの `apt install ffmpeg` は 136パッケージ・展開後 376MB になる。
+> `--no-install-recommends` なら 102パッケージ・194MB で、mp3・m4a・flac・ogg は
+> すべて読める。
+
+スクリプトを置いて起動する。
+
+```bash
+ssh dynabook mkdir -p '~/espoke'
+scp tools/serve_music.py dynabook:~/espoke/
+ssh dynabook 'python3 ~/espoke/serve_music.py'
+```
+
+起動すると、そのまま `MUSIC_URL` に書ける行を表示する。
+
+```
+/home/you/media/music  39 tracks
+44100Hz mono 16bit PCM  (88 KB/s)
+
+  http://192.168.40.195:8000/
+
+この URL を espoke/arduino_secrets.h の MUSIC_URL に書く:
+  #define MUSIC_URL "http://192.168.40.195:8000"
+```
+
+### 9.4 エンドポイント
+
+**次の曲がどれかを覚えているのはサーバ側**。Pico は `/next.wav` を叩くだけでよく、
+曲順やシャッフルの管理を載せずに済む。
+
+| URL | 動作 |
+|---|---|
+| `/next.wav` | 次の曲へ進めて、その曲を WAV で返す |
+| `/prev.wav` | 前の曲へ戻す |
+| `/random.wav` | ランダムに選ぶ |
+| `/current.wav` | 今の曲をもう一度 |
+| `/track/5.wav` | 5番の曲 |
+| `/list` | 曲一覧（番号 `TAB` LCD 用の名前 `TAB` パス） |
+| `/now` | 今の曲 |
+| `/shuffle` | シャッフルの ON/OFF を切り替え |
+| `/rescan` | ディレクトリを読み直す |
+| `/` | ブラウザ用の一覧 |
+
+WAV を返すときは、LCD に出すための曲名をヘッダに入れる。
+
+| ヘッダ | 内容 |
+|---|---|
+| `X-Track` | LCD 用。ASCII 16文字。先頭のトラック番号を落とし、アクセント記号も潰してある |
+| `X-Track-Full` | パーセントエンコードしたフルパス |
+| `X-Index` | 曲番号 |
+
+ブラウザや `curl` でもそのまま鳴らせるので、Pico を繋ぐ前に PC だけで確認できる。
+
+```bash
+curl -s http://192.168.40.195:8000/list
+curl -s http://192.168.40.195:8000/next.wav | aplay
+```
+
+### 9.5 オプション
+
+| オプション | 既定値 | 内容 |
+|---|---|---|
+| `--dir` | `~/media/music` | 配信するディレクトリ（再帰的に探す） |
+| `--port` | 8000 | 待ち受けポート |
+| `--rate` | 44100 | 44100 / 22050 / 11025 |
+| `--stereo` | （モノラル） | ステレオで配る。帯域が倍になる |
+| `--volume` | 1.0 | 音量の倍率 |
+| `--shuffle` | （曲順） | 最初からシャッフルする |
+| `--ffmpeg` | `ffmpeg` | ffmpeg のパス |
+
+拡張子で音楽ファイルを拾う（`.mp3` `.m4a` `.flac` `.ogg` `.opus` `.wav` `.aac` など）。
+
+### 9.6 WAV の長さを 0 で返している理由
+
+変換しながら流すので、送り終わるまで長さが分からない。
+そのため `data` チャンクのサイズは **0** にして、`Content-Length` も付けず、
+HTTP/1.0 の「接続が閉じたら終わり」で長さを伝えている。
+
+Pico 側は `data` サイズ 0 を「最後まで読む」と解釈する（`WavInfo.dataBytes == 0`）。
+このとき LCD の進捗は `%` ではなく `KB` 表示になる。
+
+### 9.7 相手が黙って消えたとき
+
+Pico は電源が落ちても電波が切れても **FIN を返さずに消える**。そのままだと
+カーネルが再送を諦めるまで（15分ほど）送信が詰まり、`ffmpeg` とスレッドが居座る。
+
+そのため接続に **30秒の送信タイムアウト**（`STREAM_TIMEOUT`）を張ってある。
+30秒まったく送信が進まなければ打ち切り、`ffmpeg` を kill してログに残す。
+
+```
+play [2] NMIXX/Blue_Valentine/01-Blue_Valentine.mp3
+  client gone, 30s no progress (1808 KB)
+```
+
+`next` や `stop` で Pico から切った場合は即座に検知されるので、こちらは
+`stopped by client` になる。
+
+## 10. トラブルシューティング
 
 | 症状 | 原因と対処 |
 |---|---|
 | `BluetoothAudio.h: No such file` / `_needsbt.h` のエラー | FQBN に `ipbtstack=ipv4btcble` が入っていない |
+| `No drive to deploy.` で書き込めない | 自動リセットが効かず BOOTSEL に入っていない。`lsusb` が `2e8a:f00a`（スケッチ実行中）のままなら未リセット。`usermod -aG dialout` 後に再ログインしていないのが原因のことが多く、`id` で確認して `sg dialout -c "arduino-cli upload ..."` で叩く |
 | `'WavInfo' has not been declared` | `.ino` はビルド時に関数プロトタイプが先頭へ自動生成される。引数に使う構造体は**ファイル冒頭**で定義する |
 | スキャンに何も出ない | イヤホンがペアリングモードになっていない。既に他機器と接続済みだと出てこない。スマホ側の接続を切る |
 | **接続要求は通るが無反応のまま固まる** | **`gap_ssp_set_auto_accept(true)` を呼んでいない。**6.1 参照。これが最頻出 |
@@ -502,6 +687,12 @@ ffmpeg -i source.mp3 -ac 1 -ar 22050 -sample_fmt s16 tools/audio/voice.wav
 | Wi-Fi に繋がらないことがある | 起動時の1回だけでは不安定。`WIFI_RETRY_MS` ごとに `loop()` から張り直している |
 | 音がブツブツ切れる | 同上。Wi-Fi と Bluetooth が CYW43439 を共有しているため。ルータとの距離も効く |
 | `http error 404` など | `AUDIO_URL` の IP が PC の LAN IP になっているか確認。`tools/serve_audio.py` が表示する URL を使う |
+| `http error -1` / `music stopped server down?` | `MUSIC_URL` の IP かポートが違う、または `serve_music.py` が止まっている。dynabook で `curl -s localhost:8000/now` を試す |
+| dynabook に繋がらない | Pico は Tailscale を使えない。dynabook が Pico と**同じ LAN** にいるか、`MUSIC_URL` が `100.x.x.x` ではなく LAN IP になっているか確認（9.2 参照） |
+| 昨日まで鳴っていたのに繋がらない | DHCP で dynabook の IP が変わった。ルータで IP 固定するか `MUSIC_URL` を書き直す |
+| `ffmpeg が見つからない` | dynabook 側に `sudo apt install --no-install-recommends ffmpeg` |
+| 曲と曲の間が長い | 次の曲の HTTP と ffmpeg の起動に数百 ms かかる。`A2DP_BUFFER` の 370ms を超えた分が無音になる |
+| LCD の曲名が化ける / 出ない | LCD1602A の文字 ROM に無い文字。サーバが `X-Track` を ASCII に潰して返しているので、それでも化けるならコントラスト調整を疑う |
 | `unsupported: 48000Hz 2ch 16bit` | 7.2 のフォーマット制約。`ffmpeg -ar 22050 -ac 1` で変換する |
 | `bad wav header` | WAV ではない（MP3 を .wav にリネームしただけ等）。`file` コマンドで確認 |
 | Wi-Fi に繋がらない | Pico W は **2.4GHz のみ**。5GHz 専用の SSID には繋がらない |

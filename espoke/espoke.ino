@@ -8,14 +8,17 @@
  * 動作:
  *   1. Wi-Fi に接続
  *   2. Bluetooth イヤホン (A2DP sink) をスキャンして接続
- *   3. シリアルに "play" と打つか BOOTSEL を押すと、AUDIO_URL から WAV を取得して再生
- *   4. LCD1602A に状態を表示
+ *   3. シリアルに "music" と打つか BOOTSEL を押すと、MUSIC_URL の音楽サーバから
+ *      曲を順番に取ってきて流し続ける。"play" なら AUDIO_URL の通知音を1回だけ
+ *   4. LCD1602A に曲名と状態を表示
  *
  * 音声フォーマット:
  *   16bit PCM の WAV。モノラル/ステレオどちらでも可。
  *   サンプリングレートは 44100 の整数分の1 (44100 / 22050 / 11025) のみ対応し、
  *   整数倍のサンプル&ホールドで 44100 ステレオへ引き伸ばして A2DP に流す。
  *   48000 など割り切れないレートは非対応 (リサンプラを積む余裕がないため)。
+ *   mp3 や m4a はそのままでは鳴らない。tools/serve_music.py が ffmpeg で
+ *   変換しながら流してくれるので、Pico 側は WAV を読むだけで済む。
  */
 
 #include <WiFi.h>
@@ -24,7 +27,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / AUDIO_URL
+#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / AUDIO_URL / MUSIC_URL
 
 // --- 設定 ---
 static const char *BT_LOCAL_NAME  = "espoke";  // イヤホン側に見える名前
@@ -32,7 +35,8 @@ static const char *BT_TARGET_NAME = "";        // 接続先の名前 (前方一�
 static const char *BT_TARGET_ADDR = "a0:0c:e2:c6:1d:04";  // 空でなければスキャンせず直接繋ぐ
 static const int    SCAN_SECONDS  = 8;
 static const int    A2DP_RATE     = 44100;     // A2DPSource は 44100 か 48000 のみ
-static const size_t A2DP_BUFFER   = 32768;     // 約185ms 分。通信のゆらぎを吸収する
+static const size_t A2DP_BUFFER   = 65536;     // 約370ms 分。曲を流し続けるので厚めに取る
+static const bool   BOOTSEL_SKIP  = true;      // 再生中の BOOTSEL で次の曲へ送る
 
 static const int     PIN_SDA   = 0;   // GP0 (物理1番ピン)
 static const int     PIN_SCL   = 1;   // GP1 (物理2番ピン)
@@ -42,7 +46,7 @@ static const uint8_t LCD_ADDR_DEFAULT = 0x27;
 // ------------
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
-// 引数に使う型はここで定義しておく必要がある
+// 引数や戻り値に使う型はここで定義しておく必要がある
 struct WavInfo {
   uint32_t sampleRate;
   uint16_t channels;
@@ -50,19 +54,41 @@ struct WavInfo {
   uint32_t dataBytes;  // 0 なら長さ不明 (最後まで読む)
 };
 
+enum PlayResult {
+  PLAY_NONE,   // 中断要求なし (再生ループの中だけで使う)
+  PLAY_DONE,   // 最後まで鳴らした
+  PLAY_STOP,   // stop で止めた
+  PLAY_SKIP,   // next / prev / rand / BOOTSEL で打ち切った
+  PLAY_ERROR,  // Wi-Fi か HTTP で失敗した
+};
+
 A2DPSource a2dp;
 LiquidCrystal_I2C *lcd = nullptr;
 
-static const size_t IN_FRAMES = 256;
+// 1回の read で 2KB 前後まとめて取る。小刻みに読むと lwIP の往復が増えて
+// スループットが落ち、Bluetooth と帯域を取り合ったときに underflow しやすい
+static const size_t IN_FRAMES = 1024;
 static int16_t inBuf[IN_FRAMES * 2];       // 最大ステレオ
 static int16_t outBuf[IN_FRAMES * 4 * 2];  // 最大4倍アップサンプル × ステレオ
 
 static unsigned long lastScan = 0;
 static const unsigned long RETRY_MS = 15000;           // 未接続時に再試行する間隔
-static const unsigned long CONNECT_TIMEOUT_MS = 15000; // ストリーム開始を待つ上限
+static const unsigned long CONNECT_TIMEOUT_MS = 15000;  // ストリーム開始を待つ上限
 static const unsigned long WIFI_TIMEOUT_MS = 30000;    // Wi-Fi 接続を待つ上限
 static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi 再接続を試みる間隔
+static const unsigned long HTTP_TIMEOUT_MS = 15000;    // サーバの応答を待つ上限
 static unsigned long lastWiFiTry = 0;
+
+// 連続再生の状態
+static bool   autoPlay = false;            // 曲を続けて流しているか
+static String nextPath = "/next.wav";      // 次に取りに行くエンドポイント
+static int    playErrors = 0;              // 連続で失敗した回数
+static unsigned long lastBootsel = 0;      // BOOTSEL を最後に見た時刻
+
+static String serialLine = "";             // 受信途中のコマンド
+
+// 曲名はサーバが X-Track ヘッダで返してくる。collectHeaders() で拾う指定をしておく
+static const char *HTTP_HEADERS[] = { "X-Track" };
 
 // ---------------- LCD ----------------
 
@@ -100,6 +126,28 @@ static void setupLCD() {
   lcd = new LiquidCrystal_I2C(addr, LCD_COLS, LCD_ROWS);
   lcd->init();
   lcd->backlight();
+}
+
+// ---------------- シリアル ----------------
+
+// 改行まで溜まったら1行返す。溜まっていなければ空文字列。
+// readStringUntil() は改行が来るまで最大1秒ブロックするので、
+// 再生中に呼ぶとその間だけ音が途切れる。こちらは待たない
+static String readLine() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialLine.length()) {
+        String out = serialLine;
+        serialLine = "";
+        out.trim();
+        return out;
+      }
+    } else if (serialLine.length() < 160) {
+      serialLine += c;
+    }
+  }
+  return String();
 }
 
 // ---------------- Bluetooth ----------------
@@ -264,29 +312,60 @@ static bool parseWav(WiFiClient *s, WavInfo *info) {
 
 // ---------------- 再生 ----------------
 
-static void playUrl(const String &url) {
+// 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
+static PlayResult pollAbort() {
+  String cmd = readLine();
+  if (cmd.length()) {
+    if (cmd == "stop") return PLAY_STOP;
+    if (cmd == "next") { nextPath = "/next.wav";   return PLAY_SKIP; }
+    if (cmd == "prev") { nextPath = "/prev.wav";   return PLAY_SKIP; }
+    if (cmd == "rand") { nextPath = "/random.wav"; return PLAY_SKIP; }
+    Serial.println("再生中に使えるのは stop / next / prev / rand");
+  }
+
+  // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
+  if (BOOTSEL_SKIP && millis() - lastBootsel >= 250) {
+    lastBootsel = millis();
+    if (BOOTSEL) {
+      while (BOOTSEL) delay(1);
+      nextPath = "/next.wav";
+      return PLAY_SKIP;
+    }
+  }
+  return PLAY_NONE;
+}
+
+static PlayResult playUrl(const String &url) {
   if (WiFi.status() != WL_CONNECTED) {
     status("no wifi", "cannot play");
-    return;
+    return PLAY_ERROR;
   }
   if (!a2dp.connected()) {
     status("no earphone", "cannot play");
-    return;
+    return PLAY_ERROR;
   }
 
   WiFiClient client;
   HTTPClient http;
-  http.setTimeout(8000);
+  http.setTimeout(HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) {
     status("bad url", url.substring(0, LCD_COLS));
-    return;
+    return PLAY_ERROR;
   }
+  http.collectHeaders(HTTP_HEADERS, 1);
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
     status("http error", String(code));
     http.end();
-    return;
+    return PLAY_ERROR;
+  }
+
+  // 曲名はサーバが教えてくれる。無ければ URL の末尾で代用する
+  String title = http.header("X-Track");
+  if (!title.length()) {
+    int slash = url.lastIndexOf('/');
+    title = (slash >= 0) ? url.substring(slash + 1) : url;
   }
 
   WiFiClient *stream = http.getStreamPtr();
@@ -294,7 +373,7 @@ static void playUrl(const String &url) {
   if (!parseWav(stream, &info)) {
     status("bad wav", "header");
     http.end();
-    return;
+    return PLAY_ERROR;
   }
 
   uint32_t rateMul = (info.sampleRate > 0) ? (uint32_t)A2DP_RATE / info.sampleRate : 0;
@@ -304,24 +383,32 @@ static void playUrl(const String &url) {
                   (unsigned long)info.sampleRate, info.channels, info.bits);
     status("unsupported", String(info.sampleRate) + "Hz " + String(info.channels) + "ch");
     http.end();
-    return;
+    return PLAY_ERROR;
   }
 
-  Serial.printf("playing %luHz %uch %ubit, %lu bytes (x%lu upsample)\n",
-                (unsigned long)info.sampleRate, info.channels, info.bits,
+  Serial.printf("playing %s — %luHz %uch %ubit, %lu bytes (x%lu upsample)\n",
+                title.c_str(), (unsigned long)info.sampleRate, info.channels, info.bits,
                 (unsigned long)info.dataBytes, (unsigned long)rateMul);
+  printLine(0, title);
 
   const size_t inBytesMax  = IN_FRAMES * info.channels * 2;
   const size_t outBytesMax = IN_FRAMES * rateMul * 2 * 2;
   uint32_t remaining = info.dataBytes;
   uint32_t played    = 0;
   unsigned long lastLcd = 0;
+  PlayResult result = PLAY_DONE;
 
   // A2DP ストリームは接続直後から流れ続けているので、play を打つまでの無音区間でも
   // underflow フラグが立つ。再生直前に一度読み捨てて、以降の取りこぼしだけを見る
   a2dp.getUnderflow();
 
   while (a2dp.connected()) {
+    PlayResult abort = pollAbort();
+    if (abort != PLAY_NONE) {
+      result = abort;
+      break;
+    }
+
     if ((size_t)a2dp.availableForWrite() < outBytesMax) {
       delay(1);
       continue;
@@ -361,17 +448,92 @@ static void playUrl(const String &url) {
   }
   http.end();
 
-  // 末尾が切れないよう、無音を少し流してからバッファが空くのを待つ
-  memset(outBuf, 0, sizeof(outBuf));
-  for (int i = 0; i < 8 && a2dp.connected(); i++) {
-    while ((size_t)a2dp.availableForWrite() < sizeof(outBuf)) delay(1);
-    a2dp.write((const uint8_t *)outBuf, sizeof(outBuf));
+  // 曲を続けて流すときは無音で締めない。次の曲を取りに行っている間、
+  // バッファに残った末尾がそのまま鳴り続けるので繋ぎが詰まる。
+  // 打ち切ったときも同じ理由で、残りをそのまま鳴らし切らせる
+  if (result == PLAY_DONE && !autoPlay) {
+    memset(outBuf, 0, sizeof(outBuf));
+    for (int i = 0; i < 4 && a2dp.connected(); i++) {
+      while ((size_t)a2dp.availableForWrite() < sizeof(outBuf)) delay(1);
+      a2dp.write((const uint8_t *)outBuf, sizeof(outBuf));
+    }
   }
 
   if (a2dp.getUnderflow()) {
     Serial.println("warning: audio underflow (Wi-Fi が追いついていない)");
   }
-  status("done", String(played / 1024) + "KB played");
+  printLine(1, String(played / 1024) + "KB " +
+               (result == PLAY_DONE ? "done" : result == PLAY_STOP ? "stop" : "skip"));
+  return result;
+}
+
+// ---------------- コマンド ----------------
+
+// MUSIC_URL 配下のテキストを取ってきてシリアルに出す
+static void showText(const String &path) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("no wifi");
+    return;
+  }
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(client, String(MUSIC_URL) + path)) {
+    Serial.println("MUSIC_URL がおかしい");
+    return;
+  }
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) {
+    Serial.println(http.getString());
+  } else {
+    Serial.printf("http %d (%s が動いているか?)\n", code, MUSIC_URL);
+  }
+  http.end();
+}
+
+static void handleCommand(String cmd) {
+  if (!cmd.length()) return;
+
+  if (cmd.startsWith("play")) {
+    String url = cmd.substring(4);
+    url.trim();
+    autoPlay = false;
+    playUrl(url.length() ? url : String(AUDIO_URL));
+  } else if (cmd == "music" || cmd == "next") {
+    nextPath = "/next.wav";
+    autoPlay = true;
+    playErrors = 0;
+  } else if (cmd == "prev") {
+    nextPath = "/prev.wav";
+    autoPlay = true;
+    playErrors = 0;
+  } else if (cmd == "rand") {
+    nextPath = "/random.wav";
+    autoPlay = true;
+    playErrors = 0;
+  } else if (cmd == "stop") {
+    autoPlay = false;
+    status("espoke", "stopped");
+  } else if (cmd == "list") {
+    showText("/list");
+  } else if (cmd == "now") {
+    showText("/now");
+  } else if (cmd == "shuffle") {
+    showText("/shuffle");
+  } else if (cmd == "scan") {
+    autoPlay = false;
+    a2dp.disconnect();
+    a2dp.clearPairing();
+    findAndConnect();
+    lastScan = millis();
+  } else if (cmd == "status") {
+    Serial.printf("wifi=%d ip=%s bt=%d auto=%d next=%s\n",
+                  WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
+                  a2dp.connected(), autoPlay, nextPath.c_str());
+  } else {
+    Serial.println("commands: play [url] / music / next / prev / rand / stop /"
+                   " list / now / shuffle / scan / status");
+  }
 }
 
 // ---------------- setup / loop ----------------
@@ -420,7 +582,8 @@ void setup() {
   findAndConnect();
   lastScan = millis();
 
-  Serial.println("commands: play [url] / scan / status");
+  Serial.println("commands: play [url] / music / next / prev / rand / stop /"
+                 " list / now / shuffle / scan / status");
 }
 
 void loop() {
@@ -435,27 +598,44 @@ void loop() {
     findAndConnect();
   }
 
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (cmd.startsWith("play")) {
-      String url = cmd.substring(4);
-      url.trim();
-      playUrl(url.length() ? url : String(AUDIO_URL));
-    } else if (cmd == "scan") {
-      a2dp.disconnect();
-      a2dp.clearPairing();
-      findAndConnect();
-      lastScan = millis();
-    } else if (cmd == "status") {
-      Serial.printf("wifi=%d ip=%s bt=%d\n",
-                    WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                    a2dp.connected());
+  handleCommand(readLine());
+
+  // 止まっているときの BOOTSEL は連続再生の開始。再生中は pollAbort() が
+  // 次の曲へ送るので、ここでは autoPlay を見て二重に反応しないようにする
+  if (!autoPlay && millis() - lastBootsel >= 250) {
+    lastBootsel = millis();
+    if (BOOTSEL) {
+      while (BOOTSEL) delay(1);
+      nextPath = "/next.wav";
+      autoPlay = true;
+      playErrors = 0;
     }
   }
 
-  if (BOOTSEL) {
-    while (BOOTSEL) delay(1);
-    playUrl(AUDIO_URL);
+  if (!autoPlay) return;
+
+  // Wi-Fi かイヤホンが切れている間は再接続を待つ (張り直しは上の処理に任せる)
+  if (WiFi.status() != WL_CONNECTED || !a2dp.connected()) {
+    delay(100);
+    return;
+  }
+
+  PlayResult r = playUrl(String(MUSIC_URL) + nextPath);
+  if (r == PLAY_STOP) {
+    autoPlay = false;
+    nextPath = "/next.wav";
+  } else if (r == PLAY_ERROR) {
+    // 一時的なものかもしれないので数回は粘り、それでも駄目なら止める
+    if (++playErrors >= 3) {
+      autoPlay = false;
+      playErrors = 0;
+      status("music stopped", "server down?");
+    } else {
+      delay(2000);
+    }
+  } else {
+    playErrors = 0;
+    if (r == PLAY_DONE) nextPath = "/next.wav";
+    // PLAY_SKIP のときは pollAbort() が nextPath を設定済み
   }
 }
