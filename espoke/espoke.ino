@@ -10,7 +10,7 @@
  *   2. Bluetooth イヤホン (A2DP sink) をスキャンして接続
  *   3. シリアルに "music" と打つか BOOTSEL を押すと、MUSIC_URL の音楽サーバから
  *      曲を順番に取ってきて流し続ける。"play" なら AUDIO_URL の通知音を1回だけ
- *   4. LCD1602A に曲名と状態を表示
+ *   4. LCD1602A に曲名と状態を表示。GP15 のスイッチで表示ページを切り替える
  *
  * 音声フォーマット:
  *   16bit PCM の WAV。モノラル/ステレオどちらでも可。
@@ -43,6 +43,7 @@ static const int     PIN_SCL   = 1;   // GP1 (物理2番ピン)
 static const uint8_t LCD_COLS  = 16;
 static const uint8_t LCD_ROWS  = 2;
 static const uint8_t LCD_ADDR_DEFAULT = 0x27;
+static const int     PIN_BUTTON = 15;  // GP15 (物理20番ピン)。もう片側は GND へ
 // ------------
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
@@ -87,17 +88,34 @@ static unsigned long lastBootsel = 0;      // BOOTSEL を最後に見た時刻
 
 static String serialLine = "";             // 受信途中のコマンド
 
+// LCD の表示ページ。0 は曲名や状態を出す通常画面で、スイッチを押すたびに次へ進む
+enum Page { PAGE_MAIN, PAGE_WIFI, PAGE_BT, PAGE_SYSTEM, PAGE_COUNT };
+static int    page = PAGE_MAIN;
+static String mainLines[2];                // 通常画面の内容。他のページを見ている間も更新しておく
+static unsigned long lastPageDraw = 0;
+
+static const unsigned long DEBOUNCE_MS = 30;
+static bool   buttonStable = HIGH;         // チャタリングを除いた状態 (INPUT_PULLUP なので離すと HIGH)
+static bool   buttonRaw = HIGH;
+static unsigned long buttonChanged = 0;
+
 // 曲名はサーバが X-Track ヘッダで返してくる。collectHeaders() で拾う指定をしておく
 static const char *HTTP_HEADERS[] = { "X-Track" };
 
 // ---------------- LCD ----------------
 
-static void printLine(uint8_t row, const String &text) {
+static void drawRow(uint8_t row, const String &text) {
   if (!lcd) return;
   String s = text.substring(0, LCD_COLS);
   while (s.length() < LCD_COLS) s += ' ';
   lcd->setCursor(0, row);
   lcd->print(s);
+}
+
+// 通常画面の1行を書き換える。他のページを表示中なら覚えておくだけ
+static void printLine(uint8_t row, const String &text) {
+  mainLines[row] = text;
+  if (page == PAGE_MAIN) drawRow(row, text);
 }
 
 static void status(const String &a, const String &b) {
@@ -126,6 +144,64 @@ static void setupLCD() {
   lcd = new LiquidCrystal_I2C(addr, LCD_COLS, LCD_ROWS);
   lcd->init();
   lcd->backlight();
+}
+
+// 今のページを描き直す。PAGE_MAIN 以外は中身が刻々と変わるので定期的に呼ぶ
+static void drawPage() {
+  lastPageDraw = millis();
+  switch (page) {
+    case PAGE_WIFI:
+      if (WiFi.status() == WL_CONNECTED) {
+        drawRow(0, "WiFi " + String(WiFi.RSSI()) + "dBm");
+        drawRow(1, WiFi.localIP().toString());
+      } else {
+        drawRow(0, "WiFi --");
+        drawRow(1, WIFI_SSID);
+      }
+      break;
+    case PAGE_BT:
+      if (a2dp.connected()) {
+        // "aa:bb:cc:dd:ee:ff" は17文字で1行に収まらないのでコロンを抜く
+        String addr = bd_addr_to_str(a2dp.getSinkAddress());
+        addr.replace(":", "");
+        drawRow(0, "BT connected");
+        drawRow(1, addr);
+      } else {
+        drawRow(0, "BT --");
+        drawRow(1, BT_TARGET_ADDR[0] ? BT_TARGET_ADDR : "scan");
+      }
+      break;
+    case PAGE_SYSTEM: {
+      unsigned long sec = millis() / 1000;
+      char up[17];
+      snprintf(up, sizeof(up), "up %luh%02lum%02lus", sec / 3600, sec / 60 % 60, sec % 60);
+      drawRow(0, up);
+      drawRow(1, "heap " + String(rp2040.getFreeHeap() / 1024) + "KB");
+      break;
+    }
+    default:
+      drawRow(0, mainLines[0]);
+      drawRow(1, mainLines[1]);
+      break;
+  }
+}
+
+// スイッチを見て、押されたらページを送る。再生中も呼ばれるので待たずに返す
+static void pollButton() {
+  bool raw = digitalRead(PIN_BUTTON);
+  if (raw != buttonRaw) {
+    buttonRaw = raw;
+    buttonChanged = millis();
+  } else if (raw != buttonStable && millis() - buttonChanged >= DEBOUNCE_MS) {
+    buttonStable = raw;
+    if (buttonStable == LOW) {
+      page = (page + 1) % PAGE_COUNT;
+      Serial.printf("page %d\n", page);
+      drawPage();
+    }
+  }
+
+  if (page != PAGE_MAIN && millis() - lastPageDraw >= 1000) drawPage();
 }
 
 // ---------------- シリアル ----------------
@@ -183,7 +259,8 @@ static bool connectTo(const uint8_t *addr, const char *label) {
   // そこまで到達して初めて connected() が true になる
   unsigned long start = millis();
   while (!a2dp.connected() && millis() - start < CONNECT_TIMEOUT_MS) {
-    delay(50);
+    pollButton();
+    delay(10);
   }
   if (!a2dp.connected()) {
     status("BT timeout", label);
@@ -314,6 +391,8 @@ static bool parseWav(WiFiClient *s, WavInfo *info) {
 
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
+  pollButton();
+
   String cmd = readLine();
   if (cmd.length()) {
     if (cmd == "stop") return PLAY_STOP;
@@ -527,9 +606,10 @@ static void handleCommand(String cmd) {
     findAndConnect();
     lastScan = millis();
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d auto=%d next=%s\n",
+    Serial.printf("wifi=%d ip=%s bt=%d auto=%d next=%s page=%d button=%s\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                  a2dp.connected(), autoPlay, nextPath.c_str());
+                  a2dp.connected(), autoPlay, nextPath.c_str(), page,
+                  digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released");
   } else {
     Serial.println("commands: play [url] / music / next / prev / rand / stop /"
                    " list / now / shuffle / scan / status");
@@ -543,7 +623,8 @@ static bool connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
-    delay(250);
+    pollButton();
+    delay(10);
   }
   if (WiFi.status() == WL_CONNECTED) {
     status("WiFi ok", WiFi.localIP().toString());
@@ -558,6 +639,7 @@ void setup() {
   unsigned long start = millis();
   while (!Serial && millis() - start < 3000) delay(10);
 
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
   setupLCD();
   status("espoke", "booting...");
 
@@ -598,6 +680,7 @@ void loop() {
     findAndConnect();
   }
 
+  pollButton();
   handleCommand(readLine());
 
   // 止まっているときの BOOTSEL は連続再生の開始。再生中は pollAbort() が
