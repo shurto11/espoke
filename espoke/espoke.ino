@@ -11,6 +11,9 @@
  *   3. シリアルに "music" と打つか BOOTSEL を押すと、MUSIC_URL の音楽サーバから
  *      曲を順番に取ってきて流し続ける。"play" なら AUDIO_URL の通知音を1回だけ
  *   4. LCD1602A に曲名と状態を表示。GP15 のスイッチで表示ページを切り替える
+ *   5. SW1〜SW4 (GP10〜13) でモールス信号を打ってアルファベットを入力する
+ *      SW1 ツー / SW2 トン / SW3 backspace / SW4 enter (符号を文字に確定。空なら空白)
+ *      SW1 か SW2 を押すと入力ページに切り替わる
  *
  * 音声フォーマット:
  *   16bit PCM の WAV。モノラル/ステレオどちらでも可。
@@ -44,6 +47,10 @@ static const uint8_t LCD_COLS  = 16;
 static const uint8_t LCD_ROWS  = 2;
 static const uint8_t LCD_ADDR_DEFAULT = 0x27;
 static const int     PIN_BUTTON = 15;  // GP15 (物理20番ピン)。もう片側は GND へ
+static const int     PIN_DASH   = 10;  // SW1 GP10 (物理14番ピン) ツー
+static const int     PIN_DOT    = 11;  // SW2 GP11 (物理15番ピン) トン
+static const int     PIN_BACK   = 12;  // SW3 GP12 (物理16番ピン) backspace
+static const int     PIN_ENTER  = 13;  // SW4 GP13 (物理17番ピン) enter
 // ------------
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
@@ -89,7 +96,7 @@ static unsigned long lastBootsel = 0;      // BOOTSEL を最後に見た時刻
 static String serialLine = "";             // 受信途中のコマンド
 
 // LCD の表示ページ。0 は曲名や状態を出す通常画面で、スイッチを押すたびに次へ進む
-enum Page { PAGE_MAIN, PAGE_WIFI, PAGE_BT, PAGE_SYSTEM, PAGE_COUNT };
+enum Page { PAGE_MAIN, PAGE_INPUT, PAGE_WIFI, PAGE_BT, PAGE_SYSTEM, PAGE_COUNT };
 static int    page = PAGE_MAIN;
 static String mainLines[2];                // 通常画面の内容。他のページを見ている間も更新しておく
 static unsigned long lastPageDraw = 0;
@@ -98,6 +105,40 @@ static const unsigned long DEBOUNCE_MS = 30;
 static bool   buttonStable = HIGH;         // チャタリングを除いた状態 (INPUT_PULLUP なので離すと HIGH)
 static bool   buttonRaw = HIGH;
 static unsigned long buttonChanged = 0;
+
+// モールス入力
+struct KeyState {
+  int           pin;
+  bool          raw;
+  bool          stable;
+  unsigned long changedAt;
+};
+enum { KEY_DASH, KEY_DOT, KEY_BACK, KEY_ENTER, KEY_COUNT };
+static KeyState keys[KEY_COUNT] = {
+  {PIN_DASH,  HIGH, HIGH, 0},
+  {PIN_DOT,   HIGH, HIGH, 0},
+  {PIN_BACK,  HIGH, HIGH, 0},
+  {PIN_ENTER, HIGH, HIGH, 0},
+};
+
+struct Morse {
+  char        ch;
+  const char *code;
+};
+static const Morse MORSE_TABLE[] = {
+  {'A', ".-"},    {'B', "-..."},  {'C', "-.-."},  {'D', "-.."},   {'E', "."},
+  {'F', "..-."},  {'G', "--."},   {'H', "...."},  {'I', ".."},    {'J', ".---"},
+  {'K', "-.-"},   {'L', ".-.."},  {'M', "--"},    {'N', "-."},    {'O', "---"},
+  {'P', ".--."},  {'Q', "--.-"},  {'R', ".-."},   {'S', "..."},   {'T', "-"},
+  {'U', "..-"},   {'V', "...-"},  {'W', ".--"},   {'X', "-..-"},  {'Y', "-.--"},
+  {'Z', "--.."},
+  {'0', "-----"}, {'1', ".----"}, {'2', "..---"}, {'3', "...--"}, {'4', "....-"},
+  {'5', "....."}, {'6', "-...."}, {'7', "--..."}, {'8', "---.."}, {'9', "----."},
+};
+static const size_t MAX_CODE = 6;          // 1文字の符号は最長5つ (数字)
+static const size_t MAX_TEXT = 64;
+static String morseCode = "";              // 入力中の符号 ("-" と ".")
+static String morseText = "";              // 確定した文章
 
 // 曲名はサーバが X-Track ヘッダで返してくる。collectHeaders() で拾う指定をしておく
 static const char *HTTP_HEADERS[] = { "X-Track" };
@@ -146,6 +187,14 @@ static void setupLCD() {
   lcd->backlight();
 }
 
+// 符号を文字にする。表になければ 0
+static char decodeMorse(const String &code) {
+  for (const Morse &m : MORSE_TABLE) {
+    if (code == m.code) return m.ch;
+  }
+  return 0;
+}
+
 // 今のページを描き直す。PAGE_MAIN 以外は中身が刻々と変わるので定期的に呼ぶ
 static void drawPage() {
   lastPageDraw = millis();
@@ -171,6 +220,22 @@ static void drawPage() {
         drawRow(1, BT_TARGET_ADDR[0] ? BT_TARGET_ADDR : "scan");
       }
       break;
+    case PAGE_INPUT: {
+      // 1行目は末尾にカーソル代わりの '_' を付け、収まらなければ末尾側を見せる
+      String top = morseText + "_";
+      if (top.length() > LCD_COLS) top = top.substring(top.length() - LCD_COLS);
+      drawRow(0, top);
+      // 2行目は左に符号、右端に確定したときの文字
+      String bottom = morseCode;
+      if (morseCode.length()) {
+        char ch = decodeMorse(morseCode);
+        while (bottom.length() < LCD_COLS - 3) bottom += ' ';
+        bottom += "= ";
+        bottom += ch ? ch : '?';
+      }
+      drawRow(1, bottom);
+      break;
+    }
     case PAGE_SYSTEM: {
       unsigned long sec = millis() / 1000;
       char up[17];
@@ -186,8 +251,50 @@ static void drawPage() {
   }
 }
 
+static void onKey(int id) {
+  switch (id) {
+    case KEY_DASH:
+    case KEY_DOT:
+      if (morseCode.length() < MAX_CODE) morseCode += (id == KEY_DASH) ? '-' : '.';
+      break;
+    case KEY_BACK:
+      if (morseCode.length()) {
+        morseCode.remove(morseCode.length() - 1);
+      } else if (morseText.length()) {
+        morseText.remove(morseText.length() - 1);
+      }
+      break;
+    case KEY_ENTER:
+      if (morseCode.length()) {
+        char ch = decodeMorse(morseCode);
+        if (ch && morseText.length() < MAX_TEXT) morseText += ch;
+        if (!ch) Serial.printf("unknown code: %s\n", morseCode.c_str());
+        morseCode = "";
+      } else if (morseText.length() && morseText.length() < MAX_TEXT) {
+        morseText += ' ';
+      }
+      break;
+  }
+  Serial.printf("morse code=\"%s\" text=\"%s\"\n", morseCode.c_str(), morseText.c_str());
+  // 符号を打ち始めたら入力ページへ。backspace / enter は入力ページを見ているときだけ表示に効く
+  if (id == KEY_DASH || id == KEY_DOT) page = PAGE_INPUT;
+  if (page == PAGE_INPUT) drawPage();
+}
+
 // スイッチを見て、押されたらページを送る。再生中も呼ばれるので待たずに返す
 static void pollButton() {
+  for (int i = 0; i < KEY_COUNT; i++) {
+    KeyState &k = keys[i];
+    bool raw = digitalRead(k.pin);
+    if (raw != k.raw) {
+      k.raw = raw;
+      k.changedAt = millis();
+    } else if (raw != k.stable && millis() - k.changedAt >= DEBOUNCE_MS) {
+      k.stable = raw;
+      if (raw == LOW) onKey(i);
+    }
+  }
+
   bool raw = digitalRead(PIN_BUTTON);
   if (raw != buttonRaw) {
     buttonRaw = raw;
@@ -201,7 +308,7 @@ static void pollButton() {
     }
   }
 
-  if (page != PAGE_MAIN && millis() - lastPageDraw >= 1000) drawPage();
+  if (page != PAGE_MAIN && page != PAGE_INPUT && millis() - lastPageDraw >= 1000) drawPage();
 }
 
 // ---------------- シリアル ----------------
@@ -606,10 +713,11 @@ static void handleCommand(String cmd) {
     findAndConnect();
     lastScan = millis();
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d auto=%d next=%s page=%d button=%s\n",
+    Serial.printf("wifi=%d ip=%s bt=%d auto=%d next=%s page=%d button=%s text=\"%s\"\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
                   a2dp.connected(), autoPlay, nextPath.c_str(), page,
-                  digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released");
+                  digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
+                  morseText.c_str());
   } else {
     Serial.println("commands: play [url] / music / next / prev / rand / stop /"
                    " list / now / shuffle / scan / status");
@@ -640,6 +748,7 @@ void setup() {
   while (!Serial && millis() - start < 3000) delay(10);
 
   pinMode(PIN_BUTTON, INPUT_PULLUP);
+  for (KeyState &k : keys) pinMode(k.pin, INPUT_PULLUP);
   setupLCD();
   status("espoke", "booting...");
 
