@@ -1064,19 +1064,16 @@
 <polyline points="764,442 808,442" fill="none" stroke="#159a8c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="764,464 808,464" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="808,486 808,662 632,662" fill="none" stroke="#222222" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="82,112 82,90 830,90 830,464 808,464" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="170,112 170,222 522,222" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="82,266 82,288" fill="none" stroke="#159a8c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="104,266 104,288" fill="none" stroke="#c9a400" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="170,112 170,134" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="82,112 82,156" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="654,420 676,420" fill="none" stroke="#c9a400" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="654,442 676,442" fill="none" stroke="#159a8c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="654,464 676,464" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="654,486 764,486" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="764,486 764,464" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="654,398 654,376" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="104,288 104,420 654,420" fill="none" stroke="#c9a400" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.95"/>
 <polyline points="82,288 82,442 654,442" fill="none" stroke="#159a8c" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.95"/>
-<polyline points="170,134 566,134 566,464 654,464" fill="none" stroke="#e8731a" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.95"/>
-<polyline points="82,156 544,156 544,486 654,486" fill="none" stroke="#d42a2a" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.95"/>
+<polyline points="522,222 610,222 610,398 654,398" fill="none" stroke="#e8731a" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.95"/>
 <rect x="68.14" y="100.12" width="445.72" height="177.76" rx="5" fill="#1f7a3a" fill-opacity="0.88" stroke="#0f4d22" stroke-width="2"/>
 <rect x="56.14" y="171.0" width="26" height="36" rx="3" fill="#c0c0c0" stroke="#666"/>
 <text x="69.14" y="193.0" font-size="9" text-anchor="middle" fill="#222" font-weight="bold">USB</text>
@@ -1345,10 +1342,8 @@
 <circle cx="654" cy="420" r="4.6" fill="#fff" stroke="#c9a400" stroke-width="2.4"/>
 <circle cx="82" cy="288" r="4.6" fill="#fff" stroke="#159a8c" stroke-width="2.4"/>
 <circle cx="654" cy="442" r="4.6" fill="#fff" stroke="#159a8c" stroke-width="2.4"/>
-<circle cx="170" cy="134" r="4.6" fill="#fff" stroke="#e8731a" stroke-width="2.4"/>
-<circle cx="654" cy="464" r="4.6" fill="#fff" stroke="#e8731a" stroke-width="2.4"/>
-<circle cx="82" cy="156" r="4.6" fill="#fff" stroke="#d42a2a" stroke-width="2.4"/>
-<circle cx="654" cy="486" r="4.6" fill="#fff" stroke="#d42a2a" stroke-width="2.4"/>
+<circle cx="522" cy="222" r="4.6" fill="#fff" stroke="#e8731a" stroke-width="2.4"/>
+<circle cx="654" cy="398" r="4.6" fill="#fff" stroke="#e8731a" stroke-width="2.4"/>
 <text x="40" y="732" font-size="14" font-weight="bold" fill="#222">配線</text>
 <line x1="40" y1="750" x2="70" y2="750" stroke="#1f6fd1" stroke-width="4.5" stroke-linecap="round"/>
 <text x="80" y="754" font-size="12.5" fill="#222">SW1  足(4,8) → Pico 14番ピン GP10</text>
@@ -1365,9 +1360,9 @@
 <line x1="40" y1="876" x2="70" y2="876" stroke="#159a8c" stroke-width="4.5" stroke-linecap="round"/>
 <text x="80" y="880" font-size="12.5" fill="#222">SDA  Pico 1番ピン GP0 →(2,18)＝表の被覆線＝(28,11)→ レベルシフタ SDA3V3 ／ SDA5V → LCD 用ピン SDA</text>
 <line x1="40" y1="897" x2="70" y2="897" stroke="#e8731a" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="901" font-size="12.5" fill="#222">3.3V  Pico 36番ピン 3V3 →(6,25)＝表の被覆線＝(28,10)→ レベルシフタ 3V3 → x=32 → 行14（microSD の VDD・プルアップ）</text>
+<text x="80" y="901" font-size="12.5" fill="#222">3.3V  Pico 36番ピン 3V3 → 行21（Pico の下の裏）→(22,21)＝表の被覆線＝(28,13)→ 行14（microSD）→ x=32 → レベルシフタ 3V3</text>
 <line x1="40" y1="918" x2="70" y2="918" stroke="#d42a2a" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="922" font-size="12.5" fill="#222">5V  Pico 40番ピン VBUS →(2,24)＝表の被覆線＝(28,9)→ 行9 → レベルシフタ 5V → LCD 用ピン VCC</text>
+<text x="80" y="922" font-size="12.5" fill="#222">5V  Pico 40番ピン VBUS → 行27（基板の上端）→ x=36 → LCD 用ピン VCC ← レベルシフタ 5V（すべて裏）</text>
 <line x1="40" y1="939" x2="70" y2="939" stroke="#222222" stroke-width="4.5" stroke-linecap="round"/>
 <text x="80" y="943" font-size="12.5" fill="#222">LCD の GND  LCD 用ピン GND → x=35 → 行1 → 設置済みの GND 線の端 (27,1)</text>
 <line x1="40" y1="960" x2="70" y2="960" stroke="#5b5bd6" stroke-width="4.5" stroke-linecap="round"/>
@@ -1377,11 +1372,11 @@
 <line x1="40" y1="1002" x2="70" y2="1002" stroke="#5b5bd6" stroke-width="4.5" stroke-linecap="round"/>
 <text x="80" y="1006" font-size="12.5" fill="#222">microSD  DAT2・CS・CMD・DAT0・DAT1 は 10kΩ で行14（3.3V）へ。VDD–VSS 間に 10μF と 0.1μF</text>
 <text x="40" y="1047" font-size="14" font-weight="bold" fill="#222">メモ</text>
-<text x="40" y="1069" font-size="12.5" fill="#333">・スイッチ4個・Pico のソケット・その配線（GND を含む）は設置済み。この図ではそこを変えない</text>
+<text x="40" y="1069" font-size="12.5" fill="#333">・スイッチ4個・Pico・その配線（GND を含む）は設置済み。この図ではそこを変えない</text>
 <text x="40" y="1090" font-size="12.5" fill="#333">・スイッチは対角の2本（左下と右上）だけを使う。GPIO は INPUT_PULLUP、押すと LOW</text>
 <text x="40" y="1111" font-size="12.5" fill="#333">・実線は裏の配線。Pico の下（y=20〜25）の配線も裏に通す</text>
-<text x="40" y="1132" font-size="12.5" fill="#333">・破線は表側を通す被覆線（4本）。設置済みの裏の配線をまたぐので表に回す。白丸の穴に差し、裏で隣のピンと短くつなぐ</text>
-<text x="40" y="1153" font-size="12.5" fill="#333">・3.3V と 5V の被覆線は Pico の下（ソケットで浮いた隙間）を通す。被覆線どうしは交差してよい</text>
+<text x="40" y="1132" font-size="12.5" fill="#333">・破線は表側を通す被覆線（3本）。設置済みの裏の配線をまたぐので表に回す。白丸の穴に差し、裏で隣のピンと短くつなぐ</text>
+<text x="40" y="1153" font-size="12.5" fill="#333">・表側の被覆線は Pico の下を通さない（Pico と基板の間に隙間がないため）。被覆線どうしの交差もない</text>
 <text x="40" y="1174" font-size="12.5" fill="#333">・レベルシフタ（SSCI-023962）は部品面を上にして 180° 回し、3.3V 側を左（x=29）、5V 側を右（x=33）に置く</text>
 <text x="40" y="1195" font-size="12.5" fill="#333">・レベルシフタには GND ピンがない。LCD の GND は行1 の設置済み GND 線の端 (27,1) につなぐ</text>
 <text x="40" y="1216" font-size="12.5" fill="#333">・CK-40 は 1〜8番ピン（1×8）だけピンヘッダを付ける。FG・CD の穴の下は配線が通るので、ピンを付けない</text>
