@@ -107,9 +107,9 @@ CK_PINS = ["DAT2", "CS", "CMD", "VDD", "CLK", "VSS", "DAT0", "DAT1"]   # 1〜8�
 def ckx(name): return CK_X + CK_PINS.index(name)
 
 SD = [  # (信号, GPIO 名, ピン番号, 経路)
-    ("CS",   "GP20", 26, [(16, 26), (16, 23), (ckx("CS"), 23), (ckx("CS"), CK_Y)]),
-    ("CMD",  "GP19", 25, [(17, 26), (17, 24), (ckx("CMD"), 24), (ckx("CMD"), CK_Y)]),
-    ("CLK",  "GP18", 24, [(18, 26), (18, 25), (ckx("CLK"), 25), (ckx("CLK"), CK_Y)]),
+    ("CS",   "GP20", 26, [(16, 26), (16, 22), (ckx("CS"), 22), (ckx("CS"), CK_Y)]),
+    ("CMD",  "GP19", 25, [(17, 26), (17, 23), (ckx("CMD"), 23), (ckx("CMD"), CK_Y)]),
+    ("CLK",  "GP18", 24, [(18, 26), (18, 24), (ckx("CLK"), 24), (ckx("CLK"), CK_Y)]),
     ("DAT0", "GP16", 21, [(21, 26), (ckx("DAT0"), 26), (ckx("DAT0"), CK_Y)]),
 ]
 # VSS: Pico 23番ピン GND → 行25 → x=33 → パスコンの下端 (33,16) まで
