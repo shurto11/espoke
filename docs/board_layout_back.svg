@@ -1074,7 +1074,7 @@
 <polyline points="786,288 786,420 236,420" fill="none" stroke="#c9a400" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.45"/>
 <polyline points="808,288 808,442 236,442" fill="none" stroke="#159a8c" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.45"/>
 <polyline points="368,222 280,222 280,398 236,398" fill="none" stroke="#e8731a" stroke-width="3" stroke-dasharray="9 5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.45"/>
-<rect x="376.14" y="100.12" width="445.72" height="177.76" rx="5" fill="#d5e3cf" stroke="#1f7a3a" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="376.14" y="100.12" width="445.72" height="177.76" rx="5" fill="#d5e3cf" fill-opacity="0.3" stroke="#1f7a3a" stroke-width="2" stroke-dasharray="7 5"/>
 <rect x="807.86" y="171.0" width="26" height="36" rx="3" fill="none" stroke="#666" stroke-dasharray="4 3"/>
 <text x="820.86" y="193.0" font-size="9" text-anchor="middle" fill="#444" font-weight="bold">USB</text>
 <text x="599.0" y="194.0" font-size="14" text-anchor="middle" fill="#1f5a30" font-weight="bold">Pico WH（本体は反対側）</text>

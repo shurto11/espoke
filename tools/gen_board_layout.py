@@ -180,7 +180,7 @@ ux = bx1 if BACK else bx0   # USB 側の端
 if BACK:
     # 本体は反対側にあるので輪郭だけ描く
     add(f'<rect x="{bx0}" y="{by0}" width="{bx1 - bx0}" height="{by1 - by0}" rx="5" '
-        'fill="#d5e3cf" stroke="#1f7a3a" stroke-width="2" stroke-dasharray="7 5"/>')
+        'fill="#d5e3cf" fill-opacity="0.3" stroke="#1f7a3a" stroke-width="2" stroke-dasharray="7 5"/>')
     add(f'<rect x="{ux - 14}" y="{uy - 18}" width="26" height="36" rx="3" fill="none" stroke="#666" stroke-dasharray="4 3"/>')
     add(f'<text x="{ux - 1}" y="{uy + 4}" font-size="9" text-anchor="middle" fill="#444" font-weight="bold">USB</text>')
     add(f'<text x="{(bx0 + bx1) / 2}" y="{uy + 5}" font-size="14" text-anchor="middle" fill="#1f5a30" '
