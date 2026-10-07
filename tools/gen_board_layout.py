@@ -83,15 +83,13 @@ def poly(pts, color, width=4.2, dash=None):
     add(f'<polyline points="{d}" fill="none" stroke="{color}" stroke-width="{width}" '
         f'stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"{da}/>')
 
-def jumper(pts, color):
-    """表側を通す被覆線（裏の配線とは交差しない）。最初と最後の点が線をはんだ付けする穴。"""
+def insulated(pts, color):
+    """裏で設置済みの線の上を越える被覆線。白い縁取りで、ほかの線より上に描く。"""
     d = " ".join(f"{hx(x)},{hy(y)}" for x, y in pts)
-    add(f'<polyline points="{d}" fill="none" stroke="{color}" stroke-width="3" stroke-dasharray="9 5" '
-        f'stroke-linecap="round" stroke-linejoin="round" stroke-opacity="{0.45 if BACK else 0.95}"/>')
-
-def jumper_ends(pts, color):
-    for x, y in (pts[0], pts[-1]):
-        add(f'<circle cx="{hx(x)}" cy="{hy(y)}" r="4.6" fill="#fff" stroke="{color}" stroke-width="2.4"/>')
+    add(f'<polyline class="ins-case" points="{d}" fill="none" stroke="#fff" stroke-width="8.5" '
+        'stroke-linecap="round" stroke-linejoin="round"/>')
+    add(f'<polyline class="ins" points="{d}" fill="none" stroke="{color}" stroke-width="4" '
+        'stroke-linecap="round" stroke-linejoin="round"/>')
 
 for *_, color, path in SW:
     poly(path, color)
@@ -141,21 +139,15 @@ for y, color in zip(LS_ROWS, (SCL_C, SDA_C, V5_C)):
 poly([(HDR_X, 9), (HDR_X, 1), (27, 1)], GND_C)
 # 5V: Pico 40番ピン → 行27（基板の上端）→ x=36 → LCD 用ピン VCC（裏だけで届く）
 poly([(2, 26), (2, 27), (36, 27), (36, 10), (HDR_X, 10)], V5_C)
-# 3.3V: Pico 36番ピン → 行21（Pico の下の裏）→ Pico の右端 (22,21)
-poly([(6, 26), (6, 21), (22, 21)], V33_C)
-# 残りは、設置済みの裏の配線をまたぐので表側の被覆線にする（Pico の下は通さない）。
-# 両端はピンの隣の穴で、そこからピンまでは裏で短くつなぐ。
-LINKS = [((2, 19), (2, 18), SDA_C), ((3, 19), (3, 18), SCL_C),
-         ((28, 12), (LS_L, 12), SCL_C), ((28, 11), (LS_L, 11), SDA_C), ((28, 13), (CK_X, R_BOT), V33_C)]
-for a, b, c in LINKS:
-    poly([a, b], c)
-JUMPERS = [  # (名前, 色, 経路)。最初と最後が線をはんだ付けする穴
-    ("SCL",  SCL_C, [(3, 18), (3, 12), (28, 12)]),
-    ("SDA",  SDA_C, [(2, 18), (2, 11), (28, 11)]),
-    ("3V3",  V33_C, [(22, 21), (26, 21), (26, 13), (28, 13)]),
+# 残りの 3 本は、設置済みの線（スイッチ・GND）の上を越えるので裏の被覆線にする。
+# 両端はピンや部品の足のランドに直接はんだ付けする。
+INSULATED = [  # (名前, 色, 経路)
+    ("SCL", SCL_C, [(3, 19), (3, 12), (LS_L, 12)]),
+    ("SDA", SDA_C, [(2, 19), (2, 11), (LS_L, 11)]),
+    ("3V3", V33_C, [(6, 26), (6, 21), (26, 21), (26, R_BOT), (CK_X, R_BOT)]),
 ]
-for _, color, pts in JUMPERS:
-    jumper(pts, color)
+for _, color, pts in INSULATED:
+    insulated(pts, color)
 
 # ---- Raspberry Pi Pico（USB を左、ピン行 y=19 / y=26）----
 # 下をくぐる配線より後に描いて、表の図では本体で隠す
@@ -314,19 +306,15 @@ for x0 in SW_X0:
     add(f'<text x="{(hx(x0) + hx(x0 + 2)) / 2}" y="{hy(SW_Y1) + 12}" font-size="9.5" text-anchor="middle" '
         f'fill="{"#8a1c1c" if BACK else "#ffd0d0"}" font-weight="bold">設置済み</text>')
 
-# 表側の被覆線の両端（はんだ付けする穴）
-for _, color, pts in JUMPERS:
-    jumper_ends(pts, color)
-
 # ---- 凡例 ----
 ly = hy(1) + 70
 add(f'<text x="{OX - 20}" y="{ly}" font-size="14" font-weight="bold" fill="#222">配線</text>')
 rows_ = [(c, f"{name}  足({path[0][0]},{path[0][1]}) → Pico {n}番ピン {gp}") for name, gp, n, c, path in SW]
 rows_ += [
     (GND_C, "GND  各スイッチの足 → 行1 → x=27 → 行17 → Pico 18番ピン GND（ここまで設置済み）"),
-    (SCL_C, "SCL  Pico 2番ピン GP1 →(3,18)＝表の被覆線＝(28,12)→ レベルシフタ SCL3V3 ／ SCL5V → LCD 用ピン SCL"),
-    (SDA_C, "SDA  Pico 1番ピン GP0 →(2,18)＝表の被覆線＝(28,11)→ レベルシフタ SDA3V3 ／ SDA5V → LCD 用ピン SDA"),
-    (V33_C, "3.3V  Pico 36番ピン 3V3 → 行21（Pico の下の裏）→(22,21)＝表の被覆線＝(28,13)→ 行14（microSD）→ x=32 → レベルシフタ 3V3"),
+    (SCL_C, "SCL  Pico 2番ピン GP1 → x=3 → 行12 → レベルシフタ SCL3V3（被覆線）／ SCL5V → LCD 用ピン SCL"),
+    (SDA_C, "SDA  Pico 1番ピン GP0 → x=2 → 行11 → レベルシフタ SDA3V3（被覆線）／ SDA5V → LCD 用ピン SDA"),
+    (V33_C, "3.3V  Pico 36番ピン 3V3 → 行21（Pico の下）→ x=26 → 行14（被覆線）→ microSD の VDD・プルアップ → x=32 → レベルシフタ 3V3"),
     (V5_C, "5V  Pico 40番ピン VBUS → 行27（基板の上端）→ x=36 → LCD 用ピン VCC ← レベルシフタ 5V（すべて裏）"),
     (GND_C, "LCD の GND  LCD 用ピン GND → x=35 → 行1 → 設置済みの GND 線の端 (27,1)"),
     (SD_C, "microSD  Pico 26番 GP20→CS、25番 GP19→CMD、24番 GP18→CLK、21番 GP16→DAT0（Pico の下の行22〜24・26）"),
@@ -344,14 +332,14 @@ notes = [
     "・裏返すと左右が反対になる。基板の端に x=1 / x=36 と書いておくと迷わない",
     "・USB 側（Pico の 1番・40番ピン）は、この面では右端にくる",
     "・点線の四角は反対側（表）にある部品の輪郭。はんだ付けするのは丸い足とピン",
-    "・薄い破線は表側を通す被覆線。白丸の穴に表から差し、裏で隣のピンへつなぐ",
-    "・裏の配線どうしの交差はない",
+    "・白い縁取りの 3 本（SDA・SCL・3.3V）は被覆線。設置済みのスイッチと GND の線の上を越える",
+    "・ほかの線どうしの交差はないので、スズメッキ線でよい",
 ] if BACK else [
     "・スイッチ4個・Pico・その配線（GND を含む）は設置済み。この図ではそこを変えない",
     "・スイッチは対角の2本（左下と右上）だけを使う。GPIO は INPUT_PULLUP、押すと LOW",
     "・実線は裏の配線。Pico の下（y=20〜25）の配線も裏に通す",
-    "・破線は表側を通す被覆線（3本）。設置済みの裏の配線をまたぐので表に回す。白丸の穴に差し、裏で隣のピンと短くつなぐ",
-    "・表側の被覆線は Pico の下を通さない（Pico と基板の間に隙間がないため）。被覆線どうしの交差もない",
+    "・白い縁取りの 3 本（SDA・SCL・3.3V）は裏の被覆線。設置済みのスイッチと GND の線の上を越える。ほかはスズメッキ線でよい",
+    "・被覆線は最後にはんだ付けする。そのあと近くのランドを触るときは、こてを被覆に当てない（被覆が溶ける）",
     "・レベルシフタ（SSCI-023962）は部品面を上にして 180° 回し、3.3V 側を左（x=29）、5V 側を右（x=33）に置く",
     "・レベルシフタには GND ピンがない。LCD の GND は行1 の設置済み GND 線の端 (27,1) につなぐ",
     "・CK-40 は 1〜8番ピン（1×8）だけピンヘッダを付ける。FG・CD の穴の下は配線が通るので、ピンを付けない",
