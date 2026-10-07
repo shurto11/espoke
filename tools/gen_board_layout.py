@@ -123,7 +123,7 @@ PULL = ["DAT2", "CS", "CMD", "DAT0", "DAT1"]
 R_TOP, R_BOT = 18, 14
 for n in PULL:
     poly([(ckx(n), CK_Y), (ckx(n), R_TOP)], SD_C, 3.4)
-poly([(27, R_BOT), (ckx("DAT1"), R_BOT)], V33_C)
+poly([(CK_X, R_BOT), (ckx("DAT1"), R_BOT)], V33_C)
 poly([(ckx("VDD"), CK_Y), (ckx("VDD"), R_BOT)], V33_C)
 
 # ---- I2C 用レベルシフタ（SSCI-023962）: 180° 回して、左の列が 3.3V 側、右の列が 5V 側 ----
