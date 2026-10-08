@@ -20,6 +20,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `morse_input/` | 4つのスイッチ（GP10〜13）でモールス信号を打ち、アルファベットを LCD に入力するサンプル |
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
 | `espoke/` | 本体。Wi-Fi で WAV を取得して Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 でモールス入力もできる |
+| `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
 | `docs/` | 部品の取り付け手順など |
 | `tools/` | PC 側で通知音や音楽ライブラリを HTTP 配信する補助スクリプト |
 
