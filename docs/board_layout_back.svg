@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="890" height="1184" viewBox="0 0 890 1184" font-family="Noto Sans CJK JP, Noto Sans JP, sans-serif">
-<rect width="890" height="1184" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="890" height="1205" viewBox="0 0 890 1205" font-family="Noto Sans CJK JP, Noto Sans JP, sans-serif">
+<rect width="890" height="1205" fill="#ffffff"/>
 <text x="40" y="32" font-size="20" font-weight="bold" fill="#222">espoke ユニバーサル基板 配置図（36×27穴）</text>
 <text x="40" y="54" font-size="13" fill="#b03030" font-weight="bold">はんだ面（裏）から見た図。表の図と左右が反対で、x=1 は右端。座標は表の図と同じ番号</text>
 <rect x="42.4" y="72.4" width="805.2" height="607.2" rx="6" fill="#e9dcc0" stroke="#b39c6b" stroke-width="2"/>
@@ -39,33 +39,33 @@
 <text x="104" y="695.0" font-size="10" text-anchor="middle" fill="#999" font-weight="normal">34</text>
 <text x="82" y="695.0" font-size="10" text-anchor="middle" fill="#333" font-weight="bold">35</text>
 <text x="60" y="695.0" font-size="10" text-anchor="middle" fill="#999" font-weight="normal">36</text>
-<text x="35.8" y="665.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">1</text>
-<text x="35.8" y="643.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">2</text>
-<text x="35.8" y="621.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">3</text>
-<text x="35.8" y="599.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">4</text>
-<text x="35.8" y="577.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">5</text>
-<text x="35.8" y="555.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">6</text>
-<text x="35.8" y="533.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">7</text>
-<text x="35.8" y="511.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">8</text>
-<text x="35.8" y="489.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">9</text>
-<text x="35.8" y="467.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">10</text>
-<text x="35.8" y="445.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">11</text>
-<text x="35.8" y="423.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">12</text>
-<text x="35.8" y="401.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">13</text>
-<text x="35.8" y="379.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">14</text>
-<text x="35.8" y="357.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">15</text>
-<text x="35.8" y="335.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">16</text>
-<text x="35.8" y="313.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">17</text>
-<text x="35.8" y="291.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">18</text>
-<text x="35.8" y="269.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">19</text>
-<text x="35.8" y="247.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">20</text>
-<text x="35.8" y="225.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">21</text>
-<text x="35.8" y="203.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">22</text>
-<text x="35.8" y="181.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">23</text>
-<text x="35.8" y="159.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">24</text>
-<text x="35.8" y="137.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">25</text>
-<text x="35.8" y="115.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">26</text>
-<text x="35.8" y="93.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">27</text>
+<text x="29.200000000000003" y="665.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">1</text>
+<text x="29.200000000000003" y="643.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">2</text>
+<text x="29.200000000000003" y="621.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">3</text>
+<text x="29.200000000000003" y="599.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">4</text>
+<text x="29.200000000000003" y="577.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">5</text>
+<text x="29.200000000000003" y="555.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">6</text>
+<text x="29.200000000000003" y="533.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">7</text>
+<text x="29.200000000000003" y="511.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">8</text>
+<text x="29.200000000000003" y="489.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">9</text>
+<text x="29.200000000000003" y="467.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">10</text>
+<text x="29.200000000000003" y="445.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">11</text>
+<text x="29.200000000000003" y="423.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">12</text>
+<text x="29.200000000000003" y="401.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">13</text>
+<text x="29.200000000000003" y="379.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">14</text>
+<text x="29.200000000000003" y="357.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">15</text>
+<text x="29.200000000000003" y="335.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">16</text>
+<text x="29.200000000000003" y="313.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">17</text>
+<text x="29.200000000000003" y="291.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">18</text>
+<text x="29.200000000000003" y="269.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">19</text>
+<text x="29.200000000000003" y="247.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">20</text>
+<text x="29.200000000000003" y="225.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">21</text>
+<text x="29.200000000000003" y="203.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">22</text>
+<text x="29.200000000000003" y="181.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">23</text>
+<text x="29.200000000000003" y="159.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">24</text>
+<text x="29.200000000000003" y="137.5" font-size="10" text-anchor="end" fill="#333" font-weight="bold">25</text>
+<text x="29.200000000000003" y="115.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">26</text>
+<text x="29.200000000000003" y="93.5" font-size="10" text-anchor="end" fill="#999" font-weight="normal">27</text>
 <circle cx="830" cy="662" r="3.2" fill="#c9a24a" stroke="#9c7a2c" stroke-width="0.8"/><circle cx="830" cy="662" r="1.3" fill="#5a4a2a"/>
 <circle cx="830" cy="640" r="3.2" fill="#c9a24a" stroke="#9c7a2c" stroke-width="0.8"/><circle cx="830" cy="640" r="1.3" fill="#5a4a2a"/>
 <circle cx="830" cy="618" r="3.2" fill="#c9a24a" stroke="#9c7a2c" stroke-width="0.8"/><circle cx="830" cy="618" r="1.3" fill="#5a4a2a"/>
@@ -1059,18 +1059,17 @@
 <polyline points="82,244 82,288" fill="none" stroke="#5b5bd6" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="236,376 82,376" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
 <polyline points="170,244 170,376" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="148,376 148,464 214,464" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="126,420 82,420" fill="none" stroke="#c9a400" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="126,442 82,442" fill="none" stroke="#159a8c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="126,464 82,464" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="82,486 82,662 258,662" fill="none" stroke="#222222" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline points="808,112 808,90 60,90 60,464 82,464" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-<polyline class="ins-case" points="786,266 786,420 214,420" fill="none" stroke="#fff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline class="ins" points="786,266 786,420 214,420" fill="none" stroke="#c9a400" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline class="ins-case" points="808,266 808,442 214,442" fill="none" stroke="#fff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline class="ins" points="808,266 808,442 214,442" fill="none" stroke="#159a8c" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline class="ins-case" points="720,112 720,222 280,222 280,376 236,376" fill="none" stroke="#fff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
-<polyline class="ins" points="720,112 720,222 280,222 280,376 236,376" fill="none" stroke="#e8731a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="808,266 808,310" fill="none" stroke="#159a8c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="786,266 786,310" fill="none" stroke="#c9a400" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="720,112 720,222 830,222 830,310" fill="none" stroke="#e8731a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="830,398 830,420" fill="none" stroke="#d42a2a" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="808,398 808,442 830,442" fill="none" stroke="#159a8c" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="786,398 786,464 830,464" fill="none" stroke="#c9a400" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline points="830,486 830,662 808,662" fill="none" stroke="#222222" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+<polyline class="ins-case" points="808,112 842.0999999999999,112 842.0999999999999,398 830,398" fill="none" stroke="#fff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline class="ins" points="808,112 842.0999999999999,112 842.0999999999999,398 830,398" fill="none" stroke="#d42a2a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline class="ins-case" points="720,222 280,222 280,376 236,376" fill="none" stroke="#fff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline class="ins" points="720,222 280,222 280,376 236,376" fill="none" stroke="#e8731a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
 <rect x="376.14" y="100.12" width="445.72" height="177.76" rx="5" fill="#d5e3cf" fill-opacity="0.3" stroke="#1f7a3a" stroke-width="2" stroke-dasharray="7 5"/>
 <rect x="807.86" y="171.0" width="26" height="36" rx="3" fill="none" stroke="#666" stroke-dasharray="4 3"/>
 <text x="820.86" y="193.0" font-size="9" text-anchor="middle" fill="#444" font-weight="bold">USB</text>
@@ -1272,57 +1271,51 @@
 <circle cx="82" cy="134" r="4.2" fill="none" stroke="#555" stroke-width="1.2" stroke-dasharray="2 2"/>
 <circle cx="236" cy="112" r="4.2" fill="none" stroke="#555" stroke-width="1.2" stroke-dasharray="2 2"/>
 <circle cx="82" cy="112" r="4.2" fill="none" stroke="#555" stroke-width="1.2" stroke-dasharray="2 2"/>
-<rect x="115.88" y="409.88" width="108.24000000000001" height="64.24000000000001" rx="3" fill="none" stroke="#1d3f8a" stroke-width="2" stroke-dasharray="7 5"/>
-<rect x="209" y="415" width="10" height="10" fill="#222" stroke="#000"/><circle cx="214" cy="420" r="2.5" fill="#d9b44a"/>
-<text x="205" y="423" font-size="7" text-anchor="end" fill="#1d3f8a" font-weight="bold">SCL3V3</text>
-<rect x="209" y="437" width="10" height="10" fill="#222" stroke="#000"/><circle cx="214" cy="442" r="2.5" fill="#d9b44a"/>
-<text x="205" y="445" font-size="7" text-anchor="end" fill="#1d3f8a" font-weight="bold">SDA3V3</text>
-<rect x="209" y="459" width="10" height="10" fill="#222" stroke="#000"/><circle cx="214" cy="464" r="2.5" fill="#d9b44a"/>
-<text x="205" y="467" font-size="7" text-anchor="end" fill="#1d3f8a" font-weight="bold">3V3</text>
-<rect x="121" y="415" width="10" height="10" fill="#222" stroke="#000"/><circle cx="126" cy="420" r="2.5" fill="#d9b44a"/>
-<text x="135" y="423" font-size="7" text-anchor="start" fill="#1d3f8a" font-weight="bold">SCL5V</text>
-<rect x="121" y="437" width="10" height="10" fill="#222" stroke="#000"/><circle cx="126" cy="442" r="2.5" fill="#d9b44a"/>
-<text x="135" y="445" font-size="7" text-anchor="start" fill="#1d3f8a" font-weight="bold">SDA5V</text>
-<rect x="121" y="459" width="10" height="10" fill="#222" stroke="#000"/><circle cx="126" cy="464" r="2.5" fill="#d9b44a"/>
-<text x="135" y="467" font-size="7" text-anchor="start" fill="#1d3f8a" font-weight="bold">5V</text>
-<rect x="142.5" y="396.5" width="55.0" height="11.5" rx="2" fill="#e9dcc0"/>
-<text x="170.0" y="405" font-size="8.5" text-anchor="middle" fill="#1d3f8a" font-weight="bold">レベルシフタ</text>
-<rect x="77" y="415" width="10" height="10" fill="#222" stroke="#000"/><circle cx="82" cy="420" r="2.5" fill="#d9b44a"/>
-<rect x="64.025" y="415.5" width="17.950000000000003" height="10.5" rx="2" fill="#e9dcc0"/>
-<text x="73" y="423" font-size="7.5" text-anchor="end" fill="#222" font-weight="bold">SCL</text>
-<rect x="77" y="437" width="10" height="10" fill="#222" stroke="#000"/><circle cx="82" cy="442" r="2.5" fill="#d9b44a"/>
-<rect x="64.025" y="437.5" width="17.950000000000003" height="10.5" rx="2" fill="#e9dcc0"/>
-<text x="73" y="445" font-size="7.5" text-anchor="end" fill="#222" font-weight="bold">SDA</text>
-<rect x="77" y="459" width="10" height="10" fill="#222" stroke="#000"/><circle cx="82" cy="464" r="2.5" fill="#d9b44a"/>
-<rect x="64.025" y="459.5" width="17.950000000000003" height="10.5" rx="2" fill="#e9dcc0"/>
-<text x="73" y="467" font-size="7.5" text-anchor="end" fill="#222" font-weight="bold">VCC</text>
-<rect x="77" y="481" width="10" height="10" fill="#222" stroke="#000"/><circle cx="82" cy="486" r="2.5" fill="#d9b44a"/>
-<rect x="64.025" y="481.5" width="17.950000000000003" height="10.5" rx="2" fill="#e9dcc0"/>
-<text x="73" y="489" font-size="7.5" text-anchor="end" fill="#222" font-weight="bold">GND</text>
-<rect x="53.97" y="502.5" width="56.06" height="12.5" rx="2" fill="#e9dcc0"/>
-<text x="82" y="512" font-size="9.5" text-anchor="middle" fill="#222" font-weight="bold">LCD 用ピン</text>
-<rect x="734.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
+<rect x="775.44" y="299.88" width="65.12" height="108.24000000000001" rx="3" fill="none" stroke="#1d3f8a" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="825" y="305" width="10" height="10" fill="#222" stroke="#000"/><circle cx="830" cy="310" r="2.5" fill="#d9b44a"/>
+<text transform="translate(827.5,319) rotate(90)" font-size="7" fill="#1d3f8a" font-weight="bold">3V3</text>
+<rect x="803" y="305" width="10" height="10" fill="#222" stroke="#000"/><circle cx="808" cy="310" r="2.5" fill="#d9b44a"/>
+<text transform="translate(805.5,319) rotate(90)" font-size="7" fill="#1d3f8a" font-weight="bold">SDA3V3</text>
+<rect x="781" y="305" width="10" height="10" fill="#222" stroke="#000"/><circle cx="786" cy="310" r="2.5" fill="#d9b44a"/>
+<text transform="translate(783.5,319) rotate(90)" font-size="7" fill="#1d3f8a" font-weight="bold">SCL3V3</text>
+<rect x="825" y="393" width="10" height="10" fill="#222" stroke="#000"/><circle cx="830" cy="398" r="2.5" fill="#d9b44a"/>
+<text transform="translate(832.5,389) rotate(-90)" font-size="7" fill="#1d3f8a" font-weight="bold">5V</text>
+<rect x="803" y="393" width="10" height="10" fill="#222" stroke="#000"/><circle cx="808" cy="398" r="2.5" fill="#d9b44a"/>
+<text transform="translate(810.5,389) rotate(-90)" font-size="7" fill="#1d3f8a" font-weight="bold">SDA5V</text>
+<rect x="781" y="393" width="10" height="10" fill="#222" stroke="#000"/><circle cx="786" cy="398" r="2.5" fill="#d9b44a"/>
+<text transform="translate(788.5,389) rotate(-90)" font-size="7" fill="#1d3f8a" font-weight="bold">SCL5V</text>
+<text x="769" y="347.0" font-size="9.5" text-anchor="end" fill="#1d3f8a" font-weight="bold">レベルシフタ →</text>
+<rect x="825" y="415" width="10" height="10" fill="#222" stroke="#000"/><circle cx="830" cy="420" r="2.5" fill="#d9b44a"/>
+<text x="839" y="423" font-size="7.5" text-anchor="start" fill="#222" font-weight="bold">VCC</text>
+<rect x="825" y="437" width="10" height="10" fill="#222" stroke="#000"/><circle cx="830" cy="442" r="2.5" fill="#d9b44a"/>
+<text x="839" y="445" font-size="7.5" text-anchor="start" fill="#222" font-weight="bold">SDA</text>
+<rect x="825" y="459" width="10" height="10" fill="#222" stroke="#000"/><circle cx="830" cy="464" r="2.5" fill="#d9b44a"/>
+<text x="839" y="467" font-size="7.5" text-anchor="start" fill="#222" font-weight="bold">SCL</text>
+<rect x="825" y="481" width="10" height="10" fill="#222" stroke="#000"/><circle cx="830" cy="486" r="2.5" fill="#d9b44a"/>
+<text x="839" y="489" font-size="7.5" text-anchor="start" fill="#222" font-weight="bold">GND</text>
+<text x="754" y="457.0" font-size="9.5" text-anchor="end" fill="#222" font-weight="bold">LCD 用ピン →</text>
+<rect x="734.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" fill-opacity="0.45" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
 <text x="786.0" y="567.0" font-size="12" text-anchor="middle" fill="#444" font-weight="bold">SW1</text>
 <circle cx="808" cy="618" r="5.2" fill="#222222" stroke="#fff" stroke-width="1.5"/>
 <circle cx="764" cy="618" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
 <circle cx="808" cy="508" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
 <circle cx="764" cy="508" r="5.2" fill="#1f6fd1" stroke="#fff" stroke-width="1.5"/>
 <text x="756" y="500" font-size="10.5" fill="#1f6fd1" font-weight="bold" text-anchor="end">GP10（14番）</text>
-<rect x="580.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
+<rect x="580.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" fill-opacity="0.45" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
 <text x="632.0" y="567.0" font-size="12" text-anchor="middle" fill="#444" font-weight="bold">SW2</text>
 <circle cx="654" cy="618" r="5.2" fill="#222222" stroke="#fff" stroke-width="1.5"/>
 <circle cx="610" cy="618" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
 <circle cx="654" cy="508" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
 <circle cx="610" cy="508" r="5.2" fill="#1a9b4b" stroke="#fff" stroke-width="1.5"/>
 <text x="602" y="500" font-size="10.5" fill="#1a9b4b" font-weight="bold" text-anchor="end">GP11（15番）</text>
-<rect x="426.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
+<rect x="426.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" fill-opacity="0.45" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
 <text x="478.0" y="567.0" font-size="12" text-anchor="middle" fill="#444" font-weight="bold">SW3</text>
 <circle cx="500" cy="618" r="5.2" fill="#222222" stroke="#fff" stroke-width="1.5"/>
 <circle cx="456" cy="618" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
 <circle cx="500" cy="508" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
 <circle cx="456" cy="508" r="5.2" fill="#e07b00" stroke="#fff" stroke-width="1.5"/>
 <text x="448" y="500" font-size="10.5" fill="#e07b00" font-weight="bold" text-anchor="end">GP12（16番）</text>
-<rect x="272.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
+<rect x="272.0314960629921" y="511.0314960629921" width="103.93700787401573" height="103.93700787401573" rx="4" fill="#ddd3bd" fill-opacity="0.45" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>
 <text x="324.0" y="567.0" font-size="12" text-anchor="middle" fill="#444" font-weight="bold">SW4</text>
 <circle cx="346" cy="618" r="5.2" fill="#222222" stroke="#fff" stroke-width="1.5"/>
 <circle cx="302" cy="618" r="5.2" fill="#aaa" stroke="#fff" stroke-width="1.5"/>
@@ -1345,25 +1338,27 @@
 <line x1="40" y1="834" x2="70" y2="834" stroke="#222222" stroke-width="4.5" stroke-linecap="round"/>
 <text x="80" y="838" font-size="12.5" fill="#222">GND  各スイッチの足 → 行1 → x=27 → 行17 → Pico 18番ピン GND（ここまで設置済み）</text>
 <line x1="40" y1="855" x2="70" y2="855" stroke="#c9a400" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="859" font-size="12.5" fill="#222">SCL  Pico 2番ピン GP1 → x=3 → 行12 → レベルシフタ SCL3V3（被覆線）／ SCL5V → LCD 用ピン SCL</text>
+<text x="80" y="859" font-size="12.5" fill="#222">SCL  Pico 2番ピン GP1 → 真下のレベルシフタ SCL3V3 ／ SCL5V → x=3 → 行10 → LCD 用ピン SCL</text>
 <line x1="40" y1="876" x2="70" y2="876" stroke="#159a8c" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="880" font-size="12.5" fill="#222">SDA  Pico 1番ピン GP0 → x=2 → 行11 → レベルシフタ SDA3V3（被覆線）／ SDA5V → LCD 用ピン SDA</text>
+<text x="80" y="880" font-size="12.5" fill="#222">SDA  Pico 1番ピン GP0 → 真下のレベルシフタ SDA3V3 ／ SDA5V → x=2 → 行11 → LCD 用ピン SDA</text>
 <line x1="40" y1="897" x2="70" y2="897" stroke="#e8731a" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="901" font-size="12.5" fill="#222">3.3V  Pico 36番ピン 3V3 → 行21（Pico の下）→ x=26 → 行14（被覆線）→ microSD の VDD・プルアップ → x=32 → レベルシフタ 3V3</text>
-<line x1="40" y1="918" x2="70" y2="918" stroke="#d42a2a" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="922" font-size="12.5" fill="#222">5V  Pico 40番ピン VBUS → 行27（基板の上端）→ x=36 → LCD 用ピン VCC ← レベルシフタ 5V（すべて裏）</text>
-<line x1="40" y1="939" x2="70" y2="939" stroke="#222222" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="943" font-size="12.5" fill="#222">LCD の GND  LCD 用ピン GND → x=35 → 行1 → 設置済みの GND 線の端 (27,1)</text>
-<line x1="40" y1="960" x2="70" y2="960" stroke="#5b5bd6" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="964" font-size="12.5" fill="#222">microSD  Pico 26番 GP20→CS、25番 GP19→CMD、24番 GP18→CLK、21番 GP16→DAT0（Pico の下の行22〜24・26）</text>
-<line x1="40" y1="981" x2="70" y2="981" stroke="#222222" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="985" font-size="12.5" fill="#222">microSD VSS  Pico 23番ピン GND → 行25（Pico の下）→ x=33 → VSS。パスコンの GND 側もこの線</text>
-<line x1="40" y1="1002" x2="70" y2="1002" stroke="#5b5bd6" stroke-width="4.5" stroke-linecap="round"/>
-<text x="80" y="1006" font-size="12.5" fill="#222">microSD  DAT2・CS・CMD・DAT0・DAT1 は 10kΩ で行14（3.3V）へ。VDD–VSS 間に 10μF と 0.1μF</text>
-<text x="40" y="1047" font-size="14" font-weight="bold" fill="#222">メモ</text>
-<text x="40" y="1069" font-size="12.5" fill="#333">・裏返すと左右が反対になる。基板の端に x=1 / x=36 と書いておくと迷わない</text>
-<text x="40" y="1090" font-size="12.5" fill="#333">・USB 側（Pico の 1番・40番ピン）は、この面では右端にくる</text>
-<text x="40" y="1111" font-size="12.5" fill="#333">・点線の四角は反対側（表）にある部品の輪郭。はんだ付けするのは丸い足とピン</text>
-<text x="40" y="1132" font-size="12.5" fill="#333">・白い縁取りの 3 本（SDA・SCL・3.3V）は被覆線。設置済みのスイッチと GND の線の上を越える</text>
-<text x="40" y="1153" font-size="12.5" fill="#333">・ほかの線どうしの交差はないので、スズメッキ線でよい</text>
+<text x="80" y="901" font-size="12.5" fill="#222">3.3V  Pico 36番ピン 3V3 → 行21（Pico の下）→ x=1 → レベルシフタ 3V3</text>
+<line x1="40" y1="918" x2="70" y2="918" stroke="#e8731a" stroke-width="4.5" stroke-linecap="round"/>
+<text x="80" y="922" font-size="12.5" fill="#222">3.3V  (6,21) → 行21 → x=26 → 行14（被覆線）→ microSD の VDD・プルアップ</text>
+<line x1="40" y1="939" x2="70" y2="939" stroke="#d42a2a" stroke-width="4.5" stroke-linecap="round"/>
+<text x="80" y="943" font-size="12.5" fill="#222">5V  Pico 40番ピン VBUS → x=1 の外側（基板の端、被覆線）→ レベルシフタ 5V → LCD 用ピン VCC</text>
+<line x1="40" y1="960" x2="70" y2="960" stroke="#222222" stroke-width="4.5" stroke-linecap="round"/>
+<text x="80" y="964" font-size="12.5" fill="#222">LCD の GND  LCD 用ピン GND → x=1 → 設置済みの GND 線の端 (2,1)</text>
+<line x1="40" y1="981" x2="70" y2="981" stroke="#5b5bd6" stroke-width="4.5" stroke-linecap="round"/>
+<text x="80" y="985" font-size="12.5" fill="#222">microSD  Pico 26番 GP20→CS、25番 GP19→CMD、24番 GP18→CLK、21番 GP16→DAT0（Pico の下の行22〜24・26）</text>
+<line x1="40" y1="1002" x2="70" y2="1002" stroke="#222222" stroke-width="4.5" stroke-linecap="round"/>
+<text x="80" y="1006" font-size="12.5" fill="#222">microSD VSS  Pico 23番ピン GND → 行25（Pico の下）→ x=33 → VSS。パスコンの GND 側もこの線</text>
+<line x1="40" y1="1023" x2="70" y2="1023" stroke="#5b5bd6" stroke-width="4.5" stroke-linecap="round"/>
+<text x="80" y="1027" font-size="12.5" fill="#222">microSD  DAT2・CS・CMD・DAT0・DAT1 は 10kΩ で行14（3.3V）へ。VDD–VSS 間に 10μF と 0.1μF</text>
+<text x="40" y="1068" font-size="14" font-weight="bold" fill="#222">メモ</text>
+<text x="40" y="1090" font-size="12.5" fill="#333">・裏返すと左右が反対になる。基板の端に x=1 / x=36 と書いておくと迷わない</text>
+<text x="40" y="1111" font-size="12.5" fill="#333">・USB 側（Pico の 1番・40番ピン）は、この面では右端にくる</text>
+<text x="40" y="1132" font-size="12.5" fill="#333">・点線の四角は反対側（表）にある部品の輪郭。はんだ付けするのは丸い足とピン</text>
+<text x="40" y="1153" font-size="12.5" fill="#333">・白い縁取りの 2 本は被覆線。3.3V は設置済みの GND の線の上を越え、5V は基板の端（x=1 の外側）を通る</text>
+<text x="40" y="1174" font-size="12.5" fill="#333">・ほかの線どうしの交差はないので、スズメッキ線でよい</text>
 </svg>

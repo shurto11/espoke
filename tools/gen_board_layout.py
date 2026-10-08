@@ -52,7 +52,7 @@ for x in range(1, COLS + 1):
         f'fill="{"#333" if bold else "#999"}" font-weight="{"bold" if bold else "normal"}">{x}</text>')
 for y in range(1, ROWS + 1):
     bold = y % 5 == 0 or y == 1
-    add(f'<text x="{OX - P * 1.1}" y="{hy(y) + 3.5}" font-size="10" text-anchor="end" '
+    add(f'<text x="{OX - P * 1.4}" y="{hy(y) + 3.5}" font-size="10" text-anchor="end" '
         f'fill="{"#333" if bold else "#999"}" font-weight="{"bold" if bold else "normal"}">{y}</text>')
 
 # 穴
@@ -124,27 +124,31 @@ for n in PULL:
 poly([(CK_X, R_BOT), (ckx("DAT1"), R_BOT)], V33_C)
 poly([(ckx("VDD"), CK_Y), (ckx("VDD"), R_BOT)], V33_C)
 
-# ---- I2C 用レベルシフタ（SSCI-023962）: 180° 回して、左の列が 3.3V 側、右の列が 5V 側 ----
-LS_L, LS_R = 29, 33                     # 2 列は穴 4 個分離れる
-LS_ROWS = [12, 11, 10]                  # 上から SCL・SDA・電源
-LS_LEFT = ["SCL3V3", "SDA3V3", "3V3"]
-LS_RIGHT = ["SCL5V", "SDA5V", "5V"]
-HDR_X = 35
-HDR = {12: "SCL", 11: "SDA", 10: "VCC", 9: "GND"}   # LCD 用ピン（x=35）
+# ---- I2C 用レベルシフタ（SSCI-023962）: 左へ 90° 回して、上の行が 3.3V 側、下の行が 5V 側 ----
+# Pico の 1番（SDA）・2番（SCL）ピンの真下に置き、LCD 用ピンは基板の左端に立てる
+LS_X = [1, 2, 3]
+LS_T, LS_B = 17, 13                     # 2 行は穴 4 個分離れる
+LS_TOP = ["3V3", "SDA3V3", "SCL3V3"]    # 左から
+LS_BOT = ["5V", "SDA5V", "SCL5V"]
+HDR_X = 1
+HDR = {12: "VCC", 11: "SDA", 10: "SCL", 9: "GND"}   # LCD 用ピン（x=1）
+EDGE = 0.45   # 基板の左端（x=1 の穴の外側）
 
-# 裏の配線: 3.3V（行14 → x=32 → レベルシフタ 3V3）、5V 側 → LCD 用ピン、LCD の GND → 行1 の GND の端 (27,1)
-poly([(32, R_BOT), (32, 10), (LS_L, 10)], V33_C)
-for y, color in zip(LS_ROWS, (SCL_C, SDA_C, V5_C)):
-    poly([(LS_R, y), (HDR_X, y)], color)
-poly([(HDR_X, 9), (HDR_X, 1), (27, 1)], GND_C)
-# 5V: Pico 40番ピン → 行27（基板の上端）→ x=36 → LCD 用ピン VCC（裏だけで届く）
-poly([(2, 26), (2, 27), (36, 27), (36, 10), (HDR_X, 10)], V5_C)
-# 残りの 3 本は、設置済みの線（スイッチ・GND）の上を越えるので裏の被覆線にする。
-# 両端はピンや部品の足のランドに直接はんだ付けする。
+# 裏の配線: SDA・SCL は Pico のピンから真下へ。3.3V は Pico 36番ピン → 行21（Pico の下）→ x=1
+poly([(2, 19), (2, LS_T)], SDA_C)
+poly([(3, 19), (3, LS_T)], SCL_C)
+poly([(6, 26), (6, 21), (1, 21), (1, LS_T)], V33_C)
+# 5V 側 → LCD 用ピン、LCD の GND → x=1 → 行1 の GND の端 (2,1)
+poly([(1, LS_B), (1, 12)], V5_C)
+poly([(2, LS_B), (2, 11), (1, 11)], SDA_C)
+poly([(3, LS_B), (3, 10), (1, 10)], SCL_C)
+poly([(1, 9), (1, 1), (2, 1)], GND_C)
+# 残りの 2 本は裏の被覆線にする。両端はピンや部品の足のランドに直接はんだ付けする。
+# 5V: x=1 は 3.3V が使うので、基板の左端（穴の外側）を通す
+# 3.3V（microSD 側）: 設置済みの GND の線の上を越える
 INSULATED = [  # (名前, 色, 経路)
-    ("SCL", SCL_C, [(3, 19), (3, 12), (LS_L, 12)]),
-    ("SDA", SDA_C, [(2, 19), (2, 11), (LS_L, 11)]),
-    ("3V3", V33_C, [(6, 26), (6, 21), (26, 21), (26, R_BOT), (CK_X, R_BOT)]),
+    ("5V", V5_C, [(2, 26), (EDGE, 26), (EDGE, LS_B), (1, LS_B)]),
+    ("3V3", V33_C, [(6, 21), (26, 21), (26, R_BOT), (CK_X, R_BOT)]),
 ]
 for _, color, pts in INSULATED:
     insulated(pts, color)
@@ -258,28 +262,32 @@ for y in range(CK_Y + 3, CK_Y + 7):   # FG・カード検出の穴（ピンは�
     for x in (CK_X, CK_X + 7):
         add(f'<circle cx="{hx(x)}" cy="{hy(y)}" r="4.2" fill="none" stroke="#555" stroke-width="1.2" stroke-dasharray="2 2"/>')
 
-# レベルシフタ本体（12.5×7.5mm）
-lx0, lw = span(LS_L, LS_R)
-lt, lb = hy(LS_ROWS[0]) - 0.46 * P, hy(LS_ROWS[-1]) + 0.46 * P
-add(f'<rect x="{lx0 - 0.46 * P}" y="{lt}" width="{lw + 0.92 * P}" height="{lb - lt}" rx="3" '
+# レベルシフタ本体（12.5×7.5mm）。90° 回すので縦長になる
+lx0, lw = span(LS_X[0], LS_X[-1])
+lt, lb = hy(LS_T) - 0.46 * P, hy(LS_B) + 0.46 * P
+add(f'<rect x="{lx0 - 0.48 * P}" y="{lt}" width="{lw + 0.96 * P}" height="{lb - lt}" rx="3" '
     + ('fill="none" stroke="#1d3f8a" stroke-width="2" stroke-dasharray="7 5"/>' if BACK else
        'fill="#2456c4" fill-opacity="0.35" stroke="#1d3f8a" stroke-width="2"/>'))
-for col_x, names, col in ((LS_L, LS_LEFT, "#a64d00"), (LS_R, LS_RIGHT, "#a01818")):
-    for y, n in zip(LS_ROWS, names):
-        x = hx(col_x)
+for y, names, down in ((LS_T, LS_TOP, True), (LS_B, LS_BOT, False)):
+    for lx, n in zip(LS_X, names):
+        x = hx(lx)
         add(f'<rect x="{x - 5}" y="{hy(y) - 5}" width="10" height="10" fill="#222" stroke="#000"/>'
             f'<circle cx="{x}" cy="{hy(y)}" r="2.5" fill="#d9b44a"/>')
-        inner = (col_x == LS_L) == (SIDE > 0)
-        label(x + (9 if inner else -9), hy(y) + 3, n, "#1d3f8a" if BACK else "#fff", 7, "start" if inner else "end")
-label((hx(LS_L) + hx(LS_R)) / 2, hy(LS_ROWS[0]) - 15, "レベルシフタ", "#1d3f8a", 8.5, halo=True)
+        # ピン名は本体の内側に縦書き（上の行は下向き、下の行は上向き）
+        tx, ty, rot = (x - 2.5, hy(y) + 9, 90) if down else (x + 2.5, hy(y) - 9, -90)
+        add(f'<text transform="translate({tx},{ty}) rotate({rot})" font-size="7" fill="{"#1d3f8a" if BACK else "#fff"}" '
+            f'font-weight="bold">{n}</text>')
+label(hx(LS_X[-1]) + SIDE * 17, hy(15.5) + 4, "← レベルシフタ" if SIDE > 0 else "レベルシフタ →",
+      "#1d3f8a", 9.5, "start" if SIDE > 0 else "end")
 
-# LCD 用ピン（1×4）
+# LCD 用ピン（1×4）。ピン名は基板の外側に書く
 for y, n in HDR.items():
     x = hx(HDR_X)
     add(f'<rect x="{x - 5}" y="{hy(y) - 5}" width="10" height="10" fill="#222" stroke="#000"/>'
         f'<circle cx="{x}" cy="{hy(y)}" r="2.5" fill="#d9b44a"/>')
-    label(x + 9 * SIDE, hy(y) + 3, n, "#222", 7.5, "start" if SIDE > 0 else "end", halo=True)
-label(hx(HDR_X), hy(8) + 4, "LCD 用ピン", "#222", 9.5, halo=True)
+    label(x - 9 * SIDE, hy(y) + 3, n, "#222", 7.5, "end" if SIDE > 0 else "start")
+label(hx(4) + SIDE * 10, hy(10.5) + 4, "← LCD 用ピン" if SIDE > 0 else "LCD 用ピン →",
+      "#222", 9.5, "start" if SIDE > 0 else "end")
 
 # ---- タクトスイッチ（12mm 角、足は 2×5 穴）----
 BODY = 12 / 2.54 * P   # 本体 12mm
@@ -289,7 +297,7 @@ for (name, gp, n, color, _), x0 in zip(SW, SW_X0):
     cy = (hy(SW_Y0) + hy(SW_Y1)) / 2
     if BACK:
         add(f'<rect x="{cx - BODY / 2}" y="{cy - BODY / 2}" width="{BODY}" height="{BODY}" rx="4" '
-            'fill="#ddd3bd" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>')
+            'fill="#ddd3bd" fill-opacity="0.45" stroke="#555" stroke-width="1.5" stroke-dasharray="6 4"/>')
         add(f'<text x="{cx}" y="{cy + 4}" font-size="12" text-anchor="middle" fill="#444" font-weight="bold">{name}</text>')
     else:
         add(f'<rect x="{cx - BODY / 2}" y="{cy - BODY / 2}" width="{BODY}" height="{BODY}" rx="4" '
@@ -312,11 +320,12 @@ add(f'<text x="{OX - 20}" y="{ly}" font-size="14" font-weight="bold" fill="#222"
 rows_ = [(c, f"{name}  足({path[0][0]},{path[0][1]}) → Pico {n}番ピン {gp}") for name, gp, n, c, path in SW]
 rows_ += [
     (GND_C, "GND  各スイッチの足 → 行1 → x=27 → 行17 → Pico 18番ピン GND（ここまで設置済み）"),
-    (SCL_C, "SCL  Pico 2番ピン GP1 → x=3 → 行12 → レベルシフタ SCL3V3（被覆線）／ SCL5V → LCD 用ピン SCL"),
-    (SDA_C, "SDA  Pico 1番ピン GP0 → x=2 → 行11 → レベルシフタ SDA3V3（被覆線）／ SDA5V → LCD 用ピン SDA"),
-    (V33_C, "3.3V  Pico 36番ピン 3V3 → 行21（Pico の下）→ x=26 → 行14（被覆線）→ microSD の VDD・プルアップ → x=32 → レベルシフタ 3V3"),
-    (V5_C, "5V  Pico 40番ピン VBUS → 行27（基板の上端）→ x=36 → LCD 用ピン VCC ← レベルシフタ 5V（すべて裏）"),
-    (GND_C, "LCD の GND  LCD 用ピン GND → x=35 → 行1 → 設置済みの GND 線の端 (27,1)"),
+    (SCL_C, "SCL  Pico 2番ピン GP1 → 真下のレベルシフタ SCL3V3 ／ SCL5V → x=3 → 行10 → LCD 用ピン SCL"),
+    (SDA_C, "SDA  Pico 1番ピン GP0 → 真下のレベルシフタ SDA3V3 ／ SDA5V → x=2 → 行11 → LCD 用ピン SDA"),
+    (V33_C, "3.3V  Pico 36番ピン 3V3 → 行21（Pico の下）→ x=1 → レベルシフタ 3V3"),
+    (V33_C, "3.3V  (6,21) → 行21 → x=26 → 行14（被覆線）→ microSD の VDD・プルアップ"),
+    (V5_C, "5V  Pico 40番ピン VBUS → x=1 の外側（基板の端、被覆線）→ レベルシフタ 5V → LCD 用ピン VCC"),
+    (GND_C, "LCD の GND  LCD 用ピン GND → x=1 → 設置済みの GND 線の端 (2,1)"),
     (SD_C, "microSD  Pico 26番 GP20→CS、25番 GP19→CMD、24番 GP18→CLK、21番 GP16→DAT0（Pico の下の行22〜24・26）"),
     (GND_C, "microSD VSS  Pico 23番ピン GND → 行25（Pico の下）→ x=33 → VSS。パスコンの GND 側もこの線"),
     (SD_C, "microSD  DAT2・CS・CMD・DAT0・DAT1 は 10kΩ で行14（3.3V）へ。VDD–VSS 間に 10μF と 0.1μF"),
@@ -332,16 +341,18 @@ notes = [
     "・裏返すと左右が反対になる。基板の端に x=1 / x=36 と書いておくと迷わない",
     "・USB 側（Pico の 1番・40番ピン）は、この面では右端にくる",
     "・点線の四角は反対側（表）にある部品の輪郭。はんだ付けするのは丸い足とピン",
-    "・白い縁取りの 3 本（SDA・SCL・3.3V）は被覆線。設置済みのスイッチと GND の線の上を越える",
+    "・白い縁取りの 2 本は被覆線。3.3V は設置済みの GND の線の上を越え、5V は基板の端（x=1 の外側）を通る",
     "・ほかの線どうしの交差はないので、スズメッキ線でよい",
 ] if BACK else [
     "・スイッチ4個・Pico・その配線（GND を含む）は設置済み。この図ではそこを変えない",
     "・スイッチは対角の2本（左下と右上）だけを使う。GPIO は INPUT_PULLUP、押すと LOW",
     "・実線は裏の配線。Pico の下（y=20〜25）の配線も裏に通す",
-    "・白い縁取りの 3 本（SDA・SCL・3.3V）は裏の被覆線。設置済みのスイッチと GND の線の上を越える。ほかはスズメッキ線でよい",
+    "・白い縁取りの 2 本は裏の被覆線（3.3V は設置済みの GND の線を越え、5V は x=1 の外側を通る）。ほかはスズメッキ線でよい",
     "・被覆線は最後にはんだ付けする。そのあと近くのランドを触るときは、こてを被覆に当てない（被覆が溶ける）",
-    "・レベルシフタ（SSCI-023962）は部品面を上にして 180° 回し、3.3V 側を左（x=29）、5V 側を右（x=33）に置く",
-    "・レベルシフタには GND ピンがない。LCD の GND は行1 の設置済み GND 線の端 (27,1) につなぐ",
+    "・レベルシフタ（SSCI-023962）は部品面を上にして左へ 90° 回す。3.3V 側が上（行17）、5V 側が下（行13）",
+    "・向きの確認: レベルシフタの 3V3 と 5V のピンが、どちらも左端（x=1）にくる",
+    "・レベルシフタには GND ピンがない。LCD の GND は x=1 を下ろして、行1 の設置済み GND 線の端 (2,1) につなぐ",
+    "・LCD 用ピンは上から VCC・SDA・SCL・GND。バックパックの並び（GND・VCC・SDA・SCL）と違うので、名前どうしをつなぐ",
     "・CK-40 は 1〜8番ピン（1×8）だけピンヘッダを付ける。FG・CD の穴の下は配線が通るので、ピンを付けない",
     "・CK-40 の差し込み口は基板の上端から少しはみ出す（カードを押し込みやすい）",
 ]
