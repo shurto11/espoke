@@ -4,7 +4,7 @@ espoke を外に持ち出して、**音楽は microSD から BT イヤホンで�
 外では通信しないので、SIM や LTE モジュールはいらない。
 
 ```
-外: [espoke] ── microSD の WAV ──→ BT イヤホン（ネットは使わない）
+外: [espoke] ── microSD の MP3 ──→ BT イヤホン（ネットは使わない）
 家: [espoke] ── Wi-Fi ── MQTT ── 中継Bot ── Discord
                   └─ PC から新しい曲を SD に同期
 ```
@@ -99,12 +99,12 @@ CK-40（購入済み）を除いた、これから買う分の合計。
 
 ### 5. microSDHC 16GB
 
-- 容量の目安（`serve_music.py` と同じ 16bit PCM の WAV の場合）:
+- 容量の目安（espoke は MP3 をそのまま再生する）:
 
   | 形式 | 1 時間あたり | 16GB に入る量 |
   |---|---|---|
-  | 44.1kHz モノラル（`serve_music.py` の既定） | 約 320MB | 約 50 時間 |
-  | 44.1kHz ステレオ | 約 640MB | 約 25 時間 |
+  | MP3 192kbps | 約 86MB | 約 180 時間 |
+  | MP3 320kbps | 約 144MB | 約 110 時間 |
 
 - **FAT32 でフォーマット**して使う。SDHC（32GB 以下）なら、買ったときから FAT32 になっている。64GB 以上の SDXC は exFAT なので、FAT32 にフォーマットし直す必要がある。
 
@@ -150,20 +150,22 @@ CS はどの GPIO でもよいので、ユニバーサル基板で線が交差�
 
 ## 4. ファームの変更点（メモ）
 
-| 箇所 | 変更内容 |
-|---|---|
-| WAV の解析・再生 | `parseWav(WiFiClient*)` などを、`Stream*` を受け取る形にする。SD の `File` も `Stream` なので、HTTP と SD の両方で同じコードが使える |
-| 選曲 | `next`・`prev`・`rand` の対象を、SD のファイル一覧にする |
-| SD の初期化 | arduino-pico の `SD` ライブラリで、`SPI.setRX(16); SPI.setSCK(18); SPI.setTX(19);` を呼んでから `SD.begin(20)`（CS は GP20） |
-| Discord | Wi-Fi があるときだけ MQTT につなぐ。外で打ったメッセージは送信待ちとして保存し、つながったら送る。外にいた間の受信は、MQTT の永続セッション（QoS 1）で取りこぼさない |
-| 曲の同期 | 自宅の Wi-Fi につながったら、`serve_music.py` から変換済みの WAV をダウンロードして SD に保存する |
+| 箇所 | 状態 | 内容 |
+|---|---|---|
+| SD の初期化 | 済 | arduino-pico の `SD` ライブラリで、`SPI.setRX(16); SPI.setSCK(18); SPI.setTX(19);` を呼んでから `SD.begin(20)`（CS は GP20） |
+| MP3 の再生 | 済 | PC で WAV に変換せず、**MP3 のまま** Pico 上でデコードする（`BackgroundAudio` ライブラリに入っている libmad）。44.1kHz ステレオ 192kbps で CPU の約 4 割 |
+| 選曲 | 済 | `sd` で SD から連続再生。`next`・`prev`・`rand` は、最後に選んだ方（SD か Wi-Fi）に効く |
+| Discord | まだ | Wi-Fi があるときだけ MQTT につなぐ。外で打ったメッセージは送信待ちとして保存し、つながったら送る。外にいた間の受信は、MQTT の永続セッション（QoS 1）で取りこぼさない |
+| 曲の同期 | まだ | 自宅の Wi-Fi につながったら、PC から新しい MP3 をダウンロードして SD に保存する |
+
+使い方や制約は README の 7.6 節。
 
 ---
 
 ## 5. 動作確認の順番（おすすめ）
 
 1. CK-40 にピンヘッダー（1×8）を付け、プルアップ抵抗・パスコンと一緒に、上の表（ユニバーサル基板なら `board_layout.svg`）のとおり配線する。
-2. PC で microSD を FAT32 にフォーマットし、ffmpeg で変換した WAV を何曲か入れる（`ffmpeg -i in.mp3 -ac 1 -ar 44100 -c:a pcm_s16le out.wav`。`serve_music.py` と同じ形式になる）。
-3. arduino-pico の SD ライブラリのサンプル（`listfiles` など）で、ファイル一覧が読めることを確認する。
-4. espoke に SD 再生を組み込み、BT イヤホンで鳴らす。
+2. PC で microSD を FAT32 にフォーマットし、MP3 を何曲か入れる（フォルダに分けてよい）。m4a は再生できないので、`ffmpeg -i in.m4a -c:a libmp3lame -b:a 192k out.mp3` で MP3 にしておく。
+3. `sd_test` を書き込み、配線・カード・ファイル一覧・読み書きを確かめる。MP3 は espoke で再生できる形式か（44.1kHz など）も表示される。
+4. espoke を書き込み、シリアルで `sd` と打って BT イヤホンで鳴らす。
 5. 電池（または モバイルバッテリー）だけで動かし、外に持ち出して確認する。

@@ -6,22 +6,26 @@
  *       (Arduino IDE なら ツール → IP/Bluetooth Stack → "IPv4 + Bluetooth")
  *
  * 動作:
- *   1. Wi-Fi に接続
+ *   1. Wi-Fi に接続し、microSD の MP3 を探して曲の一覧を作る
  *   2. Bluetooth イヤホン (A2DP sink) をスキャンして接続
- *   3. シリアルに "music" と打つか BOOTSEL を押すと、MUSIC_URL の音楽サーバから
- *      曲を順番に取ってきて流し続ける。"play" なら AUDIO_URL の通知音を1回だけ
+ *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
+ *      "music" なら MUSIC_URL の音楽サーバから曲を取ってきて流し続ける
+ *      BOOTSEL を押すと、最後に選んだ方 (起動直後は SD に曲があれば SD) で再生を始める
+ *      "play" なら AUDIO_URL の通知音を1回だけ
  *   4. LCD1602A に曲名と状態を表示。GP15 のスイッチで表示ページを切り替える
  *   5. SW1〜SW4 (GP10〜13) でモールス信号を打ってアルファベットを入力する
  *      SW1 ツー / SW2 トン / SW3 backspace / SW4 enter (符号を文字に確定。空なら空白)
  *      SW1 か SW2 を押すと入力ページに切り替わる
  *
  * 音声フォーマット:
- *   16bit PCM の WAV。モノラル/ステレオどちらでも可。
- *   サンプリングレートは 44100 の整数分の1 (44100 / 22050 / 11025) のみ対応し、
- *   整数倍のサンプル&ホールドで 44100 ステレオへ引き伸ばして A2DP に流す。
+ *   microSD: MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
+ *   Wi-Fi:   16bit PCM の WAV。tools/serve_music.py が mp3 や m4a を ffmpeg で
+ *            変換しながら流してくれるので、Pico 側は WAV を読むだけで済む。
+ *   どちらもモノラル/ステレオ可。サンプリングレートは 44100 の整数分の1 (44100 / 22050 / 11025)
+ *   のみ対応し、整数倍のサンプル&ホールドで 44100 ステレオへ引き伸ばして A2DP に流す。
  *   48000 など割り切れないレートは非対応 (リサンプラを積む余裕がないため)。
- *   mp3 や m4a はそのままでは鳴らない。tools/serve_music.py が ffmpeg で
- *   変換しながら流してくれるので、Pico 側は WAV を読むだけで済む。
+ *
+ * 必要なライブラリ: LiquidCrystal I2C, BackgroundAudio (arduino-cli lib install で入れる)
  */
 
 #include <WiFi.h>
@@ -29,6 +33,13 @@
 #include <BluetoothAudio.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <SD.h>
+#include <vector>
+#include <algorithm>
+// BackgroundAudio に入っている libmad を使う。arduino-cli がライブラリを見つけられるよう、
+// libmad を読み込んでいるこのヘッダ経由で取り込む (再生クラス自体は使わない)
+#include <BackgroundAudioMP3.h>
 
 #include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / AUDIO_URL / MUSIC_URL
 
@@ -38,7 +49,10 @@ static const char *BT_TARGET_NAME = "";        // 接続先の名前 (前方一�
 static const char *BT_TARGET_ADDR = "a0:0c:e2:c6:1d:04";  // 空でなければスキャンせず直接繋ぐ
 static const int    SCAN_SECONDS  = 8;
 static const int    A2DP_RATE     = 44100;     // A2DPSource は 44100 か 48000 のみ
-static const size_t A2DP_BUFFER   = 65536;     // 約370ms 分。曲を流し続けるので厚めに取る
+// A2DPSource はこの値を「バイト数」ではなく「16bit サンプル数」として扱い、2倍のバイトを確保する。
+// 32768 で 64KB・約370ms 分。RAM は全部で 256KB しかなく、MP3 デコーダの作業領域 (約29KB) も要るので、
+// 65536 (128KB) にすると a2dp.begin() が確保に失敗して Bluetooth が動かなくなる
+static const size_t A2DP_BUFFER   = 32768;
 static const bool   BOOTSEL_SKIP  = true;      // 再生中の BOOTSEL で次の曲へ送る
 
 static const int     PIN_SDA   = 0;   // GP0 (物理1番ピン)
@@ -51,6 +65,14 @@ static const int     PIN_DASH   = 10;  // SW1 GP10 (物理14番ピン) ツー
 static const int     PIN_DOT    = 11;  // SW2 GP11 (物理15番ピン) トン
 static const int     PIN_BACK   = 12;  // SW3 GP12 (物理16番ピン) backspace
 static const int     PIN_ENTER  = 13;  // SW4 GP13 (物理17番ピン) enter
+
+// microSD (CK-40)。配線は docs/sd_music_parts.md の 3 章
+static const int     PIN_SD_MISO = 16;  // GP16 (物理21番ピン) ⑦ DAT0
+static const int     PIN_SD_SCK  = 18;  // GP18 (物理24番ピン) ⑤ CLK
+static const int     PIN_SD_MOSI = 19;  // GP19 (物理25番ピン) ③ CMD
+static const int     PIN_SD_CS   = 20;  // GP20 (物理26番ピン) ② DAT3/CS
+static const size_t  SD_MAX_TRACKS = 300;  // 曲のパスは RAM に持つので上限を設ける (1曲 70 バイト前後)
+static const int     SD_MAX_DEPTH  = 5;    // フォルダを潜る深さ
 // ------------
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
@@ -67,7 +89,20 @@ enum PlayResult {
   PLAY_DONE,   // 最後まで鳴らした
   PLAY_STOP,   // stop で止めた
   PLAY_SKIP,   // next / prev / rand / BOOTSEL で打ち切った
-  PLAY_ERROR,  // Wi-Fi か HTTP で失敗した
+  PLAY_ERROR,  // Wi-Fi・HTTP・SD のどれかで失敗した
+};
+
+enum Source { SRC_SD, SRC_WIFI };           // 連続再生で曲を取ってくる先
+enum Step { STEP_NEXT, STEP_PREV, STEP_RAND };  // 次にどの曲へ進むか
+
+// MP3 デコーダの作業領域 (約 29KB)
+static const size_t MP3_IN_SIZE = 4096;  // 192kbps なら1フレーム約 630 バイト、320kbps でも約 1KB
+struct Mp3Decoder {
+  struct mad_stream stream;
+  struct mad_frame  frame;
+  struct mad_synth  synth;
+  uint8_t           in[MP3_IN_SIZE + MAD_BUFFER_GUARD];
+  bool              eof;  // ファイルを読み終え、末尾に MAD_BUFFER_GUARD 分の 0 を足した
 };
 
 A2DPSource a2dp;
@@ -77,7 +112,16 @@ LiquidCrystal_I2C *lcd = nullptr;
 // スループットが落ち、Bluetooth と帯域を取り合ったときに underflow しやすい
 static const size_t IN_FRAMES = 1024;
 static int16_t inBuf[IN_FRAMES * 2];       // 最大ステレオ
-static int16_t outBuf[IN_FRAMES * 4 * 2];  // 最大4倍アップサンプル × ステレオ
+
+// A2DPSource::write() (arduino-pico 6.1.0) は、リングバッファの終わりをまたぐ書き込みで
+// 後半にデータの先頭部分をもう一度書いてしまう (2回目の memcpy が buffer から読み直している)。
+// 書き込みを常に A2DP_CHUNK サンプルずつにして、バッファの大きさをちょうど割り切らせ、
+// 終わりをまたがないようにする。MP3 の1フレーム (2304 サンプル) をそのまま書くと、
+// 約 0.37 秒ごとに音が壊れる
+static const size_t A2DP_CHUNK = 2048;     // 16bit サンプル数 (1024 ステレオフレーム、4KB)
+static_assert(A2DP_BUFFER % A2DP_CHUNK == 0, "A2DP_BUFFER must be a multiple of A2DP_CHUNK");
+static int16_t pcmChunk[A2DP_CHUNK];
+static size_t  pcmChunkLen = 0;            // pcmChunk に溜まっているサンプル数
 
 static unsigned long lastScan = 0;
 static const unsigned long RETRY_MS = 15000;           // 未接続時に再試行する間隔
@@ -86,12 +130,21 @@ static const unsigned long WIFI_TIMEOUT_MS = 30000;    // Wi-Fi 接続を待つ�
 static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi 再接続を試みる間隔
 static const unsigned long HTTP_TIMEOUT_MS = 15000;    // サーバの応答を待つ上限
 static unsigned long lastWiFiTry = 0;
+static bool   wifiEnabled = true;          // "wifi off" で false にすると、つなぎ直しもしない
 
 // 連続再生の状態
 static bool   autoPlay = false;            // 曲を続けて流しているか
-static String nextPath = "/next.wav";      // 次に取りに行くエンドポイント
+static Source source = SRC_WIFI;           // 起動時に SD に曲があれば SRC_SD にする
+static Step   nextStep = STEP_NEXT;        // 次の曲の選び方
 static int    playErrors = 0;              // 連続で失敗した回数
 static unsigned long lastBootsel = 0;      // BOOTSEL を最後に見た時刻
+
+// microSD の曲一覧 (パス順)
+static bool                sdReady = false;
+static std::vector<String> sdTracks;
+static int                 sdIndex = -1;   // 最後に選んだ曲。-1 なら次は先頭から
+// 再生のたびに確保すると、ヒープが細切れになったときに確保できなくなるので、最初から持っておく
+static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
@@ -496,6 +549,67 @@ static bool parseWav(WiFiClient *s, WavInfo *info) {
 
 // ---------------- 再生 ----------------
 
+// 溜まった pcmChunk を A2DP に書く。丸ごと入る空きができるまで待つ
+static void flushPcmChunk() {
+  while (a2dp.connected() && (size_t)a2dp.availableForWrite() < sizeof(pcmChunk)) delay(1);
+  if (a2dp.connected()) a2dp.write((const uint8_t *)pcmChunk, sizeof(pcmChunk));
+  pcmChunkLen = 0;
+}
+
+// 16bit PCM (channels 本のインターリーブ) を rateMul 倍のサンプル&ホールドで
+// 44100 ステレオに引き伸ばして A2DP に書く。A2DP_CHUNK に満たない端数は次に回す
+static void writePcm(const int16_t *in, size_t frames, int channels, uint32_t rateMul) {
+  for (size_t f = 0; f < frames; f++) {
+    int16_t l = in[f * channels];
+    int16_t r = (channels == 2) ? in[f * channels + 1] : l;
+    for (uint32_t k = 0; k < rateMul; k++) {
+      pcmChunk[pcmChunkLen++] = l;
+      pcmChunk[pcmChunkLen++] = r;
+      if (pcmChunkLen == A2DP_CHUNK) flushPcmChunk();
+    }
+  }
+}
+
+// 1曲の再生を締める。summary は LCD の2行目に出す再生量、slowCause は音が途切れたときの原因の説明
+static void finishPlayback(PlayResult result, const String &summary, const char *slowCause) {
+  // 曲を続けて流すときは無音で締めない。次の曲を取りに行っている間、
+  // バッファに残った末尾がそのまま鳴り続けるので繋ぎが詰まる。
+  // 打ち切ったときも同じ理由で、残りをそのまま鳴らし切らせる
+  if (result == PLAY_DONE && !autoPlay) {
+    // 端数を無音で埋めて書き出し、続けてバッファ1周分 (約370ms) の無音を流す
+    memset(pcmChunk + pcmChunkLen, 0, (A2DP_CHUNK - pcmChunkLen) * sizeof(int16_t));
+    flushPcmChunk();
+    for (size_t i = 0; i < A2DP_BUFFER / A2DP_CHUNK && a2dp.connected(); i++) {
+      memset(pcmChunk, 0, sizeof(pcmChunk));
+      flushPcmChunk();
+    }
+  }
+
+  if (a2dp.getUnderflow()) {
+    Serial.printf("warning: audio underflow (%s)\n", slowCause);
+  }
+  printLine(1, summary + " " +
+               (result == PLAY_DONE ? "done" : result == PLAY_STOP ? "stop" :
+                result == PLAY_SKIP ? "skip" : "error"));
+}
+
+// "wifi off" で切断し、つなぎ直しもやめる。"wifi on" で loop() からのつなぎ直しを再開する
+// (SD から流している間は、止めるまでつながない)。WiFi.disconnect() は Wi-Fi の接続を切るだけで、
+// 無線チップは止めないので Bluetooth はそのまま使える
+static void setWiFi(const String &cmd) {
+  if (cmd == "wifi off") {
+    wifiEnabled = false;
+    WiFi.disconnect();
+    status("WiFi off", "");
+  } else if (cmd == "wifi on") {
+    wifiEnabled = true;
+    lastWiFiTry = millis() - WIFI_RETRY_MS;  // 次の loop() ですぐつなぎにいく
+    Serial.println("WiFi: reconnect when not playing from SD");
+  } else {
+    Serial.printf("wifi=%s connected=%d\n", wifiEnabled ? "on" : "off", WiFi.status() == WL_CONNECTED);
+  }
+}
+
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
@@ -503,10 +617,14 @@ static PlayResult pollAbort() {
   String cmd = readLine();
   if (cmd.length()) {
     if (cmd == "stop") return PLAY_STOP;
-    if (cmd == "next") { nextPath = "/next.wav";   return PLAY_SKIP; }
-    if (cmd == "prev") { nextPath = "/prev.wav";   return PLAY_SKIP; }
-    if (cmd == "rand") { nextPath = "/random.wav"; return PLAY_SKIP; }
-    Serial.println("再生中に使えるのは stop / next / prev / rand");
+    if (cmd == "next") { nextStep = STEP_NEXT; return PLAY_SKIP; }
+    if (cmd == "prev") { nextStep = STEP_PREV; return PLAY_SKIP; }
+    if (cmd == "rand") { nextStep = STEP_RAND; return PLAY_SKIP; }
+    if (cmd.startsWith("wifi")) {
+      setWiFi(cmd);
+      return PLAY_NONE;
+    }
+    Serial.println("再生中に使えるのは stop / next / prev / rand / wifi on / wifi off");
   }
 
   // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
@@ -514,7 +632,7 @@ static PlayResult pollAbort() {
     lastBootsel = millis();
     if (BOOTSEL) {
       while (BOOTSEL) delay(1);
-      nextPath = "/next.wav";
+      nextStep = STEP_NEXT;
       return PLAY_SKIP;
     }
   }
@@ -530,6 +648,8 @@ static PlayResult playUrl(const String &url) {
     status("no earphone", "cannot play");
     return PLAY_ERROR;
   }
+  // SD の再生で省電力にしていたら戻す。WAV を取ってくるには常時受信のほうが速い
+  WiFi.noLowPowerMode();
 
   WiFiClient client;
   HTTPClient http;
@@ -578,7 +698,8 @@ static PlayResult playUrl(const String &url) {
   printLine(0, title);
 
   const size_t inBytesMax  = IN_FRAMES * info.channels * 2;
-  const size_t outBytesMax = IN_FRAMES * rateMul * 2 * 2;
+  // 書く量に、pcmChunk に溜まっている端数を書き出す分 (最大1チャンク) を足す
+  const size_t outBytesMax = IN_FRAMES * rateMul * 2 * 2 + sizeof(pcmChunk);
   uint32_t remaining = info.dataBytes;
   uint32_t played    = 0;
   unsigned long lastLcd = 0;
@@ -608,17 +729,7 @@ static PlayResult playUrl(const String &url) {
     if (got < 2) break;
     got &= ~(size_t)(info.channels * 2 - 1);  // フレーム境界に切り詰める
 
-    size_t frames = got / (info.channels * 2);
-    size_t o = 0;
-    for (size_t f = 0; f < frames; f++) {
-      int16_t l = inBuf[f * info.channels];
-      int16_t r = (info.channels == 2) ? inBuf[f * info.channels + 1] : l;
-      for (uint32_t k = 0; k < rateMul; k++) {
-        outBuf[o++] = l;
-        outBuf[o++] = r;
-      }
-    }
-    a2dp.write((const uint8_t *)outBuf, o * 2);
+    writePcm(inBuf, got / (info.channels * 2), info.channels, rateMul);
 
     played += got;
     if (info.dataBytes) remaining -= got;
@@ -634,22 +745,242 @@ static PlayResult playUrl(const String &url) {
   }
   http.end();
 
-  // 曲を続けて流すときは無音で締めない。次の曲を取りに行っている間、
-  // バッファに残った末尾がそのまま鳴り続けるので繋ぎが詰まる。
-  // 打ち切ったときも同じ理由で、残りをそのまま鳴らし切らせる
-  if (result == PLAY_DONE && !autoPlay) {
-    memset(outBuf, 0, sizeof(outBuf));
-    for (int i = 0; i < 4 && a2dp.connected(); i++) {
-      while ((size_t)a2dp.availableForWrite() < sizeof(outBuf)) delay(1);
-      a2dp.write((const uint8_t *)outBuf, sizeof(outBuf));
+  finishPlayback(result, String(played / 1024) + "KB", "Wi-Fi が追いついていない");
+  return result;
+}
+
+// ---------------- microSD ----------------
+
+static bool isMp3(const String &name) {
+  // macOS がコピー時に作る "._曲名.mp3" は中身が MP3 ではないので除く
+  if (name.startsWith("._")) return false;
+  String lower = name;
+  lower.toLowerCase();
+  return lower.endsWith(".mp3");
+}
+
+static void scanSdDir(const String &dir, int depth) {
+  File d = SD.open(dir);
+  if (!d) return;
+  while (sdTracks.size() < SD_MAX_TRACKS) {
+    File e = d.openNextFile();
+    if (!e) break;
+    String name = e.name();
+    String path = dir + (dir.endsWith("/") ? "" : "/") + name;
+    if (e.isDirectory()) {
+      if (depth + 1 < SD_MAX_DEPTH && name != "System Volume Information") scanSdDir(path, depth + 1);
+    } else if (isMp3(name)) {
+      sdTracks.push_back(path);
+    }
+    e.close();
+  }
+  d.close();
+}
+
+// カードを (挿し直されていても) 初期化し直し、MP3 の一覧を作り直す
+static bool setupSD() {
+  SD.end();
+  SPI.setRX(PIN_SD_MISO);
+  SPI.setSCK(PIN_SD_SCK);
+  SPI.setTX(PIN_SD_MOSI);
+  sdReady = SD.begin(PIN_SD_CS);
+  sdTracks.clear();
+  if (!sdReady) {
+    Serial.println("SD: no card");
+    return false;
+  }
+  scanSdDir("/", 0);
+  // アルバムのフォルダ順・曲番号順に並ぶよう、大文字小文字を区別せずパスで並べる
+  std::sort(sdTracks.begin(), sdTracks.end(), [](const String &a, const String &b) {
+    return strcasecmp(a.c_str(), b.c_str()) < 0;
+  });
+  if (sdIndex >= (int)sdTracks.size()) sdIndex = -1;
+  Serial.printf("SD: %u tracks%s\n", (unsigned)sdTracks.size(),
+                sdTracks.size() >= SD_MAX_TRACKS ? " (limit reached)" : "");
+  return !sdTracks.empty();
+}
+
+// nextStep に従って次の曲を選ぶ
+static int pickSdTrack() {
+  int n = sdTracks.size();
+  switch (nextStep) {
+    case STEP_PREV:
+      return sdIndex <= 0 ? n - 1 : sdIndex - 1;
+    case STEP_RAND: {
+      if (sdIndex < 0 || n == 1) return random(n);
+      int r = random(n - 1);
+      return r >= sdIndex ? r + 1 : r;  // 今の曲以外から選ぶ
+    }
+    default:
+      return (sdIndex + 1) % n;
+  }
+}
+
+// パスの最後の要素から拡張子を除いて曲名にする
+static String trackTitle(const String &path) {
+  String name = path.substring(path.lastIndexOf('/') + 1);
+  int dot = name.lastIndexOf('.');
+  return dot > 0 ? name.substring(0, dot) : name;
+}
+
+// ID3v2 タグ (曲名や画像が入っている) を読み飛ばし、最初の MP3 フレームの位置へ進める
+static void skipId3(File &f) {
+  uint8_t h[10];
+  if (f.read(h, 10) == 10 && memcmp(h, "ID3", 3) == 0) {
+    // サイズは 7bit ずつの 4 バイト (syncsafe)。フッタ付きならさらに 10 バイト
+    uint32_t size = ((uint32_t)(h[6] & 0x7f) << 21) | ((uint32_t)(h[7] & 0x7f) << 14) |
+                    ((uint32_t)(h[8] & 0x7f) << 7) | (h[9] & 0x7f);
+    f.seek(10 + size + ((h[5] & 0x10) ? 10 : 0));
+  } else {
+    f.seek(0);
+  }
+}
+
+// 未使用の入力を前に詰め、空いたところをファイルから埋める。ファイルを読み終えたら
+// MAD_BUFFER_GUARD 分の 0 を足して最後のフレームまで出させる。もう足すものがなければ false
+static bool mp3Refill(Mp3Decoder *m, File &f) {
+  if (m->eof) return false;
+  size_t keep = 0;
+  if (m->stream.next_frame) {
+    keep = m->stream.bufend - m->stream.next_frame;
+    memmove(m->in, m->stream.next_frame, keep);
+  }
+  int n = f.read(m->in + keep, MP3_IN_SIZE - keep);
+  if (n <= 0) {
+    memset(m->in + keep, 0, MAD_BUFFER_GUARD);
+    n = MAD_BUFFER_GUARD;
+    m->eof = true;
+  }
+  mad_stream_buffer(&m->stream, m->in, keep + n);
+  m->stream.error = MAD_ERROR_NONE;
+  return true;
+}
+
+// 1フレーム分デコードして m->synth.pcm に出す。曲の終わりか、続けられないエラーなら false
+static bool mp3Decode(Mp3Decoder *m, File &f) {
+  while (true) {
+    if (m->stream.buffer == nullptr || m->stream.error == MAD_ERROR_BUFLEN) {
+      if (!mp3Refill(m, f)) return false;
+    }
+    if (mad_frame_decode(&m->frame, &m->stream) == 0) break;
+    if (MAD_RECOVERABLE(m->stream.error)) continue;  // 壊れたフレームやタグの残りは飛ばして同期を取り直す
+    if (m->stream.error != MAD_ERROR_BUFLEN) {
+      Serial.printf("mp3 decode error 0x%04x\n", m->stream.error);
+      return false;
+    }
+  }
+  mad_synth_frame(&m->synth, &m->frame);
+  return true;
+}
+
+static PlayResult playSd(int index) {
+  if (!a2dp.connected()) {
+    status("no earphone", "cannot play");
+    return PLAY_ERROR;
+  }
+  const String &path = sdTracks[index];
+  String title = trackTitle(path);
+
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    status("sd open error", title);
+    return PLAY_ERROR;
+  }
+  // arduino-pico は Wi-Fi をつなぐと省電力を切る (常時受信)。そのままだと同じチップの
+  // Bluetooth と無線を取り合い、音がブツブツ途切れたので、SD から流す間は省電力にする
+  if (WiFi.status() == WL_CONNECTED) WiFi.defaultLowPowerMode();
+
+  Mp3Decoder *m = &mp3;
+  mad_stream_init(&m->stream);
+  mad_frame_init(&m->frame);
+  mad_synth_init(&m->synth);
+  m->eof = false;
+  skipId3(f);
+
+  Serial.printf("playing %s (%d/%u) — %lu bytes\n", path.c_str(), index + 1,
+                (unsigned)sdTracks.size(), (unsigned long)f.size());
+  printLine(0, title);
+
+  PlayResult result = PLAY_DONE;
+  uint32_t rateMul = 1;
+  uint32_t frames = 0;
+  uint64_t decodeUs = 0;
+  uint32_t underflows = 0;
+  uint32_t maxGapUs = 0;            // loop が1周するのにかかった最長時間。長ければ何かに止められている
+  uint32_t lastIter = micros();
+  unsigned long lastLcd = 0;
+  unsigned long started = millis();
+  a2dp.getUnderflow();  // playUrl と同じく、再生前の無音区間の underflow は数えない
+
+  while (a2dp.connected()) {
+    uint32_t now = micros();
+    if (now - lastIter > maxGapUs) maxGapUs = now - lastIter;
+    lastIter = now;
+
+    PlayResult abort = pollAbort();
+    if (abort != PLAY_NONE) {
+      result = abort;
+      break;
+    }
+
+    // MP3 の1フレームは最大 1152 サンプル。引き伸ばした後のステレオ分と、
+    // pcmChunk に溜まっている端数を書き出す分 (最大1チャンク) が入るまで待つ
+    if ((size_t)a2dp.availableForWrite() < 1152 * 4 * rateMul + sizeof(pcmChunk)) {
+      delay(1);
+      continue;
+    }
+
+    uint32_t t0 = micros();
+    if (!mp3Decode(m, f)) {
+      if (!m->eof) result = PLAY_ERROR;
+      break;
+    }
+    decodeUs += micros() - t0;
+    frames++;
+
+    struct mad_pcm &pcm = m->synth.pcm;
+    rateMul = pcm.samplerate ? (uint32_t)A2DP_RATE / pcm.samplerate : 0;
+    if (rateMul == 0 || rateMul > 4 || rateMul * pcm.samplerate != (uint32_t)A2DP_RATE) {
+      Serial.printf("unsupported: %uHz\n", pcm.samplerate);
+      status("unsupported", String(pcm.samplerate) + "Hz");
+      result = PLAY_ERROR;
+      break;
+    }
+    // libmad はモノラルのとき左だけ埋めるので、右にも写してステレオとして扱う
+    if (pcm.channels == 1) {
+      for (size_t i = 0; i < pcm.length; i++) pcm.samplesX[i][1] = pcm.samplesX[i][0];
+    }
+    writePcm(&pcm.samplesX[0][0], pcm.length, 2, rateMul);
+
+    if (millis() - lastLcd >= 500) {
+      lastLcd = millis();
+      printLine(1, "sd " + String((uint32_t)((uint64_t)f.position() * 100 / f.size())) + "%");
+      // 途切れたらその場で出す。耳で聞いた途切れとログを突き合わせられるように。
+      // 最初の1秒は、止まっていて空だったバッファが溜まるまでの分なので数えない
+      if (a2dp.getUnderflow() && millis() - started >= 1000) {
+        underflows++;
+        Serial.printf("underflow at %lus (wifi %s)\n", (millis() - started) / 1000,
+                      WiFi.status() == WL_CONNECTED ? "connected" : "off");
+      }
     }
   }
 
-  if (a2dp.getUnderflow()) {
-    Serial.println("warning: audio underflow (Wi-Fi が追いついていない)");
+  uint32_t pos = f.position();
+  f.close();
+  mad_synth_finish(&m->synth);
+  mad_frame_finish(&m->frame);
+  mad_stream_finish(&m->stream);
+
+  // 1フレームは 1152 サンプル = 約 26ms。デコードにその何割を使ったかで CPU の余裕が分かる
+  if (frames) {
+    uint32_t avgUs = decodeUs / frames;
+    Serial.printf("mp3: %lu frames, decode avg %lu us/frame (%lu%% of real time), "
+                  "longest loop %lu ms, underflow %lu times\n",
+                  (unsigned long)frames, (unsigned long)avgUs,
+                  (unsigned long)(avgUs * 100 / (1152UL * 1000000 / A2DP_RATE)),
+                  (unsigned long)(maxGapUs / 1000), (unsigned long)underflows);
   }
-  printLine(1, String(played / 1024) + "KB " +
-               (result == PLAY_DONE ? "done" : result == PLAY_STOP ? "stop" : "skip"));
+  finishPlayback(result, String(pos / 1024) + "KB", "SD の読み込みかデコードが追いついていない");
   return result;
 }
 
@@ -677,6 +1008,26 @@ static void showText(const String &path) {
   http.end();
 }
 
+static void startAutoPlay(Step step) {
+  nextStep = step;
+  autoPlay = true;
+  playErrors = 0;
+}
+
+static void printSdTracks() {
+  if (sdTracks.empty()) {
+    Serial.println(sdReady ? "SD: no mp3" : "SD: no card");
+    return;
+  }
+  for (size_t i = 0; i < sdTracks.size(); i++) {
+    Serial.printf("%c%3u %s\n", (int)i == sdIndex ? '>' : ' ', (unsigned)(i + 1), sdTracks[i].c_str());
+  }
+}
+
+static const char *HELP =
+    "commands: sd / music / play [url] / next / prev / rand / stop /"
+    " list / now / shuffle / wifi on|off / scan / status";
+
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
 
@@ -685,27 +1036,39 @@ static void handleCommand(String cmd) {
     url.trim();
     autoPlay = false;
     playUrl(url.length() ? url : String(AUDIO_URL));
-  } else if (cmd == "music" || cmd == "next") {
-    nextPath = "/next.wav";
-    autoPlay = true;
-    playErrors = 0;
+  } else if (cmd == "sd") {
+    // カードを挿し直したときのために、毎回読み直す
+    autoPlay = false;
+    if (setupSD()) {
+      source = SRC_SD;
+      startAutoPlay(STEP_NEXT);
+    } else {
+      status("sd", sdReady ? "no mp3" : "no card");
+    }
+  } else if (cmd == "music") {
+    source = SRC_WIFI;
+    startAutoPlay(STEP_NEXT);
+  } else if (cmd == "next") {
+    startAutoPlay(STEP_NEXT);
   } else if (cmd == "prev") {
-    nextPath = "/prev.wav";
-    autoPlay = true;
-    playErrors = 0;
+    startAutoPlay(STEP_PREV);
   } else if (cmd == "rand") {
-    nextPath = "/random.wav";
-    autoPlay = true;
-    playErrors = 0;
+    startAutoPlay(STEP_RAND);
   } else if (cmd == "stop") {
     autoPlay = false;
     status("espoke", "stopped");
   } else if (cmd == "list") {
-    showText("/list");
+    if (source == SRC_SD) printSdTracks();
+    else showText("/list");
   } else if (cmd == "now") {
-    showText("/now");
+    if (source != SRC_SD) showText("/now");
+    else if (sdIndex >= 0) Serial.printf("%d/%u %s\n", sdIndex + 1, (unsigned)sdTracks.size(), sdTracks[sdIndex].c_str());
+    else Serial.println("SD: not started");
   } else if (cmd == "shuffle") {
-    showText("/shuffle");
+    if (source == SRC_SD) Serial.println("SD では rand で曲を飛ばす");
+    else showText("/shuffle");
+  } else if (cmd.startsWith("wifi")) {
+    setWiFi(cmd);
   } else if (cmd == "scan") {
     autoPlay = false;
     a2dp.disconnect();
@@ -713,14 +1076,14 @@ static void handleCommand(String cmd) {
     findAndConnect();
     lastScan = millis();
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d auto=%d next=%s page=%d button=%s text=\"%s\"\n",
+    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\"\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                  a2dp.connected(), autoPlay, nextPath.c_str(), page,
+                  a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, sdReady,
+                  (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), page,
                   digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
                   morseText.c_str());
   } else {
-    Serial.println("commands: play [url] / music / next / prev / rand / stop /"
-                   " list / now / shuffle / scan / status");
+    Serial.println(HELP);
   }
 }
 
@@ -759,7 +1122,10 @@ void setup() {
   a2dp.setFrequency(A2DP_RATE);
   a2dp.setBufferSize(A2DP_BUFFER);
   a2dp.onConnect(onConnect);
-  a2dp.begin();
+  // A2DP のバッファは大きいので、ヒープが細切れになる前 (SD の曲一覧を作る前) に確保させる
+  if (!a2dp.begin()) {
+    status("BT init failed", "out of memory?");
+  }
 
   // BTstack は User Confirmation Request をアプリに投げるだけで、既定では自動応答
   // しない (hci.c の ssp_auto_accept は 0)。イヤホンも Pico も入力装置を持たない
@@ -770,16 +1136,22 @@ void setup() {
     gap_ssp_set_auto_accept(true);
   }
 
+  // SD に曲があれば、BOOTSEL や next で SD から流す
+  if (setupSD()) source = SRC_SD;
+
   findAndConnect();
   lastScan = millis();
 
-  Serial.println("commands: play [url] / music / next / prev / rand / stop /"
-                 " list / now / shuffle / scan / status");
+  Serial.println(HELP);
 }
 
 void loop() {
-  // Wi-Fi は起動時に落ちることがあるので、切れていれば定期的に張り直す
-  if (WiFi.status() != WL_CONNECTED && millis() - lastWiFiTry >= WIFI_RETRY_MS) {
+  // Wi-Fi は起動時に落ちることがあるので、切れていれば定期的に張り直す。
+  // ただし張り直しは最大 WIFI_TIMEOUT_MS 待つので、SD から流している間はやらない
+  // (外で聞いているときに、曲の合間が無音で止まってしまう)
+  bool sdPlaying = autoPlay && source == SRC_SD;
+  if (wifiEnabled && !sdPlaying && WiFi.status() != WL_CONNECTED &&
+      millis() - lastWiFiTry >= WIFI_RETRY_MS) {
     lastWiFiTry = millis();
     connectWiFi();
   }
@@ -798,36 +1170,48 @@ void loop() {
     lastBootsel = millis();
     if (BOOTSEL) {
       while (BOOTSEL) delay(1);
-      nextPath = "/next.wav";
-      autoPlay = true;
-      playErrors = 0;
+      startAutoPlay(STEP_NEXT);
     }
   }
 
   if (!autoPlay) return;
 
-  // Wi-Fi かイヤホンが切れている間は再接続を待つ (張り直しは上の処理に任せる)
-  if (WiFi.status() != WL_CONNECTED || !a2dp.connected()) {
+  // イヤホン (Wi-Fi から流すときは Wi-Fi も) が切れている間は再接続を待つ (張り直しは上の処理に任せる)
+  if (!a2dp.connected() || (source == SRC_WIFI && WiFi.status() != WL_CONNECTED)) {
     delay(100);
     return;
   }
 
-  PlayResult r = playUrl(String(MUSIC_URL) + nextPath);
+  PlayResult r;
+  if (source == SRC_SD) {
+    if (sdTracks.empty()) {
+      autoPlay = false;
+      status("sd", sdReady ? "no mp3" : "no card");
+      return;
+    }
+    sdIndex = pickSdTrack();
+    r = playSd(sdIndex);
+  } else {
+    static const char *const STEP_PATHS[] = {"/next.wav", "/prev.wav", "/random.wav"};  // Step の順
+    r = playUrl(String(MUSIC_URL) + STEP_PATHS[nextStep]);
+  }
+
   if (r == PLAY_STOP) {
     autoPlay = false;
-    nextPath = "/next.wav";
+    nextStep = STEP_NEXT;
   } else if (r == PLAY_ERROR) {
-    // 一時的なものかもしれないので数回は粘り、それでも駄目なら止める
+    // 一時的なものかもしれないので数回は粘り、それでも駄目なら止める。
+    // SD では同じ向きに次の曲へ進むので、読めない曲が1曲あっても飛ばして続く
     if (++playErrors >= 3) {
       autoPlay = false;
       playErrors = 0;
-      status("music stopped", "server down?");
-    } else {
+      status("music stopped", source == SRC_SD ? "sd card?" : "server down?");
+    } else if (source == SRC_WIFI) {
       delay(2000);
     }
   } else {
     playErrors = 0;
-    if (r == PLAY_DONE) nextPath = "/next.wav";
-    // PLAY_SKIP のときは pollAbort() が nextPath を設定済み
+    if (r == PLAY_DONE) nextStep = STEP_NEXT;
+    // PLAY_SKIP のときは pollAbort() が nextStep を設定済み
   }
 }

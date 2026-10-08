@@ -11,6 +11,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 - **Bluetooth イヤホンに接続して通知音を鳴らす**（A2DP）
 - 鳴らす音声を **Wi-Fi 経由で取得する**
 - **PC に置いた音楽ファイル（mp3 / m4a）を Wi-Fi 経由で聞く**
+- **microSD に入れた MP3 を、ネットのない外でも聞く**
 
 ## 構成
 
@@ -19,7 +20,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `lcd1602_hello/` | LCD1602A（I2C）の表示サンプル |
 | `morse_input/` | 4つのスイッチ（GP10〜13）でモールス信号を打ち、アルファベットを LCD に入力するサンプル |
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
-| `espoke/` | 本体。Wi-Fi で WAV を取得して Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 でモールス入力もできる |
+| `espoke/` | 本体。microSD の MP3 や、Wi-Fi で取得した WAV を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 でモールス入力もできる |
 | `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
 | `docs/` | 部品の取り付け手順など |
 | `tools/` | PC 側で通知音や音楽ライブラリを HTTP 配信する補助スクリプト |
@@ -30,7 +31,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 |---|---|---|
 | `lcd1602_hello` | 319KB / 2093KB (15%) | 69KB / 256KB (26%) |
 | `bt_earphone` | 514KB (24%) | 96KB (36%) |
-| `espoke` | 580KB (27%) | 118KB (45%) |
+| `espoke` | 696KB (33%) | 144KB (54%) |
 
 ---
 
@@ -169,6 +170,7 @@ URL=https://github.com/earlephilhower/arduino-pico/releases/download/global/pack
 arduino-cli core update-index --additional-urls "$URL"
 arduino-cli core install rp2040:rp2040 --additional-urls "$URL"
 arduino-cli lib install "LiquidCrystal I2C"
+arduino-cli lib install BackgroundAudio   # espoke の MP3 デコード (libmad)。1.4.4 で確認
 ```
 
 core は約 1.5GB ある（ツールチェーンと pico-sdk を含むため）。`~/.arduino15` の空き容量に注意。
@@ -394,15 +396,17 @@ volume: 80%
 > 既にスマホなどと接続済みだと `0x04` か `0x18` で撥ねられる。
 > スマホ側の Bluetooth を切ってから試すのが確実。
 
-## 7. espoke — Wi-Fi で取得した音声をイヤホンで鳴らす
+## 7. espoke — microSD や Wi-Fi の音声をイヤホンで鳴らす
 
-本体。`bt_earphone` に Wi-Fi と LCD を足したもの。
+本体。`bt_earphone` に Wi-Fi・LCD・microSD を足したもの。
 
 1. Wi-Fi に接続
-2. Bluetooth イヤホンをスキャンして接続
-3. シリアルに `music` と打つか BOOTSEL を押すと、`MUSIC_URL` の音楽サーバから曲を順に取ってきて流し続ける
-4. シリアルに `play` と打つと `AUDIO_URL` の通知音を1回だけ鳴らす
-5. LCD に曲名と状態を表示。**GP15 のスイッチで表示ページを切り替える**（7.5 節）
+2. Bluetooth イヤホンをスキャンして接続し、microSD の MP3 を探して曲の一覧を作る
+3. シリアルに `sd` と打つと、**microSD の MP3 を順に流し続ける**（7.6 節）
+4. シリアルに `music` と打つと、`MUSIC_URL` の音楽サーバから曲を順に取ってきて流し続ける
+5. BOOTSEL を押すと、最後に選んだ方（起動直後は SD に曲があれば SD）で連続再生を始める
+6. シリアルに `play` と打つと `AUDIO_URL` の通知音を1回だけ鳴らす
+7. LCD に曲名と状態を表示。**GP15 のスイッチで表示ページを切り替える**（7.5 節）
 
 ### 7.1 設定ファイル
 
@@ -431,7 +435,7 @@ $EDITOR espoke/arduino_secrets.h
 
 | 項目 | 対応 |
 |---|---|
-| 形式 | **16bit PCM の WAV のみ**（`fmt` タグ 1）。MP3 などは不可 |
+| 形式 | Wi-Fi: **16bit PCM の WAV のみ**（`fmt` タグ 1）。microSD: **MP3 のみ**（7.6 節） |
 | チャンネル | モノラル / ステレオ（モノラルは左右へ複製） |
 | サンプリングレート | **44100 / 22050 / 11025**（44100 の整数分の1のみ） |
 | 非対応 | 48000、8bit、24bit、可変長リサンプルが要るもの |
@@ -447,8 +451,8 @@ Wi-Fi と Bluetooth は CYW43439 を共有しているので、HTTP の帯域は
 | 44100Hz ステレオ | 176 KB/s | 電波が良ければ。`serve_music.py --stereo` |
 
 音楽で帯域を削るなら、22050Hz に落として高音を捨てるよりモノラルにするほうが音の劣化が小さい。
-ステレオが欲しくて `warning: audio underflow` が出るなら、ルータとの距離を詰めるか
-`A2DP_BUFFER` を増やす。
+ステレオが欲しくて `warning: audio underflow` が出るなら、ルータとの距離を詰める
+（`A2DP_BUFFER` は RAM の都合でこれ以上増やせない。7.6 節）。
 
 実機での動作ログ。
 
@@ -462,27 +466,30 @@ playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
 
 | コマンド | 動作 |
 |---|---|
+| `sd` | microSD を読み直し、MP3 を順に**流し続ける**（前回最後に選んだ曲の次から。起動後の初回は先頭から） |
 | `music` | `MUSIC_URL` から曲を順に取ってきて**流し続ける** |
-| `next` | 次の曲へ（`music` と同じ。再生中でも効く） |
+| `next` | 次の曲へ（再生中でも効く）。止まっているときは、最後に選んだ方（SD か Wi-Fi）で再生を始める |
 | `prev` | 前の曲へ |
 | `rand` | ランダムな曲へ |
 | `stop` | 連続再生をやめる |
-| `list` | 曲一覧をシリアルに出す（番号・LCD 用の名前・パス） |
+| `list` | 曲一覧をシリアルに出す。SD なら番号とパス（`>` が今の曲）、Wi-Fi なら番号・LCD 用の名前・パス |
 | `now` | 今かかっている曲を表示 |
-| `shuffle` | サーバ側のシャッフルを ON/OFF |
+| `shuffle` | サーバ側のシャッフルを ON/OFF（Wi-Fi のときだけ。SD では `rand` を使う） |
 | `play` | `AUDIO_URL` の通知音を1回鳴らす |
 | `play <url>` | 指定した URL を1回鳴らす |
+| `wifi off` | Wi-Fi を切り、つなぎ直しもやめる（外で使うとき）。Bluetooth はそのまま |
+| `wifi on` | Wi-Fi のつなぎ直しを再開する（SD から流している間は、止めてからつなぐ） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
-| `status` | Wi-Fi / IP / Bluetooth / 連続再生の状態を表示 |
+| `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / SD の曲数 / 空きヒープの状態を表示 |
 
-**再生中に受け付けるのは `stop` / `next` / `prev` / `rand` だけ。**
+**再生中に受け付けるのは `stop` / `next` / `prev` / `rand` / `wifi on` / `wifi off` だけ。**
 他のコマンドは曲が終わるまで処理されない。
 
 BOOTSEL ボタンは状況で意味が変わる。
 
 | 状況 | BOOTSEL |
 |---|---|
-| 止まっているとき | 連続再生を始める（`music`） |
+| 止まっているとき | 連続再生を始める（最後に選んだ方。起動直後は SD に曲があれば SD） |
 | 再生中 | 次の曲へ送る（`next`） |
 
 > BOOTSEL の読み取りは一瞬だけフラッシュと割り込みを止めるので、再生中は
@@ -497,13 +504,16 @@ BOOTSEL ボタンは状況で意味が変わる。
 | `BT_TARGET_NAME` | `""` | 接続先の名前（前方一致）。空なら最初の1台 |
 | `BT_TARGET_ADDR` | MACアドレス | 空でなければスキャンせず直接繋ぐ（6章参照） |
 | `WIFI_TIMEOUT_MS` | 30000 | Wi-Fi 接続を待つ上限 |
-| `WIFI_RETRY_MS` | 30000 | Wi-Fi が切れているとき再接続を試みる間隔 |
+| `WIFI_RETRY_MS` | 30000 | Wi-Fi が切れているとき再接続を試みる間隔。SD から連続再生している間は試みない（7.6 節） |
 | `HTTP_TIMEOUT_MS` | 15000 | サーバの応答を待つ上限 |
 | `A2DP_RATE` | 44100 | A2DP の送出レート。44100 か 48000 |
-| `A2DP_BUFFER` | 65536 | 約370ms 分。通信のゆらぎを吸収する。曲を流し続けるので厚めに取ってある |
+| `A2DP_BUFFER` | 32768 | 約370ms 分（64KB）。通信のゆらぎを吸収する。**単位はバイトではなく 16bit サンプル数**で、2倍のバイトが確保される。RAM の都合でこれ以上は増やせない（7.6 節） |
 | `IN_FRAMES` | 1024 | 1回の読み取りで扱うフレーム数。小刻みに読むとスループットが落ちる |
 | `BOOTSEL_SKIP` | `true` | 再生中の BOOTSEL で次の曲へ送るか |
 | `PIN_BUTTON` | 15 | 表示切り替えスイッチをつなぐ GPIO |
+| `PIN_SD_MISO` など | 16 / 18 / 19 / 20 | microSD の MISO・CLK・MOSI・CS（[docs/sd_music_parts.md](docs/sd_music_parts.md) の 3 章） |
+| `SD_MAX_TRACKS` | 300 | SD から拾う曲数の上限。パスを RAM に持つため（1曲 70 バイト前後） |
+| `SD_MAX_DEPTH` | 5 | SD のフォルダを潜る深さ |
 
 ### 7.5 表示切り替えスイッチ
 
@@ -528,6 +538,49 @@ BOOTSEL ボタンは状況で意味が変わる。
 4ページ目の次は通常画面に戻る。通常画面以外を見ている間も曲名や状態は裏で更新しているので、
 戻ったときには最新の内容が出る。2〜4ページ目は1秒ごとに描き直す。
 スイッチは再生中も効き、音は途切れない。
+
+### 7.6 microSD から聞く
+
+microSD スロット（CK-40）の部品と配線は [docs/sd_music_parts.md](docs/sd_music_parts.md)。
+配線を確かめるには、先に `sd_test` を書き込んでシリアルを見る（全部通ると `ALL OK` と出て LED が点く）。
+
+カードの準備:
+
+- FAT32 でフォーマットし、MP3 を入れる。フォルダに分けてよい（5 階層まで潜る）
+- 曲は**パスの順**（大文字小文字は区別しない）に並ぶ。アルバムごとのフォルダに、`01-曲名.mp3` のように曲番号を付けておくと、アルバム順・曲順に流れる
+- 対応するのは MP3（Layer III）で、サンプリングレートは 44100 の整数分の1（44100 / 22050 / 11025）。普通の音楽の MP3 は 44100 なのでそのまま鳴る
+- **m4a（AAC）は鳴らない**。`ffmpeg -i in.m4a -c:a libmp3lame -b:a 192k out.mp3` で MP3 にする
+- macOS がコピーのときに作る `._曲名.mp3` は無視する
+- カードを挿し直したら `sd` を打つと読み直す
+
+仕組み:
+
+- MP3 は `BackgroundAudio` ライブラリに入っている libmad で、`loop()` の中で1フレーム（1152 サンプル、約26ms）ずつデコードし、A2DP に書く。ライブラリの再生クラス（割り込みでデコードする）は使っていない。Wi-Fi の WAV と同じく、再生中もスイッチやコマンドが効く
+- 実機（44.1kHz ステレオ 192kbps、CPU 200MHz、`-Os`）では、1フレームのデコードに平均 11ms（実時間の約42%）
+- 曲の終わりに `mp3: ... decode avg ... us/frame (..% of real time), longest loop .. ms, underflow .. times` と出る。`longest loop` は `loop()` が1周にかかった最長時間で、`A2DP_BUFFER` の 370ms に近づくと音が切れる。再生中に音が切れると、その場で `underflow at 12s (wifi connected)` のように出る（再生開始から1秒間は、空のバッファが溜まるまでの分なので数えない）
+- SD の読み出しは 4MHz（SD ライブラリの既定）で約 375KB/s。320kbps の MP3 でも 40KB/s なので十分
+- Wi-Fi の再接続は最大30秒待つので、外で聞いているときに曲の合間が止まらないよう、SD から連続再生している間は再接続しない。外では `wifi off` で切っておくとよい
+- **SD から流している間は、Wi-Fi を省電力モード（`WiFi.defaultLowPowerMode()`）にする。** arduino-pico は Wi-Fi につなぐと省電力を切る（`noLowPowerMode()`、常時受信）。そのままだと、同じ CYW43439 の Bluetooth と無線を取り合い、Wi-Fi につながっているときだけ SD の曲がずっと途切れた（`underflow` も出た）。省電力にすると、Wi-Fi につないだままでも途切れなくなった。Wi-Fi の WAV を流すとき（`playUrl`）は、速さが要るので常時受信に戻す
+
+RAM（256KB）の使い方には余裕がない。
+
+| 使い道 | 大きさ |
+|---|---|
+| グローバル変数（BTstack・Wi-Fi・MP3 デコーダの作業領域 約29KB など） | 約144KB |
+| `A2DP_BUFFER`（32768 サンプル） | 64KB |
+| 残り（Wi-Fi・Bluetooth の動的確保、SD の曲一覧など） | 約51KB |
+
+- `A2DP_BUFFER` を以前の 65536 にすると 128KB を確保しようとして `a2dp.begin()` が失敗し、Bluetooth が一切つながらなくなる（`BT rejected` が続く）
+- 大きな確保が細切れのヒープで失敗しないよう、`a2dp.begin()` は SD の曲一覧を作る前に呼び、MP3 デコーダの作業領域は最初から静的に持っている
+
+A2DP への書き込みは、必ず `A2DP_CHUNK`（2048 サンプル）ずつまとめている。
+arduino-pico 6.1.0 の `A2DPSource::write()` には、リングバッファの終わりをまたぐ書き込みで、
+後半にデータの先頭部分をもう一度書いてしまう不具合がある（2回目の `memcpy` が `buffer` の先頭から読んでいる）。
+MP3 の1フレーム（2304 サンプル）をそのまま書くとバッファを割り切れず、約0.37秒ごとに一部のデータが壊れる。
+バッファが空になるわけではないので `warning: audio underflow` は出ない。
+（コードを読んで見つけた不具合。実機で最初に途切れたときは上の Wi-Fi の問題も重なっていたので、これだけでどう聞こえるかは確かめていない。
+Wi-Fi の WAV 再生は 2048 サンプルずつ書いていたので、たまたま踏んでいなかった。）
+`A2DP_BUFFER` を変えるときは `A2DP_CHUNK` の倍数にすること（`static_assert` で確かめている）。
 
 ## 8. tools/serve_audio.py — 通知音を配る
 
@@ -711,8 +764,13 @@ play [2] NMIXX/Blue_Valentine/01-Blue_Valentine.mp3
 | 書き込み直したら繋がらなくなった | リンクキーは書き込みで消える。ペアリングモードに入れ直す |
 | `connect()` が false を返すが実は繋がっている | 戻り値は要求の受理可否のみ。`connected()` を待つ（6.1 参照） |
 | 一度失敗すると以降ずっと `rejected` | 中途半端なシグナリング接続が残り `a2dp_cid` が埋まっている。再起動で解消 |
+| 起動直後から `rejected` が続き、`status` の `heap` が 100KB を超えている | `a2dp.begin()` がメモリ不足で失敗している（起動時に `BT init failed` と出る）。`A2DP_BUFFER` を大きくしすぎていないか（7.6 節） |
+| SD の曲が Wi-Fi につながっているときだけ途切れる（`underflow at ...` が出る） | Wi-Fi が常時受信になっていて Bluetooth と無線を取り合っている。SD から流す間は省電力にしているか（7.6 節）。`wifi off` で切ると確実 |
+| SD の曲が途切れる（underflow は出ない） | A2DP への書き込みが `A2DP_CHUNK` 単位になっていない。7.6 節の `A2DPSource::write()` の不具合 |
+| `sd` で `no card` | カードが奥まで入っていない、または配線。`sd_test` で確かめる |
+| `sd` で `no mp3` | MP3 がない。m4a は対象外（7.6 節）。`SD_MAX_DEPTH` より深いフォルダも探さない |
 | 接続はするが音が出ない | イヤホン側の音量。`volume:` のログが出ていれば A2DP は繋がっている |
-| `warning: audio underflow` | Wi-Fi が追いついていない。素材を 22050Hz モノラルに落とすか、`A2DP_BUFFER` を増やす |
+| `warning: audio underflow` | Wi-Fi が追いついていない。素材を 22050Hz モノラルに落とす。`A2DP_BUFFER` は RAM の都合で増やせない（7.6 節） |
 | Wi-Fi に繋がらないことがある | 起動時の1回だけでは不安定。`WIFI_RETRY_MS` ごとに `loop()` から張り直している |
 | 音がブツブツ切れる | 同上。Wi-Fi と Bluetooth が CYW43439 を共有しているため。ルータとの距離も効く |
 | `http error 404` など | `AUDIO_URL` の IP が PC の LAN IP になっているか確認。`tools/serve_audio.py` が表示する URL を使う |
