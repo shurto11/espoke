@@ -13,9 +13,11 @@
  *      BOOTSEL を押すと、最後に選んだ方 (起動直後は SD に曲があれば SD) で再生を始める
  *      "play" なら AUDIO_URL の通知音を1回だけ
  *   4. LCD1602A に曲名と状態を表示。GP15 のスイッチで表示ページを切り替える
- *   5. SW1〜SW4 (GP10〜13) でモールス信号を打ってアルファベットを入力する
- *      SW1 ツー / SW2 トン / SW3 backspace / SW4 enter (符号を文字に確定。空なら空白)
- *      SW1 か SW2 を押すと入力ページに切り替わる
+ *   5. SW1〜SW4 (GP10〜13) の役目は表示中のページで変わる
+ *      入力ページ: モールス信号を打ってアルファベットを入力する
+ *        SW1 backspace / SW2 トン / SW3 ツー / SW4 enter (符号を文字に確定。空なら空白)
+ *      それ以外: 再生の操作 (シリアルの pause / prev / next / rand と同じ)
+ *        SW1 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 / SW4 ランダムな曲
  *
  * 音声フォーマット:
  *   microSD: MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
@@ -68,10 +70,11 @@ static const uint8_t LCD_COLS  = 16;
 static const uint8_t LCD_ROWS  = 2;
 static const uint8_t LCD_ADDR_DEFAULT = 0x27;
 static const int     PIN_BUTTON = 15;  // GP15 (物理20番ピン)。もう片側は GND へ
-static const int     PIN_DASH   = 10;  // SW1 GP10 (物理14番ピン) ツー
-static const int     PIN_DOT    = 11;  // SW2 GP11 (物理15番ピン) トン
-static const int     PIN_BACK   = 12;  // SW3 GP12 (物理16番ピン) backspace
-static const int     PIN_ENTER  = 13;  // SW4 GP13 (物理17番ピン) enter
+// SW1〜SW4。コメントは 入力ページでの役目 / それ以外のページでの役目
+static const int     PIN_BACK   = 10;  // SW1 GP10 (物理14番ピン) backspace / 再生・一時停止
+static const int     PIN_DOT    = 11;  // SW2 GP11 (物理15番ピン) トン / 前の曲
+static const int     PIN_DASH   = 12;  // SW3 GP12 (物理16番ピン) ツー / 次の曲
+static const int     PIN_ENTER  = 13;  // SW4 GP13 (物理17番ピン) enter / ランダムな曲
 
 // microSD (CK-40)。配線は docs/sd_music_parts.md の 3 章
 static const int     PIN_SD_MISO = 16;  // GP16 (物理21番ピン) ⑦ DAT0
@@ -170,20 +173,23 @@ static bool   buttonStable = HIGH;         // チャタリングを除いた状�
 static bool   buttonRaw = HIGH;
 static unsigned long buttonChanged = 0;
 
-// モールス入力
+// SW1〜SW4。入力ページではモールス入力、それ以外のページでは再生の操作に使う
 struct KeyState {
   int           pin;
   bool          raw;
   bool          stable;
   unsigned long changedAt;
 };
-enum { KEY_DASH, KEY_DOT, KEY_BACK, KEY_ENTER, KEY_COUNT };
+enum { KEY_BACK, KEY_DOT, KEY_DASH, KEY_ENTER, KEY_COUNT };
 static KeyState keys[KEY_COUNT] = {
-  {PIN_DASH,  HIGH, HIGH, 0},
-  {PIN_DOT,   HIGH, HIGH, 0},
   {PIN_BACK,  HIGH, HIGH, 0},
+  {PIN_DOT,   HIGH, HIGH, 0},
+  {PIN_DASH,  HIGH, HIGH, 0},
   {PIN_ENTER, HIGH, HIGH, 0},
 };
+// 入力ページ以外で SW1〜SW4 を押したときに出すコマンド。シリアルから打ったのと同じに扱う
+static const char *const PLAY_KEY_COMMANDS[KEY_COUNT] = {"pause", "prev", "next", "rand"};
+static String keyCommand = "";             // スイッチで出して、まだ処理していないコマンド
 
 struct Morse {
   char        ch;
@@ -322,6 +328,12 @@ static void drawPage() {
 }
 
 static void onKey(int id) {
+  if (page != PAGE_INPUT) {
+    keyCommand = PLAY_KEY_COMMANDS[id];
+    Serial.printf("key: %s\n", keyCommand.c_str());
+    return;
+  }
+
   switch (id) {
     case KEY_DASH:
     case KEY_DOT:
@@ -346,9 +358,7 @@ static void onKey(int id) {
       break;
   }
   Serial.printf("morse code=\"%s\" text=\"%s\"\n", morseCode.c_str(), morseText.c_str());
-  // 符号を打ち始めたら入力ページへ。backspace / enter は入力ページを見ているときだけ表示に効く
-  if (id == KEY_DASH || id == KEY_DOT) page = PAGE_INPUT;
-  if (page == PAGE_INPUT) drawPage();
+  drawPage();
 }
 
 // スイッチを見て、押されたらページを送る。再生中も呼ばれるので待たずに返す
@@ -401,6 +411,16 @@ static String readLine() {
     }
   }
   return String();
+}
+
+// 次に処理するコマンドを返す。スイッチで出したものがあれば、シリアルより先にそれを返す
+static String nextCommand() {
+  if (keyCommand.length()) {
+    String out = keyCommand;
+    keyCommand = "";
+    return out;
+  }
+  return readLine();
 }
 
 // ---------------- Bluetooth ----------------
@@ -687,7 +707,7 @@ static void togglePause() {
 static PlayResult pollAbort() {
   pollButton();
 
-  String cmd = readLine();
+  String cmd = nextCommand();
   if (cmd.length()) {
     if (cmd == "pause") {
       togglePause();
@@ -1270,7 +1290,7 @@ void loop() {
   }
 
   pollButton();
-  handleCommand(readLine());
+  handleCommand(nextCommand());
 
   // 止まっているときの BOOTSEL は連続再生の開始。再生中は pollAbort() が
   // 次の曲へ送るので、ここでは autoPlay を見て二重に反応しないようにする
