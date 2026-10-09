@@ -143,6 +143,8 @@ static int32_t volumeGain = 0;             // writePcm() で振幅に掛ける�
 
 // 連続再生の状態
 static bool   autoPlay = false;            // 曲を続けて流しているか
+static bool   paused = false;              // 一時停止中か。再生ループは無音を流しながら待つ
+static String progressText = "";           // 通常画面の2行目に出している再生の進み具合
 static Source source = SRC_WIFI;           // 起動時に SD に曲があれば SRC_SD にする
 static Step   nextStep = STEP_NEXT;        // 次の曲の選び方
 static int    playErrors = 0;              // 連続で失敗した回数
@@ -225,6 +227,12 @@ static void status(const String &a, const String &b) {
   printLine(0, a);
   printLine(1, b);
   Serial.printf("[%s] %s\n", a.c_str(), b.c_str());
+}
+
+// 再生の進み具合を通常画面の2行目に出す。一時停止中は後ろに "pause" を付ける
+static void showProgress(const String &text) {
+  progressText = text;
+  printLine(1, paused ? text + " pause" : text);
 }
 
 static void setupLCD() {
@@ -620,7 +628,9 @@ static void finishPlayback(PlayResult result, const String &summary, const char 
   if (a2dp.getUnderflow()) {
     Serial.printf("warning: audio underflow (%s)\n", slowCause);
   }
-  printLine(1, summary + " " +
+  // 曲を送ったり止めたりしたら一時停止も解く
+  if (result == PLAY_SKIP || result == PLAY_STOP) paused = false;
+  showProgress(summary + " " +
                (result == PLAY_DONE ? "done" : result == PLAY_STOP ? "stop" :
                 result == PLAY_SKIP ? "skip" : "error"));
 }
@@ -666,12 +676,23 @@ static void setVolume(const String &cmd) {
   }
 }
 
+// 一時停止と再開を切り替える。再生ループは、止めている間は曲を読み進めずに無音を流す
+static void togglePause() {
+  paused = !paused;
+  Serial.println(paused ? "paused" : "resumed");
+  showProgress(progressText);
+}
+
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
 
   String cmd = readLine();
   if (cmd.length()) {
+    if (cmd == "pause") {
+      togglePause();
+      return PLAY_NONE;
+    }
     if (cmd == "stop") return PLAY_STOP;
     if (cmd == "next") { nextStep = STEP_NEXT; return PLAY_SKIP; }
     if (cmd == "prev") { nextStep = STEP_PREV; return PLAY_SKIP; }
@@ -684,7 +705,7 @@ static PlayResult pollAbort() {
       setVolume(cmd);
       return PLAY_NONE;
     }
-    Serial.println("再生中に使えるのは stop / next / prev / rand / vol [0-100|+|-] / wifi on / wifi off");
+    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / vol [0-100|+|-] / wifi on / wifi off");
   }
 
   // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
@@ -776,6 +797,14 @@ static PlayResult playUrl(const String &url) {
       break;
     }
 
+    // 一時停止中は読まずに待つ。サーバは送れない間 STREAM_TIMEOUT (30秒) 待って接続を切るので、
+    // それより長く止めると、再開したとき手元に届いていた分だけ鳴らして次の曲へ進む
+    if (paused) {
+      feedSilence();
+      delay(1);
+      continue;
+    }
+
     if ((size_t)a2dp.availableForWrite() < outBytesMax) {
       delay(1);
       continue;
@@ -797,9 +826,9 @@ static PlayResult playUrl(const String &url) {
     if (millis() - lastLcd >= 500) {
       lastLcd = millis();
       if (info.dataBytes) {
-        printLine(1, "play " + String(played * 100 / info.dataBytes) + "%");
+        showProgress("play " + String(played * 100 / info.dataBytes) + "%");
       } else {
-        printLine(1, "play " + String(played / 1024) + "KB");
+        showProgress("play " + String(played / 1024) + "KB");
       }
     }
   }
@@ -983,6 +1012,13 @@ static PlayResult playSd(int index) {
       break;
     }
 
+    // 一時停止中はデコードせずに待つ。A2DP には無音を流しておく (feedSilence() の説明を参照)
+    if (paused) {
+      feedSilence();
+      delay(1);
+      continue;
+    }
+
     // MP3 の1フレームは最大 1152 サンプル。引き伸ばした後のステレオ分と、
     // pcmChunk に溜まっている端数を書き出す分 (最大1チャンク) が入るまで待つ
     if ((size_t)a2dp.availableForWrite() < 1152 * 4 * rateMul + sizeof(pcmChunk)) {
@@ -1014,7 +1050,7 @@ static PlayResult playSd(int index) {
 
     if (millis() - lastLcd >= 500) {
       lastLcd = millis();
-      printLine(1, "sd " + String((uint32_t)((uint64_t)f.position() * 100 / f.size())) + "%");
+      showProgress("sd " + String((uint32_t)((uint64_t)f.position() * 100 / f.size())) + "%");
       // 途切れたらその場で出す。耳で聞いた途切れとログを突き合わせられるように。
       // 最初の1秒は、止まっていて空だったバッファが溜まるまでの分なので数えない
       if (a2dp.getUnderflow() && millis() - started >= 1000) {
@@ -1071,6 +1107,7 @@ static void showText(const String &path) {
 static void startAutoPlay(Step step) {
   nextStep = step;
   autoPlay = true;
+  paused = false;
   playErrors = 0;
 }
 
@@ -1085,7 +1122,7 @@ static void printSdTracks() {
 }
 
 static const char *HELP =
-    "commands: sd / music / play [url] / next / prev / rand / stop /"
+    "commands: sd / music / play [url] / pause / next / prev / rand / stop /"
     " list / now / shuffle / vol [0-100|+|-] / wifi on|off / scan / status";
 
 static void handleCommand(String cmd) {
@@ -1095,6 +1132,7 @@ static void handleCommand(String cmd) {
     String url = cmd.substring(4);
     url.trim();
     autoPlay = false;
+    paused = false;
     playUrl(url.length() ? url : String(AUDIO_URL));
   } else if (cmd == "sd") {
     // カードを挿し直したときのために、毎回読み直す
@@ -1108,6 +1146,11 @@ static void handleCommand(String cmd) {
   } else if (cmd == "music") {
     source = SRC_WIFI;
     startAutoPlay(STEP_NEXT);
+  } else if (cmd == "pause") {
+    // 止まっているときは再生を始める (BOOTSEL と同じ)。曲の合間やイヤホンのつなぎ直しを
+    // 待っている間なら一時停止を切り替え、次の曲を止めた状態で始めるかを決める
+    if (autoPlay) togglePause();
+    else startAutoPlay(STEP_NEXT);
   } else if (cmd == "next") {
     startAutoPlay(STEP_NEXT);
   } else if (cmd == "prev") {
@@ -1116,6 +1159,7 @@ static void handleCommand(String cmd) {
     startAutoPlay(STEP_RAND);
   } else if (cmd == "stop") {
     autoPlay = false;
+    paused = false;
     status("espoke", "stopped");
   } else if (cmd == "list") {
     if (source == SRC_SD) printSdTracks();
@@ -1138,9 +1182,9 @@ static void handleCommand(String cmd) {
     findAndConnect();
     lastScan = millis();
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d vol=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\"\n",
+    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d pause=%d vol=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\"\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                  a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, volume, sdReady,
+                  a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, paused, volume, sdReady,
                   (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), page,
                   digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
                   morseText.c_str());

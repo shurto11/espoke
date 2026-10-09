@@ -468,10 +468,11 @@ playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
 |---|---|
 | `sd` | microSD を読み直し、MP3 を順に**流し続ける**（前回最後に選んだ曲の次から。起動後の初回は先頭から） |
 | `music` | `MUSIC_URL` から曲を順に取ってきて**流し続ける** |
+| `pause` | 一時停止 / 再開を切り替える。止まっているときは `next` と同じく再生を始める |
 | `next` | 次の曲へ（再生中でも効く）。止まっているときは、最後に選んだ方（SD か Wi-Fi）で再生を始める |
 | `prev` | 前の曲へ |
 | `rand` | ランダムな曲へ |
-| `stop` | 連続再生をやめる |
+| `stop` | 連続再生をやめる。次に始めると止めた曲の次から（途中から聞き直したいなら `pause`） |
 | `list` | 曲一覧をシリアルに出す。SD なら番号とパス（`>` が今の曲）、Wi-Fi なら番号・LCD 用の名前・パス |
 | `now` | 今かかっている曲を表示 |
 | `shuffle` | サーバ側のシャッフルを ON/OFF（Wi-Fi のときだけ。SD では `rand` を使う） |
@@ -483,9 +484,9 @@ playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
 | `wifi off` | Wi-Fi を切り、つなぎ直しもやめる（外で使うとき）。Bluetooth はそのまま |
 | `wifi on` | Wi-Fi のつなぎ直しを再開する（SD から流している間は、止めてからつなぐ） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
-| `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / 音量 / SD の曲数 / 空きヒープの状態を表示 |
+| `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / 一時停止 / 音量 / SD の曲数 / 空きヒープの状態を表示 |
 
-**再生中に受け付けるのは `stop` / `next` / `prev` / `rand` / `vol` / `wifi on` / `wifi off` だけ。**
+**再生中に受け付けるのは `pause` / `stop` / `next` / `prev` / `rand` / `vol` / `wifi on` / `wifi off` だけ。**
 他のコマンドは曲が終わるまで処理されない。
 
 BOOTSEL ボタンは状況で意味が変わる。
@@ -533,7 +534,7 @@ BOOTSEL ボタンは状況で意味が変わる。
 
 | ページ | 1行目 | 2行目 |
 |---|---|---|
-| 1. 通常 | 曲名 / 状態 | 再生の進み具合 |
+| 1. 通常 | 曲名 / 状態 | 再生の進み具合（一時停止中は後ろに `pause`） |
 | 2. Wi-Fi | 電波強度（dBm） | IP アドレス |
 | 3. Bluetooth | 接続状態 | イヤホンの MAC アドレス（コロン抜き） |
 | 4. システム | 起動からの時間 | 空きヒープ |
@@ -752,6 +753,9 @@ play [2] NMIXX/Blue_Valentine/01-Blue_Valentine.mp3
 
 `next` や `stop` で Pico から切った場合は即座に検知されるので、こちらは
 `stopped by client` になる。
+
+Pico で一時停止している間も、Pico は受け取らないので送信が進まない。そのため30秒より長く
+止めると、同じく `client gone` で切られる。
 
 ## 10. トラブルシューティング
 
