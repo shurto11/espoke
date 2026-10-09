@@ -6,6 +6,7 @@ Discord の決めたサーバー (かチャンネル) に書き込まれた発�
 1行にして Pico WH へ流す。LCD の文字 ROM (A00) にあるのは英数字と半角カタカナだけで、
 その並びは JIS X 0201 (cp932 の1バイト文字) と同じ。漢字は MeCab (fugashi + unidic-lite)
 で読みに直してから半角カナにする。辞書は数十 MB あって Pico には載らないので、ここでやる。
+逆向きに、Pico でモールス入力した文を Bot として Discord に送る。
 
 Pico は Tailscale に入れないので、tailscale funnel でこのサーバを
 https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HTTPS でつながせる。
@@ -20,6 +21,8 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     DISCORD_TOKEN       Bot のトークン
     DISCORD_GUILD_ID    受け取るサーバーの ID。Bot が見られるチャンネル全部の発言を受け取る
     DISCORD_CHANNEL_ID  1チャンネルだけ受け取るときは、こちらにチャンネルの ID を書く (両方あればこちら)
+    DISCORD_SEND_CHANNEL_ID  Pico からの文を送るチャンネルの ID。無ければ DISCORD_CHANNEL_ID、
+                        それも無ければ最後に発言を受け取ったチャンネルに送る
     RELAY_KEY           Pico と決めておく合言葉。Funnel で誰でもつなげるので、これで弾く
 
 使い方:
@@ -28,6 +31,8 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     ~/espoke/venv/bin/python discord_relay.py --convert "今日は雨"   # 変換結果だけ見る
 
     GET  /stream?after=<id>  after より新しい発言を1行ずつ流し続ける (X-Key ヘッダが要る)
+    POST /stream?after=<id>  本文 (UTF-8) を Discord に送ってから、GET と同じく流す (X-Key ヘッダが要る)。
+                             送った結果は X-Sent ヘッダ ("ok" か理由)。--no-discord なら差出人 espoke の発言として流し返す
     POST /post               本文 (UTF-8) を差出人 test の発言として流す。試験用 (X-Key ヘッダが要る)
 
 1行は  <メッセージ ID> TAB <HH:MM> TAB <名前> TAB <本文> LF  で、cp932 のバイト列。
@@ -41,7 +46,9 @@ ID は Discord のメッセージ ID (snowflake) で、時間とともに増え�
 """
 
 import argparse
+import asyncio
 import bisect
+import concurrent.futures
 import datetime
 import hmac
 import json
@@ -61,6 +68,8 @@ TEXT_MAX = 200  # 本文のバイト数。Pico は2行目に流して出す
 KEEP = 20       # 覚えておく発言の数。つなぎ直した Pico に取りこぼした分を送るため
 BACKLOG = 8     # after なしでつないできたときに送る数 (Pico が持っておける数)
 HEARTBEAT = 30  # 新着がないときに空行を送る間隔 (秒)
+SEND_MAX = 2000     # Pico から送る文の長さの上限 (Discord の上限)。Pico で打てるのは 64 文字まで
+SEND_TIMEOUT = 10   # Discord に送り終わるのを待つ上限 (秒)。Pico は 15 秒まで返事を待つ
 FUNNEL_PORT = 8443  # tailscale funnel で公開するポート (443 / 8443 / 10000 から選べる)
 
 # 送信が詰まったまま何秒待つか。Pico は電源が落ちたり電波が切れたりすると
@@ -202,7 +211,23 @@ def add_message(msg_id, when, author, text, channel=None):
     sys.stderr.write("msg %s\n" % line.rstrip(b"\n").decode("cp932"))
 
 
+def send_test(text):
+    """--no-discord のときの送り先。Discord の代わりに、差出人 espoke の発言として Pico へ流し返す"""
+    add_message(STORE.next_id(), datetime.datetime.now(JST), "espoke", text)
+    return "ok"
+
+
+# Pico から来た文を送る関数。結果 ("ok" か、LCD に出す短い理由) を返す。run_discord が差し替える
+SEND = send_test
+
+
 # ---------------- HTTP ----------------
+
+def stream_after(url):
+    """/stream?after=<id> の id。無ければ None"""
+    after = urllib.parse.parse_qs(url.query).get("after", [""])[0]
+    return int(after) if after.isdigit() else None
+
 
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.0 にすると応答のたびに接続が閉じる。Content-Length を付けずに流し続けられる。
@@ -233,25 +258,34 @@ class Handler(BaseHTTPRequestHandler):
                               200 if url.path == "/" else 404)
         if not self._authorized():
             return
-        after = urllib.parse.parse_qs(url.query).get("after", [""])[0]
-        self._stream(int(after) if after.isdigit() else None)
+        self._stream(stream_after(url))
 
     def do_POST(self):
-        if urllib.parse.urlparse(self.path).path != "/post":
+        url = urllib.parse.urlparse(self.path)
+        if url.path not in ("/post", "/stream"):
             return self._text("not found\n", 404)
         if not self._authorized():
             return
         n = int(self.headers.get("Content-Length") or 0)
         text = self.rfile.read(n).decode("utf-8", "replace")
-        add_message(STORE.next_id(), datetime.datetime.now(JST), "test", text)
-        self._text("ok\n")
+        if url.path == "/post":
+            add_message(STORE.next_id(), datetime.datetime.now(JST), "test", text)
+            return self._text("ok\n")
+        # Pico から送る文。Pico はつなぐたびに TLS の握手 (4〜8 秒) をするので、
+        # 送るのと受け取り直すのを1回の接続で済ませる。結果はヘッダで返す
+        text = text.strip()[:SEND_MAX]
+        sent = SEND(text) if text else "empty"
+        sys.stderr.write("send %r: %s\n" % (text, sent))
+        self._stream(stream_after(url), sent)
 
-    def _stream(self, after):
+    def _stream(self, after, sent=None):
         sys.stderr.write("stream start after=%s\n" % after)
         self.connection.settimeout(STREAM_TIMEOUT)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=shift_jis")
         self.send_header("Connection", "close")
+        if sent is not None:
+            self.send_header("X-Sent", sent)
         self.end_headers()
 
         sent = 0
@@ -283,8 +317,10 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------- Discord ----------------
 
-def run_discord(token, guild_id, channel_id):
-    """channel_id があればそのチャンネルだけ、なければ guild_id のサーバー全体を受け取る"""
+def run_discord(token, guild_id, channel_id, send_id):
+    """channel_id があればそのチャンネルだけ、なければ guild_id のサーバー全体を受け取る。
+    Pico からの文は send_id か channel_id のチャンネル、どちらも無ければ最後に受け取ったチャンネルに送る"""
+    global SEND
     import discord
 
     intents = discord.Intents.default()
@@ -298,9 +334,38 @@ def run_discord(token, guild_id, channel_id):
             return m.channel.id == channel_id
         return m.guild is not None and m.guild.id == guild_id
 
+    last_channel = None  # 最後に受け取った発言のチャンネル
+
     def add(m):
+        nonlocal last_channel
+        last_channel = m.channel
         add_message(m.id, m.created_at, m.author.display_name, discord_text(m),
                     None if channel_id else m.channel.name)
+
+    async def send(text):
+        to = send_id or channel_id
+        channel = (client.get_channel(to) or await client.fetch_channel(to)) if to else last_channel
+        if channel is None:
+            return "no channel"
+        # 合言葉を知っていれば誰でも送れるので、@everyone などで人を呼ばせない
+        await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        sys.stderr.write("sent to #%s\n" % channel)
+        return "ok"
+
+    def send_from_pico(text):
+        """HTTP のスレッドから呼ぶ。Discord のイベントループで送り、終わるまで待つ"""
+        if not client.is_ready():
+            return "not ready"
+        future = asyncio.run_coroutine_threadsafe(send(text), client.loop)
+        try:
+            return future.result(SEND_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return "timeout"
+        except discord.HTTPException as e:
+            return "discord %d" % e.status  # 403 なら Bot に送信の権限が無い、404 なら ID が違う
+
+    SEND = send_from_pico
 
     @client.event
     async def on_ready():
@@ -390,6 +455,7 @@ def main():
         token = os.environ.get("DISCORD_TOKEN", "")
         guild = os.environ.get("DISCORD_GUILD_ID", "")
         channel = os.environ.get("DISCORD_CHANNEL_ID", "")
+        send_channel = os.environ.get("DISCORD_SEND_CHANNEL_ID", "")
         if not token or not (guild.isdigit() or channel.isdigit()):
             sys.exit("DISCORD_TOKEN と、DISCORD_GUILD_ID (サーバー全体) か DISCORD_CHANNEL_ID (1チャンネル) "
                      "を設定する (%s か環境変数に書く)" % env)
@@ -416,7 +482,8 @@ def main():
     else:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         run_discord(token, int(guild) if guild.isdigit() else None,
-                    int(channel) if channel.isdigit() else None)
+                    int(channel) if channel.isdigit() else None,
+                    int(send_channel) if send_channel.isdigit() else None)
 
 
 if __name__ == "__main__":
