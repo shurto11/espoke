@@ -12,6 +12,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 - 鳴らす音声を **Wi-Fi 経由で取得する**
 - **PC に置いた音楽ファイル（mp3 / m4a）を Wi-Fi 経由で聞く**
 - **microSD に入れた MP3 を、ネットのない外でも聞く**
+- **Discord のメッセージを受け取って LCD に出す**（漢字は読みに直して半角カナで出す）
 
 ## 構成
 
@@ -20,10 +21,10 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `lcd1602_hello/` | LCD1602A（I2C）の表示サンプル |
 | `morse_input/` | 4つのスイッチ（GP10〜13）でモールス信号を打ち、アルファベットを LCD に入力するサンプル |
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
-| `espoke/` | 本体。microSD の MP3 や、Wi-Fi で取得した WAV を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる |
+| `espoke/` | 本体。microSD の MP3 や、Wi-Fi で取得した WAV を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージも受け取って出す |
 | `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
 | `docs/` | 部品の取り付け手順など |
-| `tools/` | PC 側で通知音や音楽ライブラリを HTTP 配信する補助スクリプト |
+| `tools/` | PC 側で通知音や音楽ライブラリを HTTP 配信する補助スクリプトと、Discord の中継 |
 
 ビルド実測値（`rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble`）:
 
@@ -31,7 +32,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 |---|---|---|
 | `lcd1602_hello` | 319KB / 2093KB (15%) | 69KB / 256KB (26%) |
 | `bt_earphone` | 514KB (24%) | 96KB (36%) |
-| `espoke` | 696KB (33%) | 144KB (54%) |
+| `espoke` | 779KB (38%) | 146KB (56%) |
 
 ---
 
@@ -408,6 +409,7 @@ volume: 80%
 6. シリアルに `play` と打つと `AUDIO_URL` の通知音を1回だけ鳴らす
 7. LCD に曲名と状態を表示。**GP15 のスイッチで表示ページを切り替える**（7.5 節）
 8. **SW1〜SW4 で再生を操作する**（再生 / 一時停止・前の曲・次の曲・ランダム）。入力ページではモールス入力になる（7.5 節）
+9. **Discord のメッセージを受け取る**。届いたらメッセージページに切り替えて出す（10 章）
 
 ### 7.1 設定ファイル
 
@@ -427,7 +429,14 @@ $EDITOR espoke/arduino_secrets.h
 
 // 音楽サーバ。tools/serve_music.py が配る。末尾にスラッシュは付けない
 #define MUSIC_URL "http://192.168.1.20:8000"
+
+// Discord の中継。tools/discord_relay.py が起動時に表示する行をそのまま書く（10 章）
+#define RELAY_HOST "dynabook.tailxxxx.ts.net"
+#define RELAY_PORT 8443
+#define RELAY_KEY  "your-relay-key"
 ```
+
+`RELAY_HOST` を書かなければ（前からある `arduino_secrets.h` のままなら）Discord は受け取らない。
 
 ### 7.2 音声フォーマットの制約
 
@@ -485,6 +494,7 @@ playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
 | `wifi off` | Wi-Fi を切り、つなぎ直しもやめる（外で使うとき）。Bluetooth はそのまま |
 | `wifi on` | Wi-Fi のつなぎ直しを再開する（SD から流している間は、止めてからつなぐ） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
+| `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（10.6 節） |
 | `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / 一時停止 / 音量 / SD の曲数 / 空きヒープの状態を表示 |
 
 **再生中に受け付けるのは `pause` / `stop` / `next` / `prev` / `rand` / `vol` / `wifi on` / `wifi off` だけ。**
@@ -519,6 +529,10 @@ BOOTSEL ボタンは状況で意味が変わる。
 | `PIN_SD_MISO` など | 16 / 18 / 19 / 20 | microSD の MISO・CLK・MOSI・CS（[docs/sd_music_parts.md](docs/sd_music_parts.md) の 3 章） |
 | `SD_MAX_TRACKS` | 300 | SD から拾う曲数の上限。パスを RAM に持つため（1曲 70 バイト前後） |
 | `SD_MAX_DEPTH` | 5 | SD のフォルダを潜る深さ |
+| `MSG_MAX` | 8 | 覚えておく Discord のメッセージの数 |
+| `MSG_SCROLL_MS` | 300 | 16 文字を超える本文を1文字ずつ流す間隔 |
+| `RELAY_RETRY_MS` | 30000 | 中継へのつなぎ直しを試みる間隔。失敗が続くと倍ずつ延ばす（最大 8 分） |
+| `RELAY_IDLE_MS` | 90000 | これだけ何も届かなければ中継との接続が切れたとみなす |
 
 ### 7.5 スイッチ（表示切り替えと SW1〜SW4）
 
@@ -536,30 +550,34 @@ BOOTSEL ボタンは状況で意味が変わる。
 | ページ | 1行目 | 2行目 |
 |---|---|---|
 | 1. 通常 | 曲名 / 状態 | 再生中は帯域ごとの音の大きさの棒（下の説明）。一時停止中や止まっているときは進み具合や状態（一時停止中は後ろに `pause`） |
-| 2. 入力 | モールスで入力した文章 | 入力中の符号と、確定したときの文字 |
-| 3. Wi-Fi | 電波強度（dBm） | IP アドレス |
-| 4. Bluetooth | 接続状態 | イヤホンの MAC アドレス（コロン抜き） |
-| 5. システム | 起動からの時間 | 空きヒープ |
+| 2. メッセージ | Discord の発言者の名前と時刻（`HH:MM`） | 本文。16 文字を超えると流れる（10.6 節）。まだ無ければ中継とのつながり具合 |
+| 3. 入力 | モールスで入力した文章 | 入力中の符号と、確定したときの文字 |
+| 4. Wi-Fi | 電波強度（dBm） | IP アドレス |
+| 5. Bluetooth | 接続状態 | イヤホンの MAC アドレス（コロン抜き） |
+| 6. システム | 起動からの時間 | 空きヒープ |
 
 通常画面の2行目の棒は、左の 86Hz から右の 16kHz までを対数で16本に分け、それぞれの帯域の強さを8段で出す。
 音量（`vol`）を掛ける前の音で見るので、`vol` を変えても棒の高さは変わらない。
 A2DP のバッファにはおよそ 370ms 先の音まで入っているので、書いたときではなく、今イヤホンへ送り出している所の棒を出す。
 棒が下がるときは 80ms ごとに1段ずつ下げる。
 
-5ページ目の次は通常画面に戻る。通常画面以外を見ている間も曲名や状態は裏で更新しているので、
-戻ったときには最新の内容が出る。3〜5ページ目は1秒ごとに描き直す。
+6ページ目の次は通常画面に戻る。通常画面以外を見ている間も曲名や状態は裏で更新しているので、
+戻ったときには最新の内容が出る。4〜6ページ目は1秒ごとに描き直す。
+Discord のメッセージが届くと、どのページを見ていてもメッセージページに切り替わる。
+このときだけ、GP15 を押すと次のページではなく元のページに戻る。
 スイッチは再生中も効き、音は途切れない。
 
 SW1〜SW4（GP10〜13）の役目は、表示中のページで変わる。
 
 | ページ | SW1 | SW2 | SW3 | SW4 |
 |---|---|---|---|---|
-| 2. 入力 | backspace | トン | ツー | enter |
+| 2. メッセージ | 再生 / 一時停止 | 古いメッセージ | 新しいメッセージ | ランダムな曲 |
+| 3. 入力 | backspace | トン | ツー | enter |
 | それ以外 | 再生 / 一時停止 | 前の曲 | 次の曲 | ランダムな曲 |
 
 - 再生の操作はシリアルの `pause` / `prev` / `next` / `rand` と同じ。止まっているときはどれを押しても再生が始まる
 - 一時停止中に曲を送ると、一時停止は解けて次の曲が鳴る
-- モールスを打つときは、GP15 で入力ページ（通常画面の次）に切り替えてから打つ
+- モールスを打つときは、GP15 で入力ページ（通常画面の2つ先）に切り替えてから打つ
 - Wi-Fi の曲は、30秒より長く一時停止すると、再開したときに少しだけ鳴って次の曲へ進む。
   音楽サーバが、送れないまま30秒たつと接続を切るため（9.7 節）。SD の曲はいくら止めても続きから鳴る
 
@@ -590,12 +608,35 @@ RAM（256KB）の使い方には余裕がない。
 
 | 使い道 | 大きさ |
 |---|---|
-| グローバル変数（BTstack・Wi-Fi・MP3 デコーダの作業領域 約29KB など） | 約144KB |
+| グローバル変数（BTstack・Wi-Fi・MP3 デコーダの作業領域 約29KB など） | 約146KB |
 | `A2DP_BUFFER`（32768 サンプル） | 64KB |
-| 残り（Wi-Fi・Bluetooth の動的確保、SD の曲一覧など） | 約51KB |
+| 残り（Wi-Fi・Bluetooth の動的確保、SD の曲一覧、Discord の中継との TLS など） | 約46KB |
 
 - `A2DP_BUFFER` を以前の 65536 にすると 128KB を確保しようとして `a2dp.begin()` が失敗し、Bluetooth が一切つながらなくなる（`BT rejected` が続く）
 - 大きな確保が細切れのヒープで失敗しないよう、`a2dp.begin()` は SD の曲一覧を作る前に呼び、MP3 デコーダの作業領域は最初から静的に持っている
+
+Discord の中継とは TLS でつなぐ（10 章）ので、BearSSL がヒープを使う
+（受信バッファ `RELAY_TLS_RX`、BearSSL 用のスタック `RELAY_TLS_STACK`、コンテキストなど）。
+Wi-Fi につないだ後の空きは 30KB ほどしかなく、既定の 16KB の受信バッファでは足りない。
+そこで受信バッファを **4KB** にしている。
+- 本来、16KB より小さくするには、サーバが MFLN（レコードを小さくする取り決め、RFC 6066）に応じる必要がある。
+  Funnel の向こうで TLS を受ける Go（tailscaled）は MFLN に応じない
+- ただし Go は、データを1レコード 1.2KB ほどに分けて送る（送った量が 128KB を超えるまで）。
+  `openssl s_client -msg` で実測すると、一番大きいレコードは証明書の 3430 バイトだった
+- Let's Encrypt のチェーンが長くなってつなげなくなったら、`RELAY_TLS_RX` を増やす
+
+BearSSL は、arduino-pico が用意する専用のスタック（`StackThunk`、6400 バイト固定）の上で動く。
+P-384 の証明書を確かめると、ここを **6224 バイト**まで使った（余裕 176 バイト）。あふれると、隣にあるヒープを黙って壊す。
+実際、最初に試したとき、つないだ直後から SD が応答しなくなり、USB を抜き差しするまで戻らなかった
+（あふれたせいかは確かめきれていない）。
+そこで、つなぐ前に 8KB（`RELAY_TLS_STACK`）のものに取り替えている（`growTlsStack()`）。
+コアには大きさを変える設定がないが、スタックの場所は BearSSL を呼ぶたびに `stack_thunk_top` から読まれるので、BearSSL の外でなら取り替えられる。
+
+つないだときにシリアルに出る行で、ヒープとスタックの余裕が分かる。実機では次のとおりだった。
+
+```
+relay: tls 5722 ms, heap 28KB -> 20KB, bearssl stack 6216/8192 bytes
+```
 
 A2DP への書き込みは、必ず `A2DP_CHUNK`（2048 サンプル）ずつまとめている。
 arduino-pico 6.1.0 の `A2DPSource::write()` には、リングバッファの終わりをまたぐ書き込みで、
@@ -777,7 +818,207 @@ play [2] NMIXX/Blue_Valentine/01-Blue_Valentine.mp3
 Pico で一時停止している間も、Pico は受け取らないので送信が進まない。そのため30秒より長く
 止めると、同じく `client gone` で切られる（7.5 節）。
 
-## 10. トラブルシューティング
+## 10. tools/discord_relay.py — Discord を受け取る
+
+Discord の決めたチャンネルの発言を、espoke の LCD に出す（送信はまだない）。
+
+### 10.1 経路
+
+```
+   Discord ──Bot── discord_relay.py (127.0.0.1:8001)        dynabook（学校）
+                          │ tailscale funnel
+                          ▼
+            https://dynabook.<tailnet>.ts.net:8443
+                          │ インターネット
+                   家の Wi-Fi ── Pico WH（BearSSL で HTTPS）
+```
+
+- 中継は学校に置いた dynabook で常時動かし、Pico は家の Wi-Fi で受ける。
+- Pico は Tailscale に入れない（9.2 節）ので、**Funnel で中継をインターネットに公開し、Pico から HTTPS でつなぐ**。
+  誰でもつなげてしまうので、合言葉（`RELAY_KEY`）を `X-Key` ヘッダで送らせ、違えば 403 を返す。中継自体は `127.0.0.1` でしか待ち受けない。
+- **Funnel は 8443 番を使う。** dynabook の 443 番は、tailnet の中だけに見せる `tailscale serve`（`127.0.0.1:8787`）に使っている。
+  443 で funnel すると、その設定を書き換えて 8787 まで公開してしまう。Funnel が使えるのは 443 / 8443 / 10000 番だけ。
+- 家に常時動かしておくマシンは要らない。LTE-M（[docs/lte_m_parts.md](docs/lte_m_parts.md)）にしても、BG96 は TLS を内蔵しているので同じ URL が使える。
+- dynabook を学校に移すと、家からは `music`（`MUSIC_URL` は LAN の IP）が届かなくなる。
+
+### 10.2 なぜ中継で変換するのか
+
+LCD1602A の文字 ROM（A00）にあるのは**英数字と半角カタカナ**だけ。その並びは JIS X 0201 で、cp932（Shift_JIS）の1バイト文字と同じ番号になっている。
+漢字を読みに直すには形態素解析の辞書が要る（unidic-lite は展開すると 249MB）。Flash が 2MB の Pico には載らない。
+そこで中継が「漢字 → 読み → 半角カナ」まで済ませ、LCD にそのまま書けるバイト列にして渡す。
+serve_music.py が曲名を ASCII にしてから渡しているのと同じ分担。
+
+変換の手順:
+
+1. メンションは `@名前`、カスタム絵文字は `:名前:`、URL は `URL`、添付は `[添付]` にする。太字・打ち消し・伏せ字の記号は外す
+2. NFKC で正規化する（全角英数は ASCII に、半角カナは全角カナに揃える）
+3. MeCab（fugashi + unidic-lite）で語に分け、**漢字を含む語だけ**読みに置き換える
+4. ひらがなをカタカナにし、濁点と半濁点を分けてから半角カナにする（`ガ` → `ｶﾞ`）。半角に無い `ヶ` などは近い字で代用する
+5. ROM に無い文字のうち、文字（ハングルや、読みが分からなかった漢字）は `?` にし、絵文字や記号は捨てる。
+   `~` は ROM では `→` になるので `-` にする（`\` は `¥` で出る）
+
+| 元の発言 | LCD |
+|---|---|
+| 今日は雨。ガンダム、ＡＢＣ😀 | `ｷｮｳﾊｱﾒ｡ｶﾞﾝﾀﾞﾑ､ABC` |
+| 明日10時に駅前で待ち合わせ！ | `ｱｽ10ｼﾞﾆｴｷﾏｴﾃﾞﾏﾁｱﾜｾ!` |
+| discordのbotを作った | `discordﾉbotｦﾂｸｯﾀ` |
+| café 한국어 ✨ | `cafe ???` |
+
+- 助詞の「は」「を」は、発音ではなく字のとおり `ﾊ` `ｦ` で出る
+- 読みは辞書の判断なので外れることがある（`明日` は `ｱｽ`）。人名も外れやすい
+- 変換だけを試すには `--convert` を使う（10.5 節）
+
+### 10.3 Bot を作る
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) で New Application を作り、Bot のページを開く
+2. Reset Token でトークンを出す（一度しか表示されないので控える）
+3. 同じページの **Message Content Intent を ON** にする。OFF のままだと本文が空で届く
+4. OAuth2 → URL Generator で scope に `bot`、権限に View Channels と Read Message History を選び、出てきた URL で自分のサーバーに招待する
+5. Discord の 設定 → 詳細設定 で開発者モードを ON にし、受け取るチャンネルを右クリック → チャンネル ID をコピー
+
+### 10.4 dynabook 側の準備
+
+```bash
+ssh dynabook mkdir -p '~/espoke'
+scp tools/discord_relay.py dynabook:~/espoke/
+ssh dynabook
+python3 -m venv ~/espoke/venv
+~/espoke/venv/bin/pip install discord.py 'fugashi[unidic-lite]'
+```
+
+設定は `~/espoke/relay.env` に書く（トークンが入るのでリポジトリには入れない）。
+
+```bash
+cat > ~/espoke/relay.env <<'END'
+DISCORD_TOKEN=Bot のトークン
+DISCORD_CHANNEL_ID=123456789012345678
+RELAY_KEY=合言葉
+END
+chmod 600 ~/espoke/relay.env
+```
+
+`RELAY_KEY` は `openssl rand -hex 16` などで作る。
+
+```bash
+~/espoke/venv/bin/python ~/espoke/discord_relay.py
+```
+
+起動すると、`arduino_secrets.h` にそのまま書ける行を表示する（7.1 節）。
+
+```
+  http://127.0.0.1:8001/
+
+公開していなければ:  tailscale funnel --bg --https=8443 8001
+
+espoke/arduino_secrets.h に書く:
+  #define RELAY_HOST "dynabook.tailxxxx.ts.net"
+  #define RELAY_PORT 8443
+  #define RELAY_KEY  "..."
+discord: espoke#1234 として #general を見ている
+```
+
+Funnel で公開する。
+
+```bash
+tailscale funnel --bg --https=8443 8001   # 権限で弾かれたら sudo を付ける
+tailscale funnel status
+```
+
+- 初めてのときは、Funnel を許可するためのリンクが出る。tailnet の管理画面で Funnel を有効にする
+- `--bg` を付けると設定が残り、dynabook を再起動しても公開が続く
+- 443 番の `tailscale serve` はそのまま残る。`tailscale funnel status` に両方出る
+
+常時動かすには systemd の user unit にする。
+
+```ini
+# ~/.config/systemd/user/espoke-relay.service
+[Unit]
+Description=espoke Discord relay
+After=network-online.target
+
+[Service]
+ExecStart=%h/espoke/venv/bin/python %h/espoke/discord_relay.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now espoke-relay
+sudo loginctl enable-linger $USER         # ログインしていなくても動かす
+journalctl --user -u espoke-relay -f      # 届いた発言は "msg ..." と出る
+```
+
+### 10.5 エンドポイント
+
+| URL | 動作 |
+|---|---|
+| `GET /stream?after=<ID>` | `after` より新しい発言を送り、接続を閉じずに新着を流し続ける。`after` が無ければ直近 8 件から |
+| `POST /post` | 本文（UTF-8）を差出人 `test` の発言として流す。Discord を使わずに試すとき |
+| `GET /` | 動いているかの確認 |
+
+`/stream` と `/post` には `X-Key: <RELAY_KEY>` ヘッダが要る（無いか違えば 403）。
+
+1件は1行で、cp932 のバイト列。
+
+```
+<メッセージ ID> TAB <HH:MM> TAB <名前> TAB <本文> LF
+```
+
+- ID は Discord のメッセージ ID（snowflake）。時間とともに増えるので、Pico は最後に受け取った ID を `after` に付けてつなぎ直せば、切れていた間の分も受け取れる。
+  中継を立ち上げ直しても、起動時にチャンネルの履歴を 8 件読み直す
+- 名前は 10 バイト、本文は 200 バイトで切る。時刻は日本時間
+- つないだ直後は、溜まっていた分のあとに**空行を1つ**送る。Pico はここまでを「つなぐ前からあった分」とみなし、起動直後に古い発言で着信表示しない
+- その後は、何もない間 30 秒ごとに空行を送る。Pico は 90 秒何も届かなければ切れたとみなす
+- HTTP/1.0 で返す。Pico も HTTP/1.0 で頼むので、Funnel の手前の Go のプロキシは chunked にせず、届いた分をすぐ流す
+
+PC から試す。`iconv` は入力が終わるまで溜め込むので、流れを見るには Python で1行ずつ変換する。
+
+```bash
+KEY=合言葉
+URL=https://dynabook.tailxxxx.ts.net:8443
+curl -s --http1.0 -N -H "X-Key: $KEY" $URL/stream \
+  | python3 -c 'import sys
+for l in sys.stdin.buffer: print(l.decode("cp932"), end="", flush=True)'
+curl -H "X-Key: $KEY" --data-binary 'テストです' $URL/post   # 別の端末から
+
+~/espoke/venv/bin/python ~/espoke/discord_relay.py --convert '今日は雨'  # 変換だけ
+~/espoke/venv/bin/python ~/espoke/discord_relay.py --no-discord        # Discord なしで /post だけ
+```
+
+### 10.6 Pico 側の動き
+
+- 起動後の最初の `loop()` で中継につなぐ。切れたら 30 秒ごとにつなぎ直す。つなげないことが続くと、間隔を倍ずつ延ばす（最大 8 分）。中継が落ちていると握手のタイムアウト（15 秒）まで待つので、曲の合間が何度も止まらないようにするため。中継を直したあとすぐにつなぎ直させるには、シリアルで `relay` を打つ
+- **TLS の握手に 4〜8 秒かかる**（実測。Let's Encrypt の P-384 の証明書を確かめるのが重い）。A2DP のバッファ（370ms）では持たないので、つなぐのは止まっている間か曲の合間だけにしている。
+  つなぐ前に A2DP のバッファを無音で埋めるので、つなぎ直すときだけ曲の合間が 0.4 秒と握手の分（数秒）だけ空く
+- 受け取るときは待たずに、届いた分だけ読む。再生中も届く（SD の再生中は Wi-Fi が省電力なので少し遅れる）
+- 証明書は `espoke/relay_ca.h` のルート CA（Let's Encrypt の Root YE / ISRG Root X2 / ISRG Root X1）で確かめる。
+  期限を確かめるのに時計が要るので、最初につなぐ前に NTP（`ntp.nict.jp`）で合わせる
+- 直近 8 件を覚えておく。届いたら**メッセージページに切り替える**（7.5 節）。GP15 を押すと元のページに戻る
+- 1行目は名前と時刻、2行目は本文。16 文字を超える本文は 0.3 秒ごとに1文字ずつ流し、頭と末尾で 1.5 秒止まる
+- SW2 で古いメッセージ、SW3 で新しいメッセージを見る
+- シリアルには `relay: <ID> <時刻> <名前>` と出る（名前は半角カナのバイト列なので化ける）。
+  `status` には `relay=1 (no message) msgs=3` のように、つながり具合と覚えている件数が出る
+- `wifi off` にすると中継も切る
+
+メッセージがまだ1件も無いとき、メッセージページの2行目にはつながり具合が出る。
+
+| 表示 | 意味 |
+|---|---|
+| `connecting` | 起動直後。まだつなぎにいっていない |
+| `no message` | つながっている。チャンネルにまだ発言が無い |
+| `relay error` | TLS でつなげなかった。シリアルに `relay: connect failed (ssl <番号> ...)` が出る |
+| `relay 403` など | 中継に断られた。`RELAY_KEY` が違う |
+| `relay no reply` | 応答のヘッダが来なかった |
+| `relay lost` / `relay silent` | 切れた / 90 秒何も届かなかった。30 秒以内につなぎ直す |
+| `ntp failed` | 時計を合わせられなかった |
+| `wifi off` | `wifi off` で切った |
+| `no RELAY_HOST` | `arduino_secrets.h` に `RELAY_HOST` が無い |
+
+## 11. トラブルシューティング
 
 | 症状 | 原因と対処 |
 |---|---|
@@ -819,3 +1060,9 @@ Pico で一時停止している間も、Pico は受け取らないので送信�
 | 書き込みが始まらない | BOOTSEL ボタンを押しながら USB を挿し直す。`RPI-RP2` ドライブが出たら手動で `.uf2` をコピー |
 | オンボード LED が光らない | Pico W/WH の LED は GP25 ではない。`LED_BUILTIN` を使う |
 | 日本語が表示できない | LCD1602A は英数字とカタカナ（独自コード）のみ。漢字・ひらがなは不可 |
+| メッセージページのカナが記号やキリル文字になる | LCD の文字 ROM が A02（欧文）。半角カナが出るのは A00（日本語）の LCD1602A だけ |
+| `relay: connect failed (ssl -1000 ...)` が出る、または `heap` が 15KB を切っている | TLS に使う RAM が足りない（7.6 節）。つなぐには 10KB ほど要る。SD の曲数（`SD_MAX_TRACKS`）を減らすなどして空ける |
+| `relay: connect failed` が出るが、`heap` は足りている | 時計が合っていない（`ntp failed`）、Funnel が止まっている、Let's Encrypt がルート CA を替えた（`relay_ca.h` を更新する）のどれか。PC から 10.5 節の curl を試す |
+| `relay 403` | `RELAY_KEY` が dynabook の `relay.env` と違う |
+| 発言しても本文が空で届く | Developer Portal で Message Content Intent が OFF（10.3 節） |
+| PC の curl で、発言してもすぐに出ない | `--http1.0` か `-N` を付けていない。`iconv` を通していると、終わるまで溜め込まれる（10.5 節） |

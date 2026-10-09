@@ -16,8 +16,12 @@
  *   5. SW1〜SW4 (GP10〜13) の役目は表示中のページで変わる
  *      入力ページ: モールス信号を打ってアルファベットを入力する
  *        SW1 backspace / SW2 トン / SW3 ツー / SW4 enter (符号を文字に確定。空なら空白)
+ *      メッセージページ: SW2 古いメッセージ / SW3 新しいメッセージ (SW1・SW4 は下と同じ)
  *      それ以外: 再生の操作 (シリアルの pause / prev / next / rand と同じ)
  *        SW1 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 / SW4 ランダムな曲
+ *   6. RELAY_HOST の中継 (tools/discord_relay.py) に HTTPS でつなぎ、Discord のメッセージを受け取る。
+ *      届いたらメッセージページに切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
+ *      変換して送ってくるので、そのまま LCD に書ける
  *
  * 音声フォーマット:
  *   microSD: MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
@@ -31,7 +35,10 @@
  */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <time.h>
+#include <StackThunk.h>
 #include <BluetoothAudio.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -43,7 +50,17 @@
 // libmad を読み込んでいるこのヘッダ経由で取り込む (再生クラス自体は使わない)
 #include <BackgroundAudioMP3.h>
 
-#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / AUDIO_URL / MUSIC_URL
+#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / AUDIO_URL / MUSIC_URL / RELAY_HOST / RELAY_KEY
+#include "relay_ca.h"         // RELAY_CA: 中継の証明書を確かめるルート CA
+
+// 古い arduino_secrets.h でもビルドできるように。RELAY_HOST が空なら Discord は受け取らない
+#ifndef RELAY_HOST
+#define RELAY_HOST ""
+#define RELAY_KEY  ""
+#endif
+#ifndef RELAY_PORT
+#define RELAY_PORT 8443  // tailscale funnel が使えるのは 443 / 8443 / 10000
+#endif
 
 // --- 設定 ---
 static const char *BT_LOCAL_NAME  = "espoke";  // イヤホン側に見える名前
@@ -91,6 +108,11 @@ static const int     PIN_SD_MOSI = 19;  // GP19 (物理25番ピン) ③ CMD
 static const int     PIN_SD_CS   = 20;  // GP20 (物理26番ピン) ② DAT3/CS
 static const size_t  SD_MAX_TRACKS = 300;  // 曲のパスは RAM に持つので上限を設ける (1曲 70 バイト前後)
 static const int     SD_MAX_DEPTH  = 5;    // フォルダを潜る深さ
+
+// Discord のメッセージ
+static const size_t        MSG_MAX         = 8;    // 覚えておく数。中継は起動直後に直近のこの数だけ送ってくる
+static const unsigned long MSG_SCROLL_MS   = 300;  // 16 文字に収まらない本文を1文字ずつ流す間隔
+static const int           MSG_SCROLL_HOLD = 5;    // 本文の頭と末尾で止める長さ (MSG_SCROLL_MS 何回分か)
 // ------------
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
@@ -121,6 +143,14 @@ struct Mp3Decoder {
   struct mad_synth  synth;
   uint8_t           in[MP3_IN_SIZE + MAD_BUFFER_GUARD];
   bool              eof;  // ファイルを読み終え、末尾に MAD_BUFFER_GUARD 分の 0 を足した
+};
+
+// Discord のメッセージ1件。名前と本文は LCD の文字コード (英数字と半角カナ) のバイト列
+struct Msg {
+  String id;      // Discord のメッセージ ID。つなぎ直すとき、ここより後を送ってもらう
+  String time;    // "HH:MM"
+  String author;  // 10 バイトまで
+  String text;    // 200 バイトまで
 };
 
 A2DPSource a2dp;
@@ -169,6 +199,19 @@ static const unsigned long CONNECT_TIMEOUT_MS = 15000;  // ストリーム開始
 static const unsigned long WIFI_TIMEOUT_MS = 30000;    // Wi-Fi 接続を待つ上限
 static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi 再接続を試みる間隔
 static const unsigned long HTTP_TIMEOUT_MS = 15000;    // サーバの応答を待つ上限
+static const unsigned long RELAY_RETRY_MS = 30000;     // 中継へのつなぎ直しを試みる間隔。失敗が続くと倍ずつ延ばす
+static const int           RELAY_BACKOFF_MAX = 4;      // 延ばすのは 2^4 倍 (8 分) まで
+static const unsigned long RELAY_IDLE_MS = 90000;      // これだけ何も届かなければ切れたとみなす (中継は 30 秒ごとに空行を送る)
+static const size_t        RELAY_LINE_MAX = 300;       // 1行の上限。中継は本文を 200 バイトに切って送ってくる
+// TLS の受信バッファ。既定の 16KB では Wi-Fi につないだ後の空きヒープ (30KB ほど) にほとんど残らない。
+// Funnel の向こうの Go の TLS は MFLN (レコードを小さくする取り決め) に応じないが、実測では一番大きい
+// レコードが証明書の 3430 バイトで、データは送った量が 128KB を超えるまで 1.2KB ほどに分けて送ってくる。
+// 証明書のチェーンが長くなってつなげなくなったら (ssl のエラーが出る) 増やす
+static const int           RELAY_TLS_RX = 4096;
+// BearSSL は専用のスタック (arduino-pico の StackThunk) の上で動く。コアが確保するのは 6400 バイトだが、
+// Let's Encrypt の P-384 の証明書を確かめると 6224 バイトまで使った (実測)。あふれると隣のヒープを壊すので、
+// これだけの大きさのものに取り替える
+static const size_t        RELAY_TLS_STACK = 8192;
 static unsigned long lastWiFiTry = 0;
 static bool   wifiEnabled = true;          // "wifi off" で false にすると、つなぎ直しもしない
 static int    volume = VOLUME_DEFAULT;     // 音量の目盛り。変えるときは applyVolume() を通す
@@ -193,8 +236,9 @@ static Mp3Decoder          mp3;
 static String serialLine = "";             // 受信途中のコマンド
 
 // LCD の表示ページ。0 は曲名や状態を出す通常画面で、スイッチを押すたびに次へ進む
-enum Page { PAGE_MAIN, PAGE_INPUT, PAGE_WIFI, PAGE_BT, PAGE_SYSTEM, PAGE_COUNT };
+enum Page { PAGE_MAIN, PAGE_MSG, PAGE_INPUT, PAGE_WIFI, PAGE_BT, PAGE_SYSTEM, PAGE_COUNT };
 static int    page = PAGE_MAIN;
+static int    pageBeforeMsg = -1;          // 着信でメッセージページに切り替える前のページ。スイッチでここへ戻る
 static String mainLines[2];                // 通常画面の内容。他のページを見ている間も更新しておく
 static unsigned long lastPageDraw = 0;
 
@@ -239,6 +283,24 @@ static const size_t MAX_CODE = 6;          // 1文字の符号は最長5つ (数
 static const size_t MAX_TEXT = 64;
 static String morseCode = "";              // 入力中の符号 ("-" と ".")
 static String morseText = "";              // 確定した文章
+
+// Discord の中継 (tools/discord_relay.py) から受け取ったメッセージ
+static BearSSL::WiFiClientSecure *relay = nullptr;  // 最初につなぐときに作る (TLS のスタック 6.4KB を起動時から取らない)
+static BearSSL::X509List *relayCA = nullptr;
+static bool   relayOpen = false;           // メッセージの流れを受け取っている最中か
+static bool   relayQuiet = false;          // 起動して最初の同期中。前からあった分なので着信として知らせない
+static String relayStatus = "connecting";  // メッセージがまだ無いときにメッセージページに出す
+static unsigned long lastRelayTry = 0;     // 最後につなぎにいった時刻
+static int    relayFailures = 0;           // 続けてつなげなかった回数
+static unsigned long lastRelayData = 0;    // 最後に何か (空行を含む) 届いた時刻
+static String relayLine = "";              // 受信途中の1行
+static String relayLastId = "";            // 最後に受け取ったメッセージの ID
+static Msg    msgs[MSG_MAX];               // 古い順に msgCount 件
+static size_t msgCount = 0;
+static int    msgView = 0;                 // メッセージページで見ているもの。0 が最新、1 がその1つ前
+static size_t msgScroll = 0;               // 本文を何文字流したか
+static int    msgHold = 0;                 // 本文の端で止まっている残り回数
+static unsigned long lastMsgScroll = 0;
 
 // 曲名はサーバが X-Track ヘッダで返してくる。collectHeaders() で拾う指定をしておく
 static const char *HTTP_HEADERS[] = { "X-Track" };
@@ -481,10 +543,54 @@ static char decodeMorse(const String &code) {
   return 0;
 }
 
+// メッセージページで見ている1件。msgCount が 0 のときは呼ばない
+static const Msg &viewedMsg() {
+  return msgs[msgCount - 1 - msgView];
+}
+
+// メッセージページの2行目に、本文を流した位置から書く
+static void drawMsgText() {
+  drawRow(1, viewedMsg().text.substring(msgScroll));
+}
+
+// 本文を頭から出し直す。頭で少し止めてから流し始める
+static void resetMsgScroll() {
+  msgScroll = 0;
+  msgHold = MSG_SCROLL_HOLD;
+  lastMsgScroll = millis();
+}
+
+// 16 文字に収まらない本文を1文字ずつ流す。末尾まで来たら少し止めて、頭に戻ってまた止める
+static void scrollMsg() {
+  lastMsgScroll = millis();
+  const String &text = viewedMsg().text;
+  if (text.length() <= LCD_COLS) return;
+  if (msgHold > 0) {
+    msgHold--;
+    return;
+  }
+  msgScroll = (msgScroll + LCD_COLS >= text.length()) ? 0 : msgScroll + 1;
+  if (msgScroll == 0 || msgScroll + LCD_COLS >= text.length()) msgHold = MSG_SCROLL_HOLD;
+  drawMsgText();  // 2行目だけ書き直す (16 文字で 20ms ほど)
+}
+
 // 今のページを描き直す。PAGE_MAIN 以外は中身が刻々と変わるので定期的に呼ぶ
 static void drawPage() {
   lastPageDraw = millis();
   switch (page) {
+    case PAGE_MSG:
+      if (msgCount == 0) {
+        drawRow(0, "MSG --");
+        drawRow(1, relayStatus);
+      } else {
+        // 1行目は左に名前、右端に時刻
+        const Msg &m = viewedMsg();
+        String top = m.author;
+        while (top.length() + m.time.length() < LCD_COLS) top += ' ';
+        drawRow(0, top + m.time);
+        drawMsgText();
+      }
+      break;
     case PAGE_WIFI:
       if (WiFi.status() == WL_CONNECTED) {
         drawRow(0, "WiFi " + String(WiFi.RSSI()) + "dBm");
@@ -543,6 +649,15 @@ static void drawPage() {
 }
 
 static void onKey(int id) {
+  // メッセージページでは、曲の 前 / 次 の代わりにメッセージの 古い方 / 新しい方 を見る
+  if (page == PAGE_MSG && (id == KEY_DOT || id == KEY_DASH)) {
+    if (id == KEY_DOT && msgView + 1 < (int)msgCount) msgView++;
+    if (id == KEY_DASH && msgView > 0) msgView--;
+    resetMsgScroll();
+    drawPage();
+    return;
+  }
+
   if (page != PAGE_INPUT) {
     keyCommand = PLAY_KEY_COMMANDS[id];
     Serial.printf("key: %s\n", keyCommand.c_str());
@@ -597,13 +712,20 @@ static void pollButton() {
   } else if (raw != buttonStable && millis() - buttonChanged >= DEBOUNCE_MS) {
     buttonStable = raw;
     if (buttonStable == LOW) {
-      page = (page + 1) % PAGE_COUNT;
+      // 着信で切り替わったメッセージページからは、元のページに戻る
+      page = (page == PAGE_MSG && pageBeforeMsg >= 0) ? pageBeforeMsg : (page + 1) % PAGE_COUNT;
+      pageBeforeMsg = -1;
+      if (page == PAGE_MSG) resetMsgScroll();
       Serial.printf("page %d\n", page);
       drawPage();
     }
   }
 
-  if (page != PAGE_MAIN && page != PAGE_INPUT && millis() - lastPageDraw >= 1000) drawPage();
+  if (page == PAGE_MSG && msgCount) {
+    if (millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
+  } else if (page != PAGE_MAIN && page != PAGE_INPUT && millis() - lastPageDraw >= 1000) {
+    drawPage();
+  }
 }
 
 // ---------------- シリアル ----------------
@@ -829,6 +951,16 @@ static void feedSilence() {
   }
 }
 
+// A2DP のバッファを1周分の無音で埋める (400ms ほど待つ)。この後しばらく何も書けなくても、
+// 送り直されるのは無音になる。曲の端が残ったまま止まると、そこが繰り返し鳴ってしまう
+static void fillSilence() {
+  unsigned long start = millis();
+  while (a2dp.connected() && millis() - start < 400) {
+    feedSilence();
+    delay(1);
+  }
+}
+
 // 16bit PCM (channels 本のインターリーブ) に音量を掛け、rateMul 倍のサンプル&ホールドで
 // 44100 ステレオに引き伸ばして A2DP に書く。A2DP_CHUNK に満たない端数は次に回す
 static void writePcm(const int16_t *in, size_t frames, int channels, uint32_t rateMul) {
@@ -880,6 +1012,7 @@ static void finishPlayback(PlayResult result, const String &summary, const char 
 static void setWiFi(const String &cmd) {
   if (cmd == "wifi off") {
     wifiEnabled = false;
+    relayClose("wifi off");
     WiFi.disconnect();
     status("WiFi off", "");
   } else if (cmd == "wifi on") {
@@ -926,6 +1059,7 @@ static void togglePause() {
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
+  pollRelay();
 
   String cmd = nextCommand();
   if (cmd.length()) {
@@ -1326,6 +1460,165 @@ static PlayResult playSd(int index) {
   return result;
 }
 
+// ---------------- Discord ----------------
+
+// BearSSL の専用スタックを RELAY_TLS_STACK バイトのものに取り替える。コアの StackThunk は 6400 バイト固定で、
+// 変える設定がない。スタックの場所は呼ぶたびに stack_thunk_top から読まれるので、BearSSL の外でなら取り替えられる。
+// 使った量が分かるよう、全体を目印 (0xdeadbeef) で塗っておく
+static void growTlsStack() {
+  uint32_t *stack = (uint32_t *)malloc(RELAY_TLS_STACK);
+  if (!stack) return;  // 確保できなければコアのものを使い続ける
+  for (size_t i = 0; i < RELAY_TLS_STACK / 4; i++) stack[i] = 0xdeadbeef;
+  free(stack_thunk_ptr);
+  stack_thunk_ptr = stack;
+  stack_thunk_top = stack + RELAY_TLS_STACK / 4 - 1;
+}
+
+// BearSSL のスタックをこれまでに最大何バイト使ったか。底から目印が残っている所を数える
+static size_t tlsStackUsed() {
+  size_t words = RELAY_TLS_STACK / 4, i = 0;
+  while (i < words && stack_thunk_ptr[i] == 0xdeadbeef) i++;
+  return (words - i) * 4;
+}
+
+// 中継とのつながりを切る。つなぎ直しは loop() が RELAY_RETRY_MS ごとに試みる
+static void relayClose(const String &why) {
+  if (relayOpen) Serial.printf("relay: closed (%s)\n", why.c_str());
+  relayOpen = false;
+  relayStatus = why;
+  if (relay) relay->stop();  // TLS の受信バッファなどを返す
+}
+
+// 中継につなぎ、メッセージの流れを受け取り始める。TLS の握手に 4〜8 秒かかり (P-384 の証明書を確かめるのが重い)、
+// A2DP のバッファ (370ms) では持たないので、再生ループの中 (pollAbort) からは呼ばない。
+// loop() が、止まっている間か曲の合間に呼ぶ
+static void relayConnect() {
+  lastRelayTry = millis();
+  if (!relay) {
+    relayCA = new BearSSL::X509List(RELAY_CA);
+    relay = new BearSSL::WiFiClientSecure();  // ここで BearSSL のスタックが確保される
+    relay->setTrustAnchors(relayCA);
+    relay->setBufferSizes(RELAY_TLS_RX, 512);
+    growTlsStack();
+  }
+  // 証明書の期限を確かめるのに時計が要る。起動してまだ合わせていなければ NTP で合わせる
+  if (time(nullptr) < 1700000000) {
+    NTP.begin("ntp.nict.jp", "pool.ntp.org");
+    if (!NTP.waitSet(5000)) {
+      Serial.println("relay: ntp failed");
+      relayStatus = "ntp failed";
+      relayFailures++;
+      return;
+    }
+  }
+
+  // TLS は受信バッファ (RELAY_TLS_RX)、BearSSL のスタック 6.4KB、コンテキストなどを使う。足りているかをログで見る
+  uint32_t heap = rp2040.getFreeHeap();
+  unsigned long t0 = millis();
+  if (!relay->connect(RELAY_HOST, RELAY_PORT)) {
+    char err[64] = "";
+    int code = relay->getLastSSLError(err, sizeof(err));
+    Serial.printf("relay: connect failed (ssl %d %s), heap %luKB\n", code, err, (unsigned long)(heap / 1024));
+    relayClose("relay error");
+    relayFailures++;
+    return;
+  }
+  Serial.printf("relay: tls %lu ms, heap %luKB -> %luKB, bearssl stack %u/%u bytes\n", millis() - t0,
+                (unsigned long)(heap / 1024), (unsigned long)(rp2040.getFreeHeap() / 1024),
+                (unsigned)tlsStackUsed(), (unsigned)RELAY_TLS_STACK);
+
+  // HTTP/1.0 で頼む。Funnel の手前の Go のプロキシが chunked にせず、届いた分をそのまま流してくる
+  relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n\r\n",
+                relayLastId.c_str(), RELAY_HOST, RELAY_KEY);
+  String head = relay->readStringUntil('\n');  // "HTTP/1.0 200 OK"
+  head.trim();
+  if (head.substring(9, 12) != "200") {
+    Serial.printf("relay: \"%s\"\n", head.c_str());
+    relayClose(head.length() ? "relay " + head.substring(9, 12) : String("relay no reply"));
+    relayFailures++;
+    return;
+  }
+  // ヘッダは読み捨てる。空行 ("\r") で終わる
+  while (relay->connected() && relay->readStringUntil('\n').length() > 1) {}
+
+  relayOpen = true;
+  relayFailures = 0;
+  relayQuiet = relayLastId.length() == 0;
+  relayLine = "";
+  lastRelayData = millis();
+  relayStatus = "no message";
+  Serial.printf("relay: connected (after=%s)\n", relayLastId.c_str());
+}
+
+// 中継から届いた1行を処理する。"ID TAB HH:MM TAB 名前 TAB 本文"。空行は生存確認で、
+// つないだ直後の空行は「つなぐ前からあった分はここまで」の印
+static void onRelayLine(const String &line) {
+  if (!line.length()) {
+    relayQuiet = false;
+    return;
+  }
+  int a = line.indexOf('\t');
+  int b = line.indexOf('\t', a + 1);
+  int c = line.indexOf('\t', b + 1);
+  if (a < 0 || b < 0 || c < 0) {
+    Serial.printf("relay: bad line (%u bytes)\n", line.length());
+    return;
+  }
+
+  // いっぱいなら一番古いものを捨てる
+  if (msgCount == MSG_MAX) {
+    for (size_t i = 1; i < MSG_MAX; i++) msgs[i - 1] = std::move(msgs[i]);
+    msgCount--;
+  }
+  Msg &m = msgs[msgCount++];
+  m.id = line.substring(0, a);
+  m.time = line.substring(a + 1, b);
+  m.author = line.substring(b + 1, c);
+  m.text = line.substring(c + 1);
+  relayLastId = m.id;
+  // 名前と本文は半角カナのバイト列なので、シリアルでは化ける
+  Serial.printf("relay: %s %s %s\n", m.id.c_str(), m.time.c_str(), m.author.c_str());
+
+  if (relayQuiet) {
+    // 起動前からあった分。表示は切り替えず、メッセージページの中身だけ新しくしておく。
+    // 古いものを見ていたら同じものを見続け、最新を見ていたら新しく来た方を頭から出す
+    if (msgView > 0) msgView = std::min<int>(msgView + 1, msgCount - 1);
+    else resetMsgScroll();
+    if (page == PAGE_MSG) drawPage();
+    return;
+  }
+
+  // 着信。メッセージページに切り替えて最新を出す。スイッチで元のページに戻れるよう覚えておく
+  if (page != PAGE_MSG) pageBeforeMsg = page;
+  page = PAGE_MSG;
+  msgView = 0;
+  resetMsgScroll();
+  drawPage();
+}
+
+// 届いた分だけ読んで1行ずつ処理する。待たないので、再生中も pollAbort() から呼べる
+static void pollRelay() {
+  if (!relayOpen || !relay) return;
+  uint8_t buf[64];
+  int n;
+  while ((n = relay->read(buf, sizeof(buf))) > 0) {
+    lastRelayData = millis();
+    for (int i = 0; i < n; i++) {
+      if (buf[i] == '\n') {
+        onRelayLine(relayLine);
+        relayLine = "";
+      } else if (buf[i] != '\r' && relayLine.length() < RELAY_LINE_MAX) {
+        relayLine += (char)buf[i];
+      }
+    }
+  }
+  if (n < 0 || !relay->connected()) {
+    relayClose("relay lost");
+  } else if (millis() - lastRelayData >= RELAY_IDLE_MS) {
+    relayClose("relay silent");
+  }
+}
+
 // ---------------- コマンド ----------------
 
 // MUSIC_URL 配下のテキストを取ってきてシリアルに出す
@@ -1369,7 +1662,7 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / music / play [url] / pause / next / prev / rand / stop /"
-    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / scan / status";
+    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / scan / relay / status";
 
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
@@ -1427,13 +1720,18 @@ static void handleCommand(String cmd) {
     a2dp.clearPairing();
     findAndConnect();
     lastScan = millis();
+  } else if (cmd == "relay") {
+    // 中継につなぎ直す。失敗が続いて延びていた間隔も戻し、次の loop() ですぐつなぎにいく
+    relayClose("reconnect");
+    relayFailures = 0;
+    lastRelayTry = millis() - RELAY_RETRY_MS;
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d pause=%d vol=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\"\n",
+    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d pause=%d vol=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\" relay=%d (%s) msgs=%u\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
                   a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, paused, volume, sdReady,
                   (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), page,
                   digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
-                  morseText.c_str());
+                  morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount);
   } else {
     Serial.println(HELP);
   }
@@ -1471,6 +1769,8 @@ void setup() {
 
   connectWiFi();
   lastWiFiTry = millis();
+  lastRelayTry = millis() - RELAY_RETRY_MS;  // 最初の loop() ですぐ中継につなぎにいく
+  if (!RELAY_HOST[0]) relayStatus = "no RELAY_HOST";
 
   a2dp.setName(BT_LOCAL_NAME);
   a2dp.setFrequency(A2DP_RATE);
@@ -1515,6 +1815,16 @@ void loop() {
     lastScan = millis();
     findAndConnect();
   }
+
+  // Discord の中継につなぐ。TLS の握手で 4〜8 秒止まるので、再生ループの外 (止まっている間か曲の合間) でだけ。
+  // 止まる前にバッファを無音で埋めておく。中継が落ちていると握手のタイムアウト (15 秒) まで待つので、
+  // 失敗が続いたら間隔を延ばし、曲の合間が何度も止まらないようにする
+  if (RELAY_HOST[0] && !relayOpen && WiFi.status() == WL_CONNECTED &&
+      millis() - lastRelayTry >= (RELAY_RETRY_MS << std::min(relayFailures, RELAY_BACKOFF_MAX))) {
+    fillSilence();
+    relayConnect();
+  }
+  pollRelay();
 
   pollButton();
   handleCommand(nextCommand());
