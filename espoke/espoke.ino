@@ -426,6 +426,7 @@ static bool connectTo(const uint8_t *addr, const char *label) {
     status("BT timeout", label);
     return false;
   }
+  feedSilence();  // ストリームはもう始まっているので、初期化されていないバッファが鳴る前に埋める
   status("BT ready", label);
   return true;
 }
@@ -554,6 +555,19 @@ static void flushPcmChunk() {
   while (a2dp.connected() && (size_t)a2dp.availableForWrite() < sizeof(pcmChunk)) delay(1);
   if (a2dp.connected()) a2dp.write((const uint8_t *)pcmChunk, sizeof(pcmChunk));
   pcmChunkLen = 0;
+}
+
+// 鳴らすものがない間も、A2DP のバッファを無音で満たしておく。
+// A2DPSource はバッファが空になると、読み出し位置の 256 サンプル (約 2.9ms) を送り直し続ける。
+// そこにあるのは1周前の音か、確保しただけで初期化されていないメモリなので、
+// 約 344Hz の繰り返しになり、音量に関係なく大きなピーという音が鳴る。
+// 1周分を無音で書けば、その後にバッファが空になっても送り直されるのは無音になる。待たずに返す
+static void feedSilence() {
+  while (a2dp.connected() && (size_t)a2dp.availableForWrite() >= sizeof(pcmChunk)) {
+    memset(pcmChunk + pcmChunkLen, 0, (A2DP_CHUNK - pcmChunkLen) * sizeof(int16_t));
+    a2dp.write((const uint8_t *)pcmChunk, sizeof(pcmChunk));
+    pcmChunkLen = 0;
+  }
 }
 
 // 16bit PCM (channels 本のインターリーブ) を rateMul 倍のサンプル&ホールドで
@@ -1174,10 +1188,15 @@ void loop() {
     }
   }
 
-  if (!autoPlay) return;
+  // 止まっている間は無音を流しておく。連続再生中は曲の切れ目に無音を挟まないよう、ここでは書かない
+  if (!autoPlay) {
+    feedSilence();
+    return;
+  }
 
   // イヤホン (Wi-Fi から流すときは Wi-Fi も) が切れている間は再接続を待つ (張り直しは上の処理に任せる)
   if (!a2dp.connected() || (source == SRC_WIFI && WiFi.status() != WL_CONNECTED)) {
+    feedSilence();
     delay(100);
     return;
   }
