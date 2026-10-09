@@ -2,7 +2,7 @@
 """
 espoke 用の Discord 中継。常時動かしておく PC (学校の dynabook) の上で動かす。
 
-Discord の決めたチャンネルに書き込まれた発言を受け取り、LCD1602A に出せる文字だけの
+Discord の決めたサーバー (かチャンネル) に書き込まれた発言を受け取り、LCD1602A に出せる文字だけの
 1行にして Pico WH へ流す。LCD の文字 ROM (A00) にあるのは英数字と半角カタカナだけで、
 その並びは JIS X 0201 (cp932 の1バイト文字) と同じ。漢字は MeCab (fugashi + unidic-lite)
 で読みに直してから半角カナにする。辞書は数十 MB あって Pico には載らないので、ここでやる。
@@ -18,7 +18,8 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
 
 設定 (環境変数。--env で読むファイルにも書ける):
     DISCORD_TOKEN       Bot のトークン
-    DISCORD_CHANNEL_ID  受け取るチャンネルの ID
+    DISCORD_GUILD_ID    受け取るサーバーの ID。Bot が見られるチャンネル全部の発言を受け取る
+    DISCORD_CHANNEL_ID  1チャンネルだけ受け取るときは、こちらにチャンネルの ID を書く (両方あればこちら)
     RELAY_KEY           Pico と決めておく合言葉。Funnel で誰でもつなげるので、これで弾く
 
 使い方:
@@ -30,6 +31,7 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     POST /post               本文 (UTF-8) を差出人 test の発言として流す。試験用 (X-Key ヘッダが要る)
 
 1行は  <メッセージ ID> TAB <HH:MM> TAB <名前> TAB <本文> LF  で、cp932 のバイト列。
+サーバー全体を受け取るときは、本文の頭に "#チャンネル名 " を付ける。
 ID は Discord のメッセージ ID (snowflake) で、時間とともに増えるので、Pico は最後に
 受け取った ID を after に付けてつなぎ直せば取りこぼさない。
 
@@ -54,6 +56,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 NAME_MAX = 10   # 名前のバイト数。LCD の1行目に、右端の HH:MM と並べて出す
+CHANNEL_MAX = 8 # 本文の頭に付けるチャンネル名のバイト数
 TEXT_MAX = 200  # 本文のバイト数。Pico は2行目に流して出す
 KEEP = 20       # 覚えておく発言の数。つなぎ直した Pico に取りこぼした分を送るため
 BACKLOG = 8     # after なしでつないできたときに送る数 (Pico が持っておける数)
@@ -130,8 +133,9 @@ def discord_text(message):
     """Discord の発言から、表示する文を取り出す"""
     text = message.clean_content  # メンションは @名前 になっている
     text = re.sub(r"<a?:(\w+):\d+>", r":\1:", text)  # カスタム絵文字
-    text = re.sub(r"https?://\S+", "URL", text)
+    text = re.sub(r"https?://[^\s)>]+", "URL", text)  # (https://...) の閉じ括弧は残す
     text = re.sub(r"\*\*|__|~~|\|\||`", "", text)    # 太字・下線・打ち消し・伏せ字・コード
+    text = re.sub(r"^ *(#{1,3}|-#|>{1,3}) +", "", text, flags=re.M)  # 行頭の見出し・小さい字・引用
     if message.attachments:
         text += " [添付]"
     if message.stickers:
@@ -139,8 +143,14 @@ def discord_text(message):
     return text
 
 
-def make_line(msg_id, when, author, text):
+def make_line(msg_id, when, author, text, channel=None):
     body = to_lcd(text, TEXT_MAX) or to_lcd("[表示できない]", TEXT_MAX)
+    if channel is not None:
+        # サーバー全体を受け取るときは、どのチャンネルの発言かを本文の頭に付ける。
+        # LCD の1行目は名前と時刻でいっぱいなので、流れる2行目に入れる
+        # チャンネル名の頭によくある絵文字や区切り ("💬｜雑談" の "💬｜") は落とす
+        channel = re.sub(r"^[\W_]+", "", unicodedata.normalize("NFKC", channel))
+        body = (b"#" + to_lcd(channel, CHANNEL_MAX) + b" " + body)[:TEXT_MAX]
     return b"\t".join([
         str(msg_id).encode(),
         when.astimezone(JST).strftime("%H:%M").encode(),
@@ -186,8 +196,8 @@ class Store:
 STORE = Store()
 
 
-def add_message(msg_id, when, author, text):
-    line = make_line(msg_id, when, author, text)
+def add_message(msg_id, when, author, text, channel=None):
+    line = make_line(msg_id, when, author, text, channel)
     STORE.add(msg_id, line)
     sys.stderr.write("msg %s\n" % line.rstrip(b"\n").decode("cp932"))
 
@@ -273,28 +283,56 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------- Discord ----------------
 
-def run_discord(token, channel_id):
+def run_discord(token, guild_id, channel_id):
+    """channel_id があればそのチャンネルだけ、なければ guild_id のサーバー全体を受け取る"""
     import discord
 
     intents = discord.Intents.default()
     intents.message_content = True  # Developer Portal でも Message Content Intent を ON にしておく
     client = discord.Client(intents=intents)
 
+    def wanted(m):
+        if m.author == client.user:
+            return False
+        if channel_id:
+            return m.channel.id == channel_id
+        return m.guild is not None and m.guild.id == guild_id
+
     def add(m):
-        add_message(m.id, m.created_at, m.author.display_name, discord_text(m))
+        add_message(m.id, m.created_at, m.author.display_name, discord_text(m),
+                    None if channel_id else m.channel.name)
 
     @client.event
     async def on_ready():
-        # 中継を立ち上げ直しても Pico に直近の発言を渡せるよう、履歴から埋めておく
-        channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
-        history = [m async for m in channel.history(limit=BACKLOG)]
-        for m in reversed(history):
+        if channel_id:
+            channels = [client.get_channel(channel_id) or await client.fetch_channel(channel_id)]
+            where = "#%s" % channels[0]
+        else:
+            guild = client.get_guild(guild_id)
+            if guild is None:
+                print("discord: サーバー %d に Bot が入っていない (招待したか確かめる)" % guild_id)
+                return
+            # 閲覧権限の無いチャンネルは読めない (permissions_for がその分も落としてくれる)
+            channels = [c for c in guild.text_channels
+                        if c.permissions_for(guild.me).read_message_history]
+            where = "サーバー %s の %d チャンネル" % (guild.name, len(channels))
+
+        # 中継を立ち上げ直しても Pico に直近の発言を渡せるよう、履歴から埋めておく。
+        # サーバー全体なら、各チャンネルの直近を集めて新しいものから BACKLOG 件
+        history = []
+        for c in channels:
+            try:
+                history += [m async for m in c.history(limit=BACKLOG)]
+            except discord.Forbidden:
+                pass
+        history.sort(key=lambda m: m.id)
+        for m in [m for m in history if wanted(m)][-BACKLOG:]:
             add(m)
-        print("discord: %s として #%s を見ている" % (client.user, channel))
+        print("discord: %s として %s を見ている" % (client.user, where))
 
     @client.event
     async def on_message(m):
-        if m.channel.id == channel_id and m.author != client.user:
+        if wanted(m):
             add(m)
 
     client.run(token, log_handler=None)
@@ -350,9 +388,11 @@ def main():
         sys.exit("RELAY_KEY が設定されていない (%s か環境変数に書く)" % env)
     if not args.no_discord:
         token = os.environ.get("DISCORD_TOKEN", "")
+        guild = os.environ.get("DISCORD_GUILD_ID", "")
         channel = os.environ.get("DISCORD_CHANNEL_ID", "")
-        if not token or not channel.isdigit():
-            sys.exit("DISCORD_TOKEN と DISCORD_CHANNEL_ID を設定する (%s か環境変数に書く)" % env)
+        if not token or not (guild.isdigit() or channel.isdigit()):
+            sys.exit("DISCORD_TOKEN と、DISCORD_GUILD_ID (サーバー全体) か DISCORD_CHANNEL_ID (1チャンネル) "
+                     "を設定する (%s か環境変数に書く)" % env)
 
     _reading("")  # 辞書の読み込みに数秒かかるので、つながれる前に済ませておく
 
@@ -366,7 +406,8 @@ def main():
     print("espoke/arduino_secrets.h に書く:")
     print('  #define RELAY_HOST "%s"' % host)
     print('  #define RELAY_PORT %d' % FUNNEL_PORT)
-    print('  #define RELAY_KEY  "%s"' % KEY)
+    # 合言葉は端末で動かしたときだけ出す (systemd で動かすとログに残るので)
+    print('  #define RELAY_KEY  "%s"' % (KEY if sys.stdout.isatty() else "<relay.env の RELAY_KEY>"))
     print()
     print("Ctrl-C で停止")
 
@@ -374,7 +415,8 @@ def main():
         server.serve_forever()
     else:
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        run_discord(token, int(channel))
+        run_discord(token, int(guild) if guild.isdigit() else None,
+                    int(channel) if channel.isdigit() else None)
 
 
 if __name__ == "__main__":
