@@ -69,6 +69,14 @@ static const int     PIN_SCL   = 1;   // GP1 (物理2番ピン)
 static const uint8_t LCD_COLS  = 16;
 static const uint8_t LCD_ROWS  = 2;
 static const uint8_t LCD_ADDR_DEFAULT = 0x27;
+// 再生中は通常画面の2行目を、帯域ごとの音の大きさの縦棒 (16 本、8 段) にする。
+// 音量を掛ける前の音で見るので、vol を変えても棒の高さは変わらない
+static const size_t        FFT_N       = 512;    // 1 回に見るフレーム数。44100Hz で 11.6ms、1 ビン 86Hz
+static const uint32_t      BAR_HOP     = 1024;   // このフレーム数ごとに分析する (23ms)
+static const unsigned long BAR_MS      = 80;     // 棒を描き直す間隔
+static const float         BAR_TOP_DB  = 68.0f;  // 8 段 (いっぱい) になる大きさ。最大振幅の正弦波1本で約 78dB
+static const float         BAR_STEP_DB = 4.5f;   // 1 段あたりの差。この3つは手元の曲で棒の平均が 3〜5 段になるように合わせた
+static const float         BAR_TILT_DB = 0.5f;   // 1 本右へ行くごとに足す。曲は高い帯域ほど弱いので、右の棒も動くように
 static const int     PIN_BUTTON = 15;  // GP15 (物理20番ピン)。もう片側は GND へ
 // SW1〜SW4。コメントは 入力ページでの役目 / それ以外のページでの役目
 static const int     PIN_BACK   = 10;  // SW1 GP10 (物理14番ピン) backspace / 再生・一時停止
@@ -117,6 +125,28 @@ struct Mp3Decoder {
 
 A2DPSource a2dp;
 LiquidCrystal_I2C *lcd = nullptr;
+static uint8_t lcdAddr = LCD_ADDR_DEFAULT;  // 棒を描くときは LiquidCrystal_I2C を通さず直接送る
+
+// 帯域の棒。writePcm() で鳴らす音をモノラルにして溜め、BAR_HOP ごとに FFT して段の高さを記録しておく。
+// A2DP のバッファには 370ms 分ほど先の音まで入っているので、描くときは今イヤホンへ送り出している
+// 所の記録を選ぶ (書いたときに描くと、棒が音より先に動く)
+struct BarFrame {
+  uint32_t frame;              // この分析の窓の終わりが、書いたフレームの通算で何番目か
+  uint8_t  level[LCD_COLS];    // 0〜8 段
+};
+static const size_t BAR_HIST = 24;          // A2DP のバッファ1周分 (16 回) より多めに持つ
+static BarFrame barHist[BAR_HIST];
+static size_t   barHistHead = 0;            // 次に書く位置
+static uint32_t barFrames = 0;              // A2DP に書いたフレーム数の通算 (無音も数える)
+static uint32_t barNextHop = BAR_HOP;
+static int16_t  barRing[FFT_N];             // 直近 FFT_N フレームのモノラル。barRingPos が一番古い
+static uint32_t barRingPos = 0;
+static uint8_t  barEdge[LCD_COLS + 1];      // 帯域の境目 (FFT のビン番号)。i 本目は barEdge[i]〜barEdge[i+1]-1
+static uint8_t  barShown[LCD_COLS];         // LCD に出ている段。0xFF は描いていない (次に必ず書く)
+static unsigned long lastBarDraw = 0;
+static int16_t  fftRe[FFT_N], fftIm[FFT_N];
+static int16_t  fftCos[FFT_N / 2], fftSin[FFT_N / 2];  // ひねり係数 (Q15)
+static bool     playing = false;            // playSd / playUrl の再生ループの中か
 
 // 1回の read で 2KB 前後まとめて取る。小刻みに読むと lwIP の往復が増えて
 // スループットが落ち、Bluetooth と帯域を取り合ったときに underflow しやすい
@@ -223,10 +253,16 @@ static void drawRow(uint8_t row, const String &text) {
   lcd->print(s);
 }
 
-// 通常画面の1行を書き換える。他のページを表示中なら覚えておくだけ
+// 2行目に帯域の棒を出しているか。再生中で、一時停止していない間だけ
+static bool barsOn() {
+  return playing && !paused;
+}
+
+// 通常画面の1行を書き換える。他のページを表示中なら覚えておくだけ。
+// 2行目に棒を出している間は、文字は覚えておくだけにして、棒が消えたときに出す
 static void printLine(uint8_t row, const String &text) {
   mainLines[row] = text;
-  if (page == PAGE_MAIN) drawRow(row, text);
+  if (page == PAGE_MAIN && !(row == 1 && barsOn())) drawRow(row, text);
 }
 
 static void status(const String &a, const String &b) {
@@ -257,10 +293,184 @@ static void setupLCD() {
   } else {
     Serial.printf("LCD address: 0x%02X\n", addr);
   }
+  lcdAddr = addr;
 
   lcd = new LiquidCrystal_I2C(addr, LCD_COLS, LCD_ROWS);
   lcd->init();
   lcd->backlight();
+
+  // 棒の 1〜7 段を自作文字 0〜6 にする (下から h 行を塗る)。8 段は LCD に元からある全面黒 (0xFF)
+  for (uint8_t h = 1; h <= 7; h++) {
+    uint8_t rows[8];
+    for (uint8_t r = 0; r < 8; r++) rows[r] = (r >= 8 - h) ? 0x1F : 0x00;
+    lcd->createChar(h - 1, rows);
+  }
+}
+
+// ---------------- 帯域の棒 ----------------
+
+// 固定小数点 (Q15) の FFT。各段で 1/2 にしてあふれないようにするので、結果は 1/FFT_N 倍になる
+static void fft(int16_t *re, int16_t *im) {
+  // ビット反転の順に並べ替える
+  for (uint32_t i = 1, j = 0; i < FFT_N; i++) {
+    uint32_t bit = FFT_N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      std::swap(re[i], re[j]);
+      std::swap(im[i], im[j]);
+    }
+  }
+  for (uint32_t len = 2; len <= FFT_N; len <<= 1) {
+    const uint32_t half = len / 2, step = FFT_N / len;
+    for (uint32_t i = 0; i < FFT_N; i += len) {
+      for (uint32_t k = 0; k < half; k++) {
+        // e^(-j 2π k/len)。16bit どうしの積の差なので 32bit に収まる
+        const int32_t wr = fftCos[k * step], wi = -fftSin[k * step];
+        const uint32_t a = i + k, b = a + half;
+        const int32_t tr = (re[b] * wr - im[b] * wi) >> 15;
+        const int32_t ti = (re[b] * wi + im[b] * wr) >> 15;
+        re[b] = (re[a] - tr) >> 1;
+        im[b] = (im[a] - ti) >> 1;
+        re[a] = (re[a] + tr) >> 1;
+        im[a] = (im[a] + ti) >> 1;
+      }
+    }
+  }
+}
+
+// 窓関数 (Hann)。Q15。cos の表を使い回す (n と FFT_N - n で同じ値)
+static int32_t hann(uint32_t n) {
+  const uint32_t m = n < FFT_N / 2 ? n : FFT_N - n;
+  return m == FFT_N / 2 ? 32767 : (32767 - fftCos[m]) >> 1;
+}
+
+// barRing の音を FFT して、16 本の段の高さを barHist に足す
+static void analyzeBars() {
+  for (uint32_t n = 0; n < FFT_N; n++) {
+    fftRe[n] = (int16_t)((barRing[(barRingPos + n) & (FFT_N - 1)] * hann(n)) >> 15);
+    fftIm[n] = 0;
+  }
+  fft(fftRe, fftIm);
+
+  BarFrame &h = barHist[barHistHead];
+  barHistHead = (barHistHead + 1) % BAR_HIST;
+  h.frame = barFrames;
+  for (int i = 0; i < LCD_COLS; i++) {
+    // 帯域に入るビンの強さを足す。帯域は高いほど広いので、高い音も低い音と同じくらいの棒になる
+    uint64_t power = 0;
+    for (int k = barEdge[i]; k < barEdge[i + 1]; k++) {
+      power += (uint32_t)(fftRe[k] * fftRe[k]) + (uint32_t)(fftIm[k] * fftIm[k]);
+    }
+    float db = 10.0f * log10f((float)power + 1.0f) + BAR_TILT_DB * i;
+    int level = (int)((db - (BAR_TOP_DB - 8 * BAR_STEP_DB)) / BAR_STEP_DB);
+    h.level[i] = (uint8_t)constrain(level, 0, 8);
+  }
+}
+
+// A2DP に書く 1 フレーム分を、棒の分析に回す (音量を掛ける前のモノラル)
+static inline void barPush(int16_t mono) {
+  barRing[barRingPos] = mono;
+  barRingPos = (barRingPos + 1) & (FFT_N - 1);
+  if (++barFrames == barNextHop) {
+    barNextHop += BAR_HOP;
+    analyzeBars();
+  }
+}
+
+// 無音を書いたことを記録する。その間は棒が 0 になる
+static void barSilence(uint32_t frames) {
+  barFrames += frames;
+  barNextHop = barFrames + BAR_HOP;  // 次の分析までに barRing が新しい音で埋まる
+  BarFrame &h = barHist[barHistHead];
+  barHistHead = (barHistHead + 1) % BAR_HIST;
+  h.frame = barFrames;
+  memset(h.level, 0, sizeof(h.level));
+}
+
+// 次に描くときに 2行目を全部書き直させる (文字を出していた後など)
+static void invalidateBars() {
+  memset(barShown, 0xFF, sizeof(barShown));
+}
+
+// 再生を始めるときに呼ぶ。前の曲の記録を捨てて、棒を出し始める
+static void startBars() {
+  for (BarFrame &h : barHist) {
+    h.frame = barFrames;  // 「今」より先の記録として扱われるので、新しい音が届くまで棒は 0
+    memset(h.level, 0, sizeof(h.level));
+  }
+  invalidateBars();
+  lastBarDraw = 0;
+  playing = true;
+}
+
+static void setupBars() {
+  for (uint32_t k = 0; k < FFT_N / 2; k++) {
+    fftCos[k] = (int16_t)lroundf(cosf(2 * PI * k / FFT_N) * 32767);
+    fftSin[k] = (int16_t)lroundf(sinf(2 * PI * k / FFT_N) * 32767);
+  }
+  // 86Hz (ビン 1) から 16kHz までを対数で 16 等分する。低い方は 1 ビンずつになる
+  const float lo = 1, hi = 16000.0f * FFT_N / A2DP_RATE;
+  int prev = 0;
+  for (int i = 0; i <= LCD_COLS; i++) {
+    int e = lroundf(lo * powf(hi / lo, (float)i / LCD_COLS));
+    if (e <= prev) e = prev + 1;
+    barEdge[i] = e;
+    prev = e;
+  }
+  invalidateBars();
+
+  uint32_t t0 = micros();
+  analyzeBars();
+  Serial.printf("bars: fft %lu us\n", (unsigned long)(micros() - t0));
+}
+
+// LCD に1文字ぶん送る (data なら文字、そうでなければ命令)。PCF8574 のつなぎは LiquidCrystal_I2C と同じで
+// P0=RS, P2=E, P3=バックライト, P4〜P7=D4〜D7。RS とデータを出してから E を上げ下げし、下げたところで読ませる
+static void lcdSendRaw(uint8_t b, bool data) {
+  const uint8_t base = 0x08 | (data ? 0x01 : 0x00);
+  Wire.write(base | (b & 0xF0));
+  for (uint8_t nibble : {(uint8_t)(b & 0xF0), (uint8_t)(b << 4)}) {
+    Wire.write(base | nibble | 0x04);
+    Wire.write(base | nibble);
+  }
+}
+
+// 今イヤホンへ送り出している所の棒を 2行目に描く。LiquidCrystal_I2C は 4bit ごとに I2C の通信を
+// 3 回するので 16 文字で 20ms ほど止まる。変わった所だけを1回の通信にまとめて送る (100kHz で最大 8ms 程度)
+static void drawBars() {
+  lastBarDraw = millis();
+  if (!lcd || page != PAGE_MAIN) return;
+
+  // A2DP のバッファと pcmChunk に残っている分だけ、今鳴っているのは書いた所より前
+  const uint32_t queued = (A2DP_BUFFER - 1) - a2dp.availableForWrite() / 2 + pcmChunkLen;
+  const uint32_t now = barFrames - queued / 2;
+  const BarFrame *cur = nullptr;
+  for (const BarFrame &h : barHist) {
+    if ((int32_t)(h.frame - now) <= 0 && (!cur || (int32_t)(h.frame - cur->frame) > 0)) cur = &h;
+  }
+
+  static const uint8_t BAR_CHARS[9] = {' ', 0, 1, 2, 3, 4, 5, 6, 0xFF};
+  uint8_t want[LCD_COLS];
+  int first = -1, last = -1;
+  for (int i = 0; i < LCD_COLS; i++) {
+    uint8_t target = cur ? cur->level[i] : 0;
+    // 上がるときはすぐ、下がるときは 1 段ずつ (棒がちらつかないように)
+    want[i] = (barShown[i] != 0xFF && target < barShown[i]) ? barShown[i] - 1 : target;
+    if (want[i] != barShown[i]) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0) return;
+
+  Wire.beginTransmission(lcdAddr);
+  lcdSendRaw(0x80 | (0x40 + first), false);  // 2行目の first 桁目へ
+  for (int i = first; i <= last; i++) {
+    lcdSendRaw(BAR_CHARS[want[i]], true);
+    barShown[i] = want[i];
+  }
+  Wire.endTransmission();
 }
 
 // 符号を文字にする。表になければ 0
@@ -322,7 +532,12 @@ static void drawPage() {
     }
     default:
       drawRow(0, mainLines[0]);
-      drawRow(1, mainLines[1]);
+      if (barsOn()) {
+        invalidateBars();
+        drawBars();
+      } else {
+        drawRow(1, mainLines[1]);
+      }
       break;
   }
 }
@@ -609,6 +824,7 @@ static void feedSilence() {
   while (a2dp.connected() && (size_t)a2dp.availableForWrite() >= sizeof(pcmChunk)) {
     memset(pcmChunk + pcmChunkLen, 0, (A2DP_CHUNK - pcmChunkLen) * sizeof(int16_t));
     a2dp.write((const uint8_t *)pcmChunk, sizeof(pcmChunk));
+    barSilence((A2DP_CHUNK - pcmChunkLen) / 2);
     pcmChunkLen = 0;
   }
 }
@@ -620,9 +836,11 @@ static void writePcm(const int16_t *in, size_t frames, int channels, uint32_t ra
   for (size_t f = 0; f < frames; f++) {
     const int16_t inL = in[f * channels];
     const int16_t inR = (channels == 2) ? in[f * channels + 1] : inL;
+    const int16_t mono = (int16_t)((inL + inR) >> 1);
     int16_t l = (int16_t)((inL * gain) >> 16);
     int16_t r = (int16_t)((inR * gain) >> 16);
     for (uint32_t k = 0; k < rateMul; k++) {
+      barPush(mono);
       pcmChunk[pcmChunkLen++] = l;
       pcmChunk[pcmChunkLen++] = r;
       if (pcmChunkLen == A2DP_CHUNK) flushPcmChunk();
@@ -650,6 +868,7 @@ static void finishPlayback(PlayResult result, const String &summary, const char 
   }
   // 曲を送ったり止めたりしたら一時停止も解く
   if (result == PLAY_SKIP || result == PLAY_STOP) paused = false;
+  playing = false;  // 2行目を棒から文字に戻す
   showProgress(summary + " " +
                (result == PLAY_DONE ? "done" : result == PLAY_STOP ? "stop" :
                 result == PLAY_SKIP ? "skip" : "error"));
@@ -700,6 +919,7 @@ static void setVolume(const String &cmd) {
 static void togglePause() {
   paused = !paused;
   Serial.println(paused ? "paused" : "resumed");
+  invalidateBars();  // 再開したら、一時停止中に出していた文字を棒で上書きする
   showProgress(progressText);
 }
 
@@ -809,6 +1029,7 @@ static PlayResult playUrl(const String &url) {
   // A2DP ストリームは接続直後から流れ続けているので、play を打つまでの無音区間でも
   // underflow フラグが立つ。再生直前に一度読み捨てて、以降の取りこぼしだけを見る
   a2dp.getUnderflow();
+  startBars();
 
   while (a2dp.connected()) {
     PlayResult abort = pollAbort();
@@ -842,6 +1063,8 @@ static PlayResult playUrl(const String &url) {
 
     played += got;
     if (info.dataBytes) remaining -= got;
+
+    if (millis() - lastBarDraw >= BAR_MS) drawBars();
 
     if (millis() - lastLcd >= 500) {
       lastLcd = millis();
@@ -1020,6 +1243,7 @@ static PlayResult playSd(int index) {
   unsigned long lastLcd = 0;
   unsigned long started = millis();
   a2dp.getUnderflow();  // playUrl と同じく、再生前の無音区間の underflow は数えない
+  startBars();
 
   while (a2dp.connected()) {
     uint32_t now = micros();
@@ -1067,6 +1291,8 @@ static PlayResult playSd(int index) {
       for (size_t i = 0; i < pcm.length; i++) pcm.samplesX[i][1] = pcm.samplesX[i][0];
     }
     writePcm(&pcm.samplesX[0][0], pcm.length, 2, rateMul);
+
+    if (millis() - lastBarDraw >= BAR_MS) drawBars();
 
     if (millis() - lastLcd >= 500) {
       lastLcd = millis();
@@ -1240,6 +1466,7 @@ void setup() {
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   for (KeyState &k : keys) pinMode(k.pin, INPUT_PULLUP);
   setupLCD();
+  setupBars();
   status("espoke", "booting...");
 
   connectWiFi();
