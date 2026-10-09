@@ -7,9 +7,9 @@
  * 配線: docs/board_layout.svg (SW1〜SW4)、LCD は GP0 (SDA) / GP1 (SCL)
  *
  * 操作:
- *   SW1 (GP10) ツー (-)
+ *   SW1 (GP10) backspace。符号の入力中なら最後の1符号を、そうでなければ最後の1文字を消す
  *   SW2 (GP11) トン (.)
- *   SW3 (GP12) backspace。符号の入力中なら最後の1符号を、そうでなければ最後の1文字を消す
+ *   SW3 (GP12) ツー (-)
  *   SW4 (GP13) enter。入力中の符号を文字に確定する。符号が空なら空白を入れる
  *
  * 表示:
@@ -31,9 +31,9 @@ const uint8_t LCD_COLS  = 16;
 const uint8_t LCD_ROWS  = 2;
 const uint8_t LCD_ADDR_DEFAULT = 0x27;
 
-const int PIN_DASH  = 10;  // SW1 GP10 (物理14番ピン)
+const int PIN_BACK  = 10;  // SW1 GP10 (物理14番ピン)
 const int PIN_DOT   = 11;  // SW2 GP11 (物理15番ピン)
-const int PIN_BACK  = 12;  // SW3 GP12 (物理16番ピン)
+const int PIN_DASH  = 12;  // SW3 GP12 (物理16番ピン)
 const int PIN_ENTER = 13;  // SW4 GP13 (物理17番ピン)
 
 const unsigned long DEBOUNCE_MS = 30;
@@ -48,11 +48,11 @@ struct Button {
   unsigned long changedAt;
 };
 
-enum { BTN_DASH, BTN_DOT, BTN_BACK, BTN_ENTER, BTN_COUNT };
+enum { BTN_BACK, BTN_DOT, BTN_DASH, BTN_ENTER, BTN_COUNT };
 Button buttons[BTN_COUNT] = {
-  {PIN_DASH,  HIGH, HIGH, 0},
-  {PIN_DOT,   HIGH, HIGH, 0},
   {PIN_BACK,  HIGH, HIGH, 0},
+  {PIN_DOT,   HIGH, HIGH, 0},
+  {PIN_DASH,  HIGH, HIGH, 0},
   {PIN_ENTER, HIGH, HIGH, 0},
 };
 
@@ -208,7 +208,7 @@ void setup() {
 
   setupLCD();
   draw();
-  Serial.println("morse input: SW1=- SW2=. SW3=backspace SW4=enter");
+  Serial.println("morse input: SW1=backspace SW2=. SW3=- SW4=enter");
 }
 
 void loop() {
