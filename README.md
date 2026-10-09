@@ -8,11 +8,9 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 やりたいこと:
 
 - LCD1602A にメッセージを表示する
-- **Bluetooth イヤホンに接続して通知音を鳴らす**（A2DP）
-- 鳴らす音声を **Wi-Fi 経由で取得する**
-- **PC に置いた音楽ファイル（mp3 / m4a）を Wi-Fi 経由で聞く**
+- **Bluetooth イヤホン（A2DP）で音を鳴らす**
 - **microSD に入れた MP3 を、ネットのない外でも聞く**
-- **Discord のメッセージを受け取って LCD に出す**（漢字は読みに直して半角カナで出す）
+- **Discord のメッセージを受け取って LCD に出す**（漢字は読みに直して半角カナで出す）。モールスで打った文を Discord に送る
 
 ## 構成
 
@@ -21,10 +19,10 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `lcd1602_hello/` | LCD1602A（I2C）の表示サンプル |
 | `morse_input/` | 4つのスイッチ（GP10〜13）でモールス信号を打ち、アルファベットを LCD に入力するサンプル |
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
-| `espoke/` | 本体。microSD の MP3 や、Wi-Fi で取得した WAV を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージも受け取って出す |
+| `espoke/` | 本体。microSD の MP3 を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージを受け取って出し、モールスで打った文を送る |
 | `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
 | `docs/` | 部品の取り付け手順など |
-| `tools/` | PC 側で通知音や音楽ライブラリを HTTP 配信する補助スクリプトと、Discord の中継 |
+| `tools/` | Discord の中継（PC 側で動かす）と、基板の配置図を作るスクリプト |
 
 ビルド実測値（`rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble`）:
 
@@ -32,7 +30,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 |---|---|---|
 | `lcd1602_hello` | 319KB / 2093KB (15%) | 69KB / 256KB (26%) |
 | `bt_earphone` | 514KB (24%) | 96KB (36%) |
-| `espoke` | 779KB (38%) | 146KB (56%) |
+| `espoke` | 786KB (37%) | 145KB (55%) |
 
 ---
 
@@ -397,19 +395,18 @@ volume: 80%
 > 既にスマホなどと接続済みだと `0x04` か `0x18` で撥ねられる。
 > スマホ側の Bluetooth を切ってから試すのが確実。
 
-## 7. espoke — microSD や Wi-Fi の音声をイヤホンで鳴らす
+## 7. espoke — microSD の MP3 をイヤホンで鳴らす
 
 本体。`bt_earphone` に Wi-Fi・LCD・microSD を足したもの。
 
 1. Wi-Fi に接続
-2. Bluetooth イヤホンをスキャンして接続し、microSD の MP3 を探して曲の一覧を作る
-3. シリアルに `sd` と打つと、**microSD の MP3 を順に流し続ける**（7.6 節）
-4. シリアルに `music` と打つと、`MUSIC_URL` の音楽サーバから曲を順に取ってきて流し続ける
-5. BOOTSEL を押すと、最後に選んだ方（起動直後は SD に曲があれば SD）で連続再生を始める
-6. シリアルに `play` と打つと `AUDIO_URL` の通知音を1回だけ鳴らす
-7. LCD に曲名と状態を表示。**GP15 のスイッチで表示ページを切り替える**（7.5 節）
-8. **SW1〜SW4 で再生を操作する**（再生 / 一時停止・前の曲・次の曲・ランダム）。入力ページではモールス入力になる（7.5 節）
-9. **Discord のメッセージを受け取る**。届いたらメッセージページに切り替えて出す（10 章）
+2. microSD の MP3 を探して曲の一覧を作る。Bluetooth イヤホンには、**System の画面で SW4 を押したときだけ**つなぐ（7.5 節）
+3. **microSD の MP3 を順に流し続ける**。Music の画面の SW1 長押し、BOOTSEL、シリアルの `sd` などで始める（7.6 節）
+4. LCD の画面は**ホームから選ぶ**。SW2 / SW3 で Music・Discord・System を選び、SW4 で開く。SW1 で前の画面に戻る（7.5 節）
+5. **Music の画面では SW1〜SW4 で再生を操作する**（SW1 長押しで再生 / 一時停止・前の曲・次の曲・シャッフルの入り切り）。曲名と状態も出る（7.5 節）
+6. **Discord のメッセージを受け取る**。届いたら Receive の画面に切り替えて出す（8 章）
+7. **Send の画面でモールスで打った文を Discord に送る**。空白のあとで enter（空の enter を2回続ける）を押すと送る（7.5 節）
+8. System の画面で Wi-Fi と Bluetooth の接続の様子を見る（7.5 節）
 
 ### 7.1 設定ファイル
 
@@ -424,87 +421,59 @@ $EDITOR espoke/arduino_secrets.h
 #define WIFI_SSID "your-ssid"
 #define WIFI_PASS "your-password"
 
-// 通知音。tools/serve_audio.py が配る
-#define AUDIO_URL "http://192.168.1.10:8000/notify.wav"
-
-// 音楽サーバ。tools/serve_music.py が配る。末尾にスラッシュは付けない
-#define MUSIC_URL "http://192.168.1.20:8000"
-
-// Discord の中継。tools/discord_relay.py が起動時に表示する行をそのまま書く（10 章）
+// Discord の中継。tools/discord_relay.py が起動時に表示する行をそのまま書く（8 章）
 #define RELAY_HOST "dynabook.tailxxxx.ts.net"
 #define RELAY_PORT 8443
 #define RELAY_KEY  "your-relay-key"
 ```
 
-`RELAY_HOST` を書かなければ（前からある `arduino_secrets.h` のままなら）Discord は受け取らない。
+`RELAY_HOST` を書かなければ Discord は使わない。前からある `arduino_secrets.h` に `AUDIO_URL` や `MUSIC_URL` が残っていても、使わないだけでビルドは通る。
 
 ### 7.2 音声フォーマットの制約
 
 `A2DPSource` は **44100Hz か 48000Hz の 16bit ステレオ**しか受け取らない。
-このスケッチは 44100Hz で動かし、取得した WAV を整数倍のサンプル&ホールドで引き伸ばして流す。
+このスケッチは 44100Hz で動かし、MP3 をデコードした音を整数倍のサンプル&ホールドで引き伸ばして流す。
 
 | 項目 | 対応 |
 |---|---|
-| 形式 | Wi-Fi: **16bit PCM の WAV のみ**（`fmt` タグ 1）。microSD: **MP3 のみ**（7.6 節） |
+| 形式 | **MP3（Layer III）のみ**（7.6 節） |
 | チャンネル | モノラル / ステレオ（モノラルは左右へ複製） |
 | サンプリングレート | **44100 / 22050 / 11025**（44100 の整数分の1のみ） |
-| 非対応 | 48000、8bit、24bit、可変長リサンプルが要るもの |
+| 非対応 | 48000 など割り切れないレート（リサンプラを積む余裕がない）、m4a（AAC） |
 
 48000Hz を通したい場合は `A2DP_RATE` を 48000 にして、素材側も 48000・24000・12000 に揃える。
-
-Wi-Fi と Bluetooth は CYW43439 を共有しているので、HTTP の帯域は素直に効く。
-
-| 形式 | 帯域 | 用途 |
-|---|---|---|
-| 22050Hz モノラル | 44 KB/s | 通知音。余裕がある |
-| **44100Hz モノラル** | **88 KB/s** | **音楽の既定。**高音を削らずに帯域を半分にできる |
-| 44100Hz ステレオ | 176 KB/s | 電波が良ければ。`serve_music.py --stereo` |
-
-音楽で帯域を削るなら、22050Hz に落として高音を捨てるよりモノラルにするほうが音の劣化が小さい。
-ステレオが欲しくて `warning: audio underflow` が出るなら、ルータとの距離を詰める
-（`A2DP_BUFFER` は RAM の都合でこれ以上増やせない。7.6 節）。
-
-実機での動作ログ。
-
-```
-wifi=1 ip=192.168.40.104 bt=1
-playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
-[done] 34KB played
-```
 
 ### 7.3 シリアルコマンド
 
 | コマンド | 動作 |
 |---|---|
 | `sd` | microSD を読み直し、MP3 を順に**流し続ける**（前回最後に選んだ曲の次から。起動後の初回は先頭から） |
-| `music` | `MUSIC_URL` から曲を順に取ってきて**流し続ける** |
-| `pause` | 一時停止 / 再開を切り替える（SW1 と同じ）。止まっているときは `next` と同じく再生を始める |
-| `next` | 次の曲へ（再生中でも効く）。止まっているときは、最後に選んだ方（SD か Wi-Fi）で再生を始める |
+| `pause` | 一時停止 / 再開を切り替える（Music の画面の SW1 長押しと同じ）。止まっているときは `next` と同じく再生を始める |
+| `next` | 次の曲へ（再生中でも効く。シャッフル中はランダムな曲へ）。止まっているときは再生を始める |
 | `prev` | 前の曲へ |
 | `rand` | ランダムな曲へ |
 | `stop` | 連続再生をやめる。次に始めると止めた曲の次から（途中から聞き直したいなら `pause`） |
-| `list` | 曲一覧をシリアルに出す。SD なら番号とパス（`>` が今の曲）、Wi-Fi なら番号・LCD 用の名前・パス |
+| `list` | 曲一覧をシリアルに出す。番号とパス（`>` が今の曲） |
 | `now` | 今かかっている曲を表示 |
-| `shuffle` | サーバ側のシャッフルを ON/OFF（Wi-Fi のときだけ。SD では `rand` を使う） |
-| `play` | `AUDIO_URL` の通知音を1回鳴らす |
-| `play <url>` | 指定した URL を1回鳴らす |
+| `shuffle` | シャッフルを入り切りする（Music の画面の SW4 と同じ。再生中でも効く） |
 | `vol` | 今の音量を表示 |
 | `vol <0-100>` | 音量の目盛りを指定（再生中でも効く）。100 が等倍（0dB）で、1 目盛り 0.6dB ずつ下がる。0 は無音。起動時は 35（-39dB） |
 | `vol +` / `vol -` | 音量を 5 目盛り（3dB）ずつ上げる / 下げる |
 | `wifi off` | Wi-Fi を切り、つなぎ直しもやめる（外で使うとき）。Bluetooth はそのまま |
-| `wifi on` | Wi-Fi のつなぎ直しを再開する（SD から流している間は、止めてからつなぐ） |
+| `wifi on` | Wi-Fi のつなぎ直しを再開する（連続再生している間は、止めてからつなぐ） |
+| `bt` | イヤホンに1回つなぎにいく（System の Bluetooth で SW4 を押したのと同じ。7.5 節） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
-| `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（10.6 節） |
-| `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / 一時停止 / 音量 / SD の曲数 / 空きヒープの状態を表示 |
+| `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（8.6 節） |
+| `status` | Wi-Fi / IP / Bluetooth / 連続再生 / 一時停止 / シャッフル / 音量 / SD の曲数 / 空きヒープの状態を表示 |
 
-**再生中に受け付けるのは `pause` / `stop` / `next` / `prev` / `rand` / `vol` / `wifi on` / `wifi off` だけ。**
+**再生中に受け付けるのは `pause` / `stop` / `next` / `prev` / `rand` / `shuffle` / `vol` / `wifi on` / `wifi off` だけ。**
 他のコマンドは曲が終わるまで処理されない。
 
 BOOTSEL ボタンは状況で意味が変わる。
 
 | 状況 | BOOTSEL |
 |---|---|
-| 止まっているとき | 連続再生を始める（最後に選んだ方。起動直後は SD に曲があれば SD） |
+| 止まっているとき | 連続再生を始める |
 | 再生中 | 次の曲へ送る（`next`） |
 
 > BOOTSEL の読み取りは一瞬だけフラッシュと割り込みを止めるので、再生中は
@@ -518,14 +487,13 @@ BOOTSEL ボタンは状況で意味が変わる。
 | `BT_LOCAL_NAME` | `espoke` | イヤホン側に表示される名前 |
 | `BT_TARGET_NAME` | `""` | 接続先の名前（前方一致）。空なら最初の1台 |
 | `BT_TARGET_ADDR` | MACアドレス | 空でなければスキャンせず直接繋ぐ（6章参照） |
-| `WIFI_TIMEOUT_MS` | 30000 | Wi-Fi 接続を待つ上限 |
-| `WIFI_RETRY_MS` | 30000 | Wi-Fi が切れているとき再接続を試みる間隔。SD から連続再生している間は試みない（7.6 節） |
-| `HTTP_TIMEOUT_MS` | 15000 | サーバの応答を待つ上限 |
+| `WIFI_RETRY_MS` | 30000 | Wi-Fi につながらないとき、つなぎ直す間隔。つなぐのは待たずに始めるので、その間も操作できる。連続再生している間はつなぎ直さない（7.6 節） |
+| `HTTP_TIMEOUT_MS` | 15000 | 中継の応答を待つ上限。Discord に送るときは、中継が送り終えるまで返事が来ない |
 | `A2DP_RATE` | 44100 | A2DP の送出レート。44100 か 48000 |
-| `A2DP_BUFFER` | 32768 | 約370ms 分（64KB）。通信のゆらぎを吸収する。**単位はバイトではなく 16bit サンプル数**で、2倍のバイトが確保される。RAM の都合でこれ以上は増やせない（7.6 節） |
-| `IN_FRAMES` | 1024 | 1回の読み取りで扱うフレーム数。小刻みに読むとスループットが落ちる |
+| `A2DP_BUFFER` | 32768 | 約370ms 分（64KB）。デコードや中継とのやりとりで止まる間を吸収する。**単位はバイトではなく 16bit サンプル数**で、2倍のバイトが確保される。RAM の都合でこれ以上は増やせない（7.6 節） |
 | `BOOTSEL_SKIP` | `true` | 再生中の BOOTSEL で次の曲へ送るか |
-| `PIN_BUTTON` | 15 | 表示切り替えスイッチをつなぐ GPIO |
+| `PIN_BUTTON` | 15 | 戻るスイッチをつなぐ GPIO（無くてもよい。SW1 で戻れる） |
+| `LONG_PRESS_MS` | 600 | SW1 をこれだけ押し続けると長押し（Music で再生 / 一時停止、Send で戻る） |
 | `PIN_SD_MISO` など | 16 / 18 / 19 / 20 | microSD の MISO・CLK・MOSI・CS（[docs/sd_music_parts.md](docs/sd_music_parts.md) の 3 章） |
 | `SD_MAX_TRACKS` | 300 | SD から拾う曲数の上限。パスを RAM に持つため（1曲 70 バイト前後） |
 | `SD_MAX_DEPTH` | 5 | SD のフォルダを潜る深さ |
@@ -534,9 +502,33 @@ BOOTSEL ボタンは状況で意味が変わる。
 | `RELAY_RETRY_MS` | 30000 | 中継へのつなぎ直しを試みる間隔。失敗が続くと倍ずつ延ばす（最大 8 分） |
 | `RELAY_IDLE_MS` | 90000 | これだけ何も届かなければ中継との接続が切れたとみなす |
 
-### 7.5 スイッチ（表示切り替えと SW1〜SW4）
+### 7.5 画面とスイッチ（ホームと SW1〜SW4）
 
-タクトスイッチを1個足すと、押すたびに LCD の表示ページが切り替わる。
+LCD の画面は**ホーム**から選んで開く。ホームにあるのは Music・Discord・System の3つ。
+
+```
+ホーム ─┬─ Music      曲名と再生の様子
+        ├─ Discord ─┬─ Receive   受け取ったメッセージを見る
+        │           └─ Send      モールスで打って送る
+        └─ System     Wi-Fi / Bluetooth（イヤホンにつなぐ）/ 稼働時間と空きヒープ
+```
+
+- ホームでは、1行目に選んでいる項目の名前が `←` `→` に挟まれて出る。**SW2 で左、SW3 で右**に動かし（端まで行くと反対の端に回る）、**SW4 で開く**
+- 2行目には、選んでいる項目の今の様子が出る（Music なら曲名か状態、Discord なら最新の発言者と時刻、System なら `WiFi ok  BT --` のような接続の有無）
+- Discord を開くと、同じ形で Receive（受信）と Send（送信）を選ぶ画面になる
+- **SW1 で前（1つ上）の画面に戻る**（Receive・Send → Discord、Music・Discord・System → ホーム）。
+  Send の画面だけは SW1 が backspace なので、**長押し（0.6 秒）で戻る**
+- **電源を入れると、1 秒ほどでホームが出る**（LCD のライブラリの初期化が 1 秒待つ）。Bluetooth・SD・Wi-Fi の準備はそのあとで、様子は Music の画面に出る。
+  Wi-Fi はつながるのを待たずにつなぎ始め、つながると `WiFi ok` と出る。シリアルがつながるのも待たないので、PC でログを見るときは、つながる前の分は出ない
+
+長押しがあるのは SW1 だけ:
+
+- 長押しは離すのを待たずに、0.6 秒たったところで動く。このときは短く押したときの役目（戻る / backspace）はしない
+- SW1 を短く押したときの役目は、長押しと区別するため**離したときに**動く
+- 長押しで何かするのは Music（再生 / 一時停止）と Send（戻る）。ほかの画面では長押しも短く押したのと同じく戻る
+- SW2〜SW4 には長押しが無く、押したときにすぐ動く（トン・ツーはすぐ反応しないと打ちにくい）
+
+GP15 にタクトスイッチを足すと、押すたびに前の画面に戻る（SW1 と同じ。Send でも戻る）。つないでいなければ何もしない。
 
 | スイッチの片側 | スイッチのもう片側 |
 |---|---|
@@ -547,39 +539,57 @@ BOOTSEL ボタンは状況で意味が変わる。
 - チャタリングはソフトで 30ms 待って吸収している
 - ユニバーサル基板にはんだ付けして組み立てる手順は [docs/universal_board.md](docs/universal_board.md)
 
-| ページ | 1行目 | 2行目 |
+| 画面 | 1行目 | 2行目 |
 |---|---|---|
-| 1. 通常 | 曲名 / 状態 | 再生中は帯域ごとの音の大きさの棒（下の説明）。一時停止中や止まっているときは進み具合や状態（一時停止中は後ろに `pause`） |
-| 2. メッセージ | Discord の発言者の名前と時刻（`HH:MM`） | 本文。16 文字を超えると流れる（10.6 節）。まだ無ければ中継とのつながり具合 |
-| 3. 入力 | モールスで入力した文章 | 入力中の符号と、確定したときの文字 |
-| 4. Wi-Fi | 電波強度（dBm） | IP アドレス |
-| 5. Bluetooth | 接続状態 | イヤホンの MAC アドレス（コロン抜き） |
-| 6. システム | 起動からの時間 | 空きヒープ |
+| ホーム / Discord | `←` 選んでいる項目 `→` | 選んでいる項目の今の様子 |
+| Music | 曲名 / 状態。シャッフル中は右端に `⇄` の印 | 再生中は帯域ごとの音の大きさの棒（下の説明）。一時停止中や止まっているときは進み具合や状態（一時停止中は後ろに `pause`） |
+| Receive | Discord の発言者の名前と時刻（`HH:MM`） | 本文。16 文字を超えると流れる（8.6 節）。まだ無ければ中継とのつながり具合 |
+| Send | モールスで入力した文章 | 入力中の符号と、確定したときの文字。送ったあとは送った結果 |
+| System（Wi-Fi） | 電波強度（dBm） | IP アドレス |
+| System（Bluetooth） | 接続状態 | イヤホンの MAC アドレス（コロン抜き）。つないでいないときは `SW4: connect`、つなぎにいっている間は `connecting...`、失敗したら理由（`BT timeout` など） |
+| System（その他） | 起動からの時間 | 空きヒープ |
 
-通常画面の2行目の棒は、左の 86Hz から右の 16kHz までを対数で16本に分け、それぞれの帯域の強さを8段で出す。
+Music の画面の2行目の棒は、左の 86Hz から右の 16kHz までを対数で16本に分け、それぞれの帯域の強さを8段で出す。
 音量（`vol`）を掛ける前の音で見るので、`vol` を変えても棒の高さは変わらない。
 A2DP のバッファにはおよそ 370ms 先の音まで入っているので、書いたときではなく、今イヤホンへ送り出している所の棒を出す。
 棒が下がるときは 80ms ごとに1段ずつ下げる。
 
-6ページ目の次は通常画面に戻る。通常画面以外を見ている間も曲名や状態は裏で更新しているので、
-戻ったときには最新の内容が出る。4〜6ページ目は1秒ごとに描き直す。
-Discord のメッセージが届くと、どのページを見ていてもメッセージページに切り替わる。
-このときだけ、GP15 を押すと次のページではなく元のページに戻る。
+Music 以外の画面を見ている間も曲名や状態は裏で更新しているので、開いたときには最新の内容が出る。
+ホーム・Discord・Receive（メッセージが無いとき）・System は1秒ごと、それ以外の画面も5秒ごとに描き直す。
+描き直すたびに LCD の 4bit の区切りを合わせ直すので、I2C の通信が化けて画面全体がでたらめになっても、長くて5秒で（スイッチで画面を変えればすぐに）戻る。
+Discord のメッセージが届くと、どの画面を見ていても Receive の画面に切り替わる。
+このときだけ、SW1（か GP15）で、Discord ではなく元の画面に戻る。
 スイッチは再生中も効き、音は途切れない。
 
-SW1〜SW4（GP10〜13）の役目は、表示中のページで変わる。
+SW1〜SW4（GP10〜13）の役目は、開いている画面で変わる。
 
-| ページ | SW1 | SW2 | SW3 | SW4 |
-|---|---|---|---|---|
-| 2. メッセージ | 再生 / 一時停止 | 古いメッセージ | 新しいメッセージ | ランダムな曲 |
-| 3. 入力 | backspace | トン | ツー | enter |
-| それ以外 | 再生 / 一時停止 | 前の曲 | 次の曲 | ランダムな曲 |
+| 画面 | SW1 | SW1 長押し | SW2 | SW3 | SW4 |
+|---|---|---|---|---|---|
+| ホーム | （何もしない） | （何もしない） | ← | → | 開く |
+| Discord | 戻る | 戻る | ← | → | 開く |
+| Music | 戻る | 再生 / 一時停止 | 前の曲 | 次の曲（シャッフル中はランダム） | シャッフルの入り切り |
+| Receive | 戻る | 戻る | 古いメッセージ | 新しいメッセージ | （何もしない） |
+| Send | backspace | 戻る | トン | ツー | enter |
+| System | 戻る | 戻る | ← | → | イヤホンにつなぐ（Bluetooth を見ているとき） |
 
-- 再生の操作はシリアルの `pause` / `prev` / `next` / `rand` と同じ。止まっているときはどれを押しても再生が始まる
+- 再生の操作はシリアルの `pause` / `prev` / `next` / `shuffle` と同じ。止まっているときに 前の曲 / 次の曲 / 再生 を押すと再生が始まる
 - 一時停止中に曲を送ると、一時停止は解けて次の曲が鳴る
-- モールスを打つときは、GP15 で入力ページ（通常画面の2つ先）に切り替えてから打つ
-- Wi-Fi の曲は、30秒より長く一時停止すると、再開したときに少しだけ鳴って次の曲へ進む。
-  音楽サーバが、送れないまま30秒たつと接続を切るため（9.7 節）。SD の曲はいくら止めても続きから鳴る
+- **シャッフル中は、「次の曲」がすべてランダムな曲になる。** SW3 だけでなく、曲が終わって次へ進むとき、BOOTSEL、再生を始めるときも同じ。
+  前の曲（SW2）は、曲順で1つ前に戻る。
+  起動したときはシャッフルしていない
+- System の画面は SW2 / SW3 で Wi-Fi → Bluetooth → その他（稼働時間と空きヒープ）を切り替える。端まで行くと反対の端に回る
+- **イヤホンには自分からはつながない。** 起動したときも、切れたときもつなぎ直さない。
+  System で Bluetooth を見ながら SW4 を押すと、1回だけつなぎにいく（最大 15 秒。その間は `connecting...`）。
+  失敗したら理由が出るので、イヤホンの電源やペアリングモードを確かめてもう一度押す。
+  見つからない相手を探し続けると、Bluetooth と Wi-Fi が無線を取り合って Wi-Fi がほとんど通らなくなる（NTP や中継の TLS が失敗する）ため
+- イヤホンがつながっていないまま再生を始めると、Music の画面に `no earphone` `System > BT` と出て、つながるまで待つ
+- Receive を開くと、最新のメッセージから出る
+- Send の enter は、符号があれば文字に確定し、無ければ空白を入れる。**空白のあとでもう一度押すと、文を Discord に送る**。
+  つまり最後の文字を確定してから enter を2回押すと送れる（`HI` なら `....` enter `..` enter enter enter）。
+  64 文字いっぱいで空白が入らないときは、1回で送る
+- 送っている間（4〜8 秒）は2行目に `sending...` と出て、ほかの操作は止まる。再生中なら音もその間だけ止まり、送り終えると続きから鳴る。
+  送れたら文が消えて `sent`、送れなければ文は残って `send: <理由>` と出る（8.6 節）。残った文はそのまま enter を押せば送り直せる。
+  打ちかけの文は、画面を離れても残る（Discord の画面の Send の2行目に出る）
 
 ### 7.6 microSD から聞く
 
@@ -597,12 +607,12 @@ microSD スロット（CK-40）の部品と配線は [docs/sd_music_parts.md](do
 
 仕組み:
 
-- MP3 は `BackgroundAudio` ライブラリに入っている libmad で、`loop()` の中で1フレーム（1152 サンプル、約26ms）ずつデコードし、A2DP に書く。ライブラリの再生クラス（割り込みでデコードする）は使っていない。Wi-Fi の WAV と同じく、再生中もスイッチやコマンドが効く
+- MP3 は `BackgroundAudio` ライブラリに入っている libmad で、`loop()` の中で1フレーム（1152 サンプル、約26ms）ずつデコードし、A2DP に書く。ライブラリの再生クラス（割り込みでデコードする）は使っていない。再生中もスイッチやコマンドが効く
 - 実機（44.1kHz ステレオ 192kbps、CPU 200MHz、`-Os`）では、1フレームのデコードに平均 11ms（実時間の約42%）
 - 曲の終わりに `mp3: ... decode avg ... us/frame (..% of real time), longest loop .. ms, underflow .. times` と出る。`longest loop` は `loop()` が1周にかかった最長時間で、`A2DP_BUFFER` の 370ms に近づくと音が切れる。再生中に音が切れると、その場で `underflow at 12s (wifi connected)` のように出る（再生開始から1秒間は、空のバッファが溜まるまでの分なので数えない）
 - SD の読み出しは 4MHz（SD ライブラリの既定）で約 375KB/s。320kbps の MP3 でも 40KB/s なので十分
-- Wi-Fi の再接続は最大30秒待つので、外で聞いているときに曲の合間が止まらないよう、SD から連続再生している間は再接続しない。外では `wifi off` で切っておくとよい
-- **SD から流している間は、Wi-Fi を省電力モード（`WiFi.defaultLowPowerMode()`）にする。** arduino-pico は Wi-Fi につなぐと省電力を切る（`noLowPowerMode()`、常時受信）。そのままだと、同じ CYW43439 の Bluetooth と無線を取り合い、Wi-Fi につながっているときだけ SD の曲がずっと途切れた（`underflow` も出た）。省電力にすると、Wi-Fi につないだままでも途切れなくなった。Wi-Fi の WAV を流すとき（`playUrl`）は、速さが要るので常時受信に戻す
+- 連続再生している間は Wi-Fi のつなぎ直しをしない（外で聞いているときに、電波を探す間に音が途切れないように）。外では `wifi off` で切っておくとよい
+- **SD から流している間は、Wi-Fi を省電力モード（`WiFi.defaultLowPowerMode()`）にする。** arduino-pico は Wi-Fi につなぐと省電力を切る（`noLowPowerMode()`、常時受信）。そのままだと、同じ CYW43439 の Bluetooth と無線を取り合い、Wi-Fi につながっているときだけ SD の曲がずっと途切れた（`underflow` も出た）。省電力にすると、Wi-Fi につないだままでも途切れなくなった。一度 SD から流したあとは省電力のままにしている（中継の受信が少し遅れるだけで困らない）
 
 RAM（256KB）の使い方には余裕がない。
 
@@ -615,7 +625,7 @@ RAM（256KB）の使い方には余裕がない。
 - `A2DP_BUFFER` を以前の 65536 にすると 128KB を確保しようとして `a2dp.begin()` が失敗し、Bluetooth が一切つながらなくなる（`BT rejected` が続く）
 - 大きな確保が細切れのヒープで失敗しないよう、`a2dp.begin()` は SD の曲一覧を作る前に呼び、MP3 デコーダの作業領域は最初から静的に持っている
 
-Discord の中継とは TLS でつなぐ（10 章）ので、BearSSL がヒープを使う
+Discord の中継とは TLS でつなぐ（8 章）ので、BearSSL がヒープを使う
 （受信バッファ `RELAY_TLS_RX`、BearSSL 用のスタック `RELAY_TLS_STACK`、コンテキストなど）。
 Wi-Fi につないだ後の空きは 30KB ほどしかなく、既定の 16KB の受信バッファでは足りない。
 そこで受信バッファを **4KB** にしている。
@@ -643,186 +653,15 @@ arduino-pico 6.1.0 の `A2DPSource::write()` には、リングバッファの�
 後半にデータの先頭部分をもう一度書いてしまう不具合がある（2回目の `memcpy` が `buffer` の先頭から読んでいる）。
 MP3 の1フレーム（2304 サンプル）をそのまま書くとバッファを割り切れず、約0.37秒ごとに一部のデータが壊れる。
 バッファが空になるわけではないので `warning: audio underflow` は出ない。
-（コードを読んで見つけた不具合。実機で最初に途切れたときは上の Wi-Fi の問題も重なっていたので、これだけでどう聞こえるかは確かめていない。
-Wi-Fi の WAV 再生は 2048 サンプルずつ書いていたので、たまたま踏んでいなかった。）
+（コードを読んで見つけた不具合。実機で最初に途切れたときは上の Wi-Fi の問題も重なっていたので、これだけでどう聞こえるかは確かめていない。）
 `A2DP_BUFFER` を変えるときは `A2DP_CHUNK` の倍数にすること（`static_assert` で確かめている）。
 
-## 8. tools/serve_audio.py — 通知音を配る
+## 8. tools/discord_relay.py — Discord とやりとりする
 
-Pico に渡す WAV を用意して HTTP で配信する。
+Discord の決めたサーバー（か1つのチャンネル）の発言を、espoke の LCD に出す。
+逆に、espoke の Send の画面で打った文を Bot として Discord に送る。
 
-```bash
-python3 tools/serve_audio.py
-```
-
-- `tools/audio/notify.wav` がなければ、ポケベル風の「ピピッ」（22050Hz モノラル 16bit / 0.8秒）を生成する
-- そのディレクトリを `0.0.0.0:8000` で配信し、**LAN 側の IP を含む URL を表示する**
-- 表示された URL をそのまま `AUDIO_URL` に書く
-
-```
-serving /home/you/ssd/electronic/espoke/tools/audio on http://192.168.40.115:8000/
-  http://192.168.40.115:8000/notify.wav
-```
-
-手持ちの音声を使う場合は、対応フォーマットに変換して同じディレクトリに置く。
-
-```bash
-ffmpeg -i source.mp3 -ac 1 -ar 22050 -sample_fmt s16 tools/audio/voice.wav
-```
-
-`--dir` で別のディレクトリを配信することもできる。生成物は `.gitignore` 済み。
-
-## 9. tools/serve_music.py — 音楽ライブラリを配る
-
-PC に置いてある mp3 や m4a を、Pico が読める 16bit PCM の WAV に**変換しながら**配る。
-ここでは音楽ファイルが dynabook の `~/media/music/` にある前提で書く。
-
-### 9.1 なぜ PC 側で変換するのか
-
-Pico WH には mp3 を解く余裕がない。RP2040 は FPU を持たず、A2DP の SBC
-エンコードと Wi-Fi の受信で既に手一杯になる。
-一方 PC 側なら ffmpeg に通すだけで済むので、**デコードもリサンプルも PC で終わらせて、
-Pico には生の PCM だけを渡す**。Pico 側は WAV ヘッダを読んで A2DP に流すだけになる。
-
-変換し終えるのを待たずに、変換した先から少しずつ流す。曲の頭が鳴り始めるまで待たされない。
-
-### 9.2 Tailscale と Pico の関係
-
-**Pico W/WH に Tailscale は載らない。** WireGuard クライアントを動かす余裕がないので、
-Pico は tailnet に参加できない。したがって `100.x.x.x` のアドレスも
-`dynabook.tail....ts.net` という名前も Pico からは使えない。
-
-Pico が使うのは **サーバの LAN IP** だけ。Tailscale は、サーバを操作する人間が
-`ssh dynabook` で入るための経路であって、音声は通らない。
-
-```
-   Pico WH ──── Wi-Fi/LAN ────> 192.168.40.195:8000 ── dynabook
-                                  serve_music.py          ~/media/music/
-                                  ffmpeg で mp3 → PCM
-                                       ↑
-                                  Tailscale
-                                  (ssh dynabook で起動・停止するのはこちら)
-```
-
-つまり **dynabook と Pico が同じ LAN にいる必要がある**。dynabook を外に持ち出すと
-Pico からは届かなくなる。
-
-サーバの IP は `MUSIC_URL` に直接書くので、**DHCP で変わると繋がらなくなる**。
-ルータで IP 固定（DHCP 予約）しておくと安定する。
-
-### 9.3 dynabook 側の準備
-
-必要なのは **ffmpeg だけ**。サーバ本体は python3 の標準ライブラリしか使わない。
-
-```bash
-ssh dynabook
-sudo apt install --no-install-recommends ffmpeg
-```
-
-> 推奨パッケージ込みの `apt install ffmpeg` は 136パッケージ・展開後 376MB になる。
-> `--no-install-recommends` なら 102パッケージ・194MB で、mp3・m4a・flac・ogg は
-> すべて読める。
-
-スクリプトを置いて起動する。
-
-```bash
-ssh dynabook mkdir -p '~/espoke'
-scp tools/serve_music.py dynabook:~/espoke/
-ssh dynabook 'python3 ~/espoke/serve_music.py'
-```
-
-起動すると、そのまま `MUSIC_URL` に書ける行を表示する。
-
-```
-/home/you/media/music  39 tracks
-44100Hz mono 16bit PCM  (88 KB/s)
-
-  http://192.168.40.195:8000/
-
-この URL を espoke/arduino_secrets.h の MUSIC_URL に書く:
-  #define MUSIC_URL "http://192.168.40.195:8000"
-```
-
-### 9.4 エンドポイント
-
-**次の曲がどれかを覚えているのはサーバ側**。Pico は `/next.wav` を叩くだけでよく、
-曲順やシャッフルの管理を載せずに済む。
-
-| URL | 動作 |
-|---|---|
-| `/next.wav` | 次の曲へ進めて、その曲を WAV で返す |
-| `/prev.wav` | 前の曲へ戻す |
-| `/random.wav` | ランダムに選ぶ |
-| `/current.wav` | 今の曲をもう一度 |
-| `/track/5.wav` | 5番の曲 |
-| `/list` | 曲一覧（番号 `TAB` LCD 用の名前 `TAB` パス） |
-| `/now` | 今の曲 |
-| `/shuffle` | シャッフルの ON/OFF を切り替え |
-| `/rescan` | ディレクトリを読み直す |
-| `/` | ブラウザ用の一覧 |
-
-WAV を返すときは、LCD に出すための曲名をヘッダに入れる。
-
-| ヘッダ | 内容 |
-|---|---|
-| `X-Track` | LCD 用。ASCII 16文字。先頭のトラック番号を落とし、アクセント記号も潰してある |
-| `X-Track-Full` | パーセントエンコードしたフルパス |
-| `X-Index` | 曲番号 |
-
-ブラウザや `curl` でもそのまま鳴らせるので、Pico を繋ぐ前に PC だけで確認できる。
-
-```bash
-curl -s http://192.168.40.195:8000/list
-curl -s http://192.168.40.195:8000/next.wav | aplay
-```
-
-### 9.5 オプション
-
-| オプション | 既定値 | 内容 |
-|---|---|---|
-| `--dir` | `~/media/music` | 配信するディレクトリ（再帰的に探す） |
-| `--port` | 8000 | 待ち受けポート |
-| `--rate` | 44100 | 44100 / 22050 / 11025 |
-| `--stereo` | （モノラル） | ステレオで配る。帯域が倍になる |
-| `--volume` | 1.0 | 音量の倍率 |
-| `--shuffle` | （曲順） | 最初からシャッフルする |
-| `--ffmpeg` | `ffmpeg` | ffmpeg のパス |
-
-拡張子で音楽ファイルを拾う（`.mp3` `.m4a` `.flac` `.ogg` `.opus` `.wav` `.aac` など）。
-
-### 9.6 WAV の長さを 0 で返している理由
-
-変換しながら流すので、送り終わるまで長さが分からない。
-そのため `data` チャンクのサイズは **0** にして、`Content-Length` も付けず、
-HTTP/1.0 の「接続が閉じたら終わり」で長さを伝えている。
-
-Pico 側は `data` サイズ 0 を「最後まで読む」と解釈する（`WavInfo.dataBytes == 0`）。
-このとき LCD の進捗は `%` ではなく `KB` 表示になる。
-
-### 9.7 相手が黙って消えたとき
-
-Pico は電源が落ちても電波が切れても **FIN を返さずに消える**。そのままだと
-カーネルが再送を諦めるまで（15分ほど）送信が詰まり、`ffmpeg` とスレッドが居座る。
-
-そのため接続に **30秒の送信タイムアウト**（`STREAM_TIMEOUT`）を張ってある。
-30秒まったく送信が進まなければ打ち切り、`ffmpeg` を kill してログに残す。
-
-```
-play [2] NMIXX/Blue_Valentine/01-Blue_Valentine.mp3
-  client gone, 30s no progress (1808 KB)
-```
-
-`next` や `stop` で Pico から切った場合は即座に検知されるので、こちらは
-`stopped by client` になる。
-
-Pico で一時停止している間も、Pico は受け取らないので送信が進まない。そのため30秒より長く
-止めると、同じく `client gone` で切られる（7.5 節）。
-
-## 10. tools/discord_relay.py — Discord を受け取る
-
-Discord の決めたチャンネルの発言を、espoke の LCD に出す（送信はまだない）。
-
-### 10.1 経路
+### 8.1 経路
 
 ```
    Discord ──Bot── discord_relay.py (127.0.0.1:8001)        dynabook（学校）
@@ -834,19 +673,17 @@ Discord の決めたチャンネルの発言を、espoke の LCD に出す（送
 ```
 
 - 中継は学校に置いた dynabook で常時動かし、Pico は家の Wi-Fi で受ける。
-- Pico は Tailscale に入れない（9.2 節）ので、**Funnel で中継をインターネットに公開し、Pico から HTTPS でつなぐ**。
+- Pico は Tailscale に入れない（WireGuard を動かす余裕がなく、tailnet の `100.x.x.x` も `*.ts.net` の名前も使えない）ので、**Funnel で中継をインターネットに公開し、Pico から HTTPS でつなぐ**。
   誰でもつなげてしまうので、合言葉（`RELAY_KEY`）を `X-Key` ヘッダで送らせ、違えば 403 を返す。中継自体は `127.0.0.1` でしか待ち受けない。
 - **Funnel は 8443 番を使う。** dynabook の 443 番は、tailnet の中だけに見せる `tailscale serve`（`127.0.0.1:8787`）に使っている。
   443 で funnel すると、その設定を書き換えて 8787 まで公開してしまう。Funnel が使えるのは 443 / 8443 / 10000 番だけ。
 - 家に常時動かしておくマシンは要らない。LTE-M（[docs/lte_m_parts.md](docs/lte_m_parts.md)）にしても、BG96 は TLS を内蔵しているので同じ URL が使える。
-- dynabook を学校に移すと、家からは `music`（`MUSIC_URL` は LAN の IP）が届かなくなる。
 
-### 10.2 なぜ中継で変換するのか
+### 8.2 なぜ中継で変換するのか
 
 LCD1602A の文字 ROM（A00）にあるのは**英数字と半角カタカナ**だけ。その並びは JIS X 0201 で、cp932（Shift_JIS）の1バイト文字と同じ番号になっている。
 漢字を読みに直すには形態素解析の辞書が要る（unidic-lite は展開すると 249MB）。Flash が 2MB の Pico には載らない。
 そこで中継が「漢字 → 読み → 半角カナ」まで済ませ、LCD にそのまま書けるバイト列にして渡す。
-serve_music.py が曲名を ASCII にしてから渡しているのと同じ分担。
 
 変換の手順:
 
@@ -866,17 +703,30 @@ serve_music.py が曲名を ASCII にしてから渡しているのと同じ分�
 
 - 助詞の「は」「を」は、発音ではなく字のとおり `ﾊ` `ｦ` で出る
 - 読みは辞書の判断なので外れることがある（`明日` は `ｱｽ`）。人名も外れやすい
-- 変換だけを試すには `--convert` を使う（10.5 節）
+- 変換だけを試すには `--convert` を使う（8.5 節）
 
-### 10.3 Bot を作る
+### 8.3 Bot を作る
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) で New Application を作り、Bot のページを開く
 2. Reset Token でトークンを出す（一度しか表示されないので控える）
 3. 同じページの **Message Content Intent を ON** にする。OFF のままだと本文が空で届く
-4. OAuth2 → URL Generator で scope に `bot`、権限に View Channels と Read Message History を選び、出てきた URL で自分のサーバーに招待する
-5. Discord の 設定 → 詳細設定 で開発者モードを ON にし、受け取るチャンネルを右クリック → チャンネル ID をコピー
+4. OAuth2 → URL Generator で scope に `bot`、権限に View Channels と Read Message History と Send Messages を選び、出てきた URL で自分のサーバーに招待する
+   （受け取るだけで招待済みなら、Discord のサーバー設定 → ロール で Bot のロールに「メッセージを送信」を足す）
+5. Discord の 設定 → 詳細設定 で開発者モードを ON にし、受け取るサーバーのアイコンを右クリック → サーバー ID をコピー
+   （1つのチャンネルだけにするなら、チャンネルを右クリック → チャンネル ID をコピー）
 
-### 10.4 dynabook 側の準備
+サーバー全体を受け取ると、Bot が見られるチャンネルの発言が全部届く。届かせたくないチャンネルは、Discord 側でそのチャンネルの Bot の閲覧権限を外す。
+発言が多いサーバーだと、Pico が覚えている 8 件がすぐ入れ替わり、Receive の画面にも頻繁に切り替わる。
+
+espoke から送った文は、Bot の発言としてチャンネルに出る。送り先は次の順に決まる。
+
+1. `DISCORD_SEND_CHANNEL_ID`（8.4 節）のチャンネル
+2. `DISCORD_CHANNEL_ID` のチャンネル（1チャンネルだけ受け取るとき）
+3. 最後に発言を受け取ったチャンネル（サーバー全体を受け取るとき。直前の会話に返事をする形になる）
+
+`@everyone` などのメンションは通知しない（合言葉を知っていれば誰でも送れるため）。Bot 自身の発言は受け取らないので、送った文は espoke には戻ってこない。
+
+### 8.4 dynabook 側の準備
 
 ```bash
 ssh dynabook mkdir -p '~/espoke'
@@ -891,7 +741,9 @@ python3 -m venv ~/espoke/venv
 ```bash
 cat > ~/espoke/relay.env <<'END'
 DISCORD_TOKEN=Bot のトークン
-DISCORD_CHANNEL_ID=123456789012345678
+DISCORD_GUILD_ID=123456789012345678     # サーバー全体
+# DISCORD_CHANNEL_ID=123456789012345678 # 1チャンネルだけならこちら (両方あればこちらが効く)
+# DISCORD_SEND_CHANNEL_ID=123456789012345678  # espoke から送る先 (無ければ 8.3 節の順で決まる)
 RELAY_KEY=合言葉
 END
 chmod 600 ~/espoke/relay.env
@@ -914,7 +766,7 @@ espoke/arduino_secrets.h に書く:
   #define RELAY_HOST "dynabook.tailxxxx.ts.net"
   #define RELAY_PORT 8443
   #define RELAY_KEY  "..."
-discord: espoke#1234 として #general を見ている
+discord: espoke#1234 として サーバー 自分のサーバー の 5 チャンネル を見ている
 ```
 
 Funnel で公開する。
@@ -952,15 +804,30 @@ sudo loginctl enable-linger $USER         # ログインしていなくても動
 journalctl --user -u espoke-relay -f      # 届いた発言は "msg ..." と出る
 ```
 
-### 10.5 エンドポイント
+### 8.5 エンドポイント
 
 | URL | 動作 |
 |---|---|
 | `GET /stream?after=<ID>` | `after` より新しい発言を送り、接続を閉じずに新着を流し続ける。`after` が無ければ直近 8 件から |
+| `POST /stream?after=<ID>` | 本文（UTF-8）を Discord に送ってから、`GET /stream` と同じく流す。送った結果は `X-Sent` ヘッダ（下の表） |
 | `POST /post` | 本文（UTF-8）を差出人 `test` の発言として流す。Discord を使わずに試すとき |
 | `GET /` | 動いているかの確認 |
 
 `/stream` と `/post` には `X-Key: <RELAY_KEY>` ヘッダが要る（無いか違えば 403）。
+
+`POST /stream` は espoke が文を送るときに使う。Pico はつなぐたびに TLS の握手（4〜8 秒）をするので、
+送る用の接続を別に張らず、**送るのと受け取り直すのを1回の接続で済ませる**。
+`--no-discord` のときは Discord の代わりに、差出人 `espoke` の発言として Pico へ流し返す（Pico の送信を試すとき）。
+
+| `X-Sent` | 意味 |
+|---|---|
+| `ok` | 送れた |
+| `empty` | 本文が空（空白だけ） |
+| `no channel` | 送り先が決まらない。サーバー全体を受け取っていて、`DISCORD_SEND_CHANNEL_ID` が無く、中継を起動してから発言を1件も受け取っていない |
+| `not ready` | 中継が Discord につながる前 |
+| `discord 403` | Bot にそのチャンネルへ送る権限が無い（8.3 節） |
+| `discord 404` | `DISCORD_SEND_CHANNEL_ID` か `DISCORD_CHANNEL_ID` が違う |
+| `timeout` | Discord が 10 秒以内に応えなかった |
 
 1件は1行で、cp932 のバイト列。
 
@@ -969,8 +836,10 @@ journalctl --user -u espoke-relay -f      # 届いた発言は "msg ..." と出�
 ```
 
 - ID は Discord のメッセージ ID（snowflake）。時間とともに増えるので、Pico は最後に受け取った ID を `after` に付けてつなぎ直せば、切れていた間の分も受け取れる。
-  中継を立ち上げ直しても、起動時にチャンネルの履歴を 8 件読み直す
+  中継を立ち上げ直しても、起動時に各チャンネルの履歴を読み、新しいものから 8 件を持ち直す
 - 名前は 10 バイト、本文は 200 バイトで切る。時刻は日本時間
+- サーバー全体を受け取るときは、本文の頭に `#チャンネル名 ` を付ける（例: `#ｻﾞﾂﾀﾞﾝ ｷｮｳﾊｱﾒ`）。LCD の1行目は名前と時刻でいっぱいなので、流れる2行目に入れる。
+  チャンネル名は 8 バイトで切り、頭の絵文字や区切り（`💬｜雑談` の `💬｜`）は落とす
 - つないだ直後は、溜まっていた分のあとに**空行を1つ**送る。Pico はここまでを「つなぐ前からあった分」とみなし、起動直後に古い発言で着信表示しない
 - その後は、何もない間 30 秒ごとに空行を送る。Pico は 90 秒何も届かなければ切れたとみなす
 - HTTP/1.0 で返す。Pico も HTTP/1.0 で頼むので、Funnel の手前の Go のプロキシは chunked にせず、届いた分をすぐ流す
@@ -984,47 +853,62 @@ curl -s --http1.0 -N -H "X-Key: $KEY" $URL/stream \
   | python3 -c 'import sys
 for l in sys.stdin.buffer: print(l.decode("cp932"), end="", flush=True)'
 curl -H "X-Key: $KEY" --data-binary 'テストです' $URL/post   # 別の端末から
+curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head -8   # Discord に送る (X-Sent を見る)
 
 ~/espoke/venv/bin/python ~/espoke/discord_relay.py --convert '今日は雨'  # 変換だけ
 ~/espoke/venv/bin/python ~/espoke/discord_relay.py --no-discord        # Discord なしで /post だけ
 ```
 
-### 10.6 Pico 側の動き
+### 8.6 Pico 側の動き
 
 - 起動後の最初の `loop()` で中継につなぐ。切れたら 30 秒ごとにつなぎ直す。つなげないことが続くと、間隔を倍ずつ延ばす（最大 8 分）。中継が落ちていると握手のタイムアウト（15 秒）まで待つので、曲の合間が何度も止まらないようにするため。中継を直したあとすぐにつなぎ直させるには、シリアルで `relay` を打つ
 - **TLS の握手に 4〜8 秒かかる**（実測。Let's Encrypt の P-384 の証明書を確かめるのが重い）。A2DP のバッファ（370ms）では持たないので、つなぐのは止まっている間か曲の合間だけにしている。
   つなぐ前に A2DP のバッファを無音で埋めるので、つなぎ直すときだけ曲の合間が 0.4 秒と握手の分（数秒）だけ空く
 - 受け取るときは待たずに、届いた分だけ読む。再生中も届く（SD の再生中は Wi-Fi が省電力なので少し遅れる）
 - 証明書は `espoke/relay_ca.h` のルート CA（Let's Encrypt の Root YE / ISRG Root X2 / ISRG Root X1）で確かめる。
-  期限を確かめるのに時計が要るので、最初につなぐ前に NTP（`ntp.nict.jp`）で合わせる
-- 直近 8 件を覚えておく。届いたら**メッセージページに切り替える**（7.5 節）。GP15 を押すと元のページに戻る
+  期限を確かめるのに時計が要るので、最初につなぐ前に NTP（`ntp.nict.jp`）で合わせる。
+  Wi-Fi につないだ直後は合わせられないことがあるので、失敗したら 10 秒後にやり直す（中継の失敗とは数えず、間隔も延ばさない）
+- 直近 8 件を覚えておく。届いたら**Receive の画面に切り替える**（7.5 節）。SW1（か GP15）で元の画面に戻る
 - 1行目は名前と時刻、2行目は本文。16 文字を超える本文は 0.3 秒ごとに1文字ずつ流し、頭と末尾で 1.5 秒止まる
 - SW2 で古いメッセージ、SW3 で新しいメッセージを見る
 - シリアルには `relay: <ID> <時刻> <名前>` と出る（名前は半角カナのバイト列なので化ける）。
   `status` には `relay=1 (no message) msgs=3` のように、つながり具合と覚えている件数が出る
 - `wifi off` にすると中継も切る
+- Send の画面で送ると決めたら（7.5 節）、つながっていても**中継につなぎ直し、`POST /stream` で文を送る**。返事の流れをそのまま受け取り続けるので、送ったあとに受け取り直す握手は要らない。
+  曲の途中でも待たずに送る（その間は無音）。シリアルには `send: ok` のように結果が出る
 
-メッセージがまだ1件も無いとき、メッセージページの2行目にはつながり具合が出る。
+送った結果は、Send の画面の2行目に出る。
+
+| 表示 | 意味 |
+|---|---|
+| `sending...` | 送っている |
+| `sent` | 送れた。打った文は消える |
+| `send: discord 403` など | 中継から返った理由（8.5 節の `X-Sent`）。打った文は残る |
+| `send: relay error` など | 中継につなげなかった（下の表と同じ） |
+| `send: no wifi` | Wi-Fi につながっていない |
+| `no RELAY_HOST` | `arduino_secrets.h` に `RELAY_HOST` が無い |
+
+メッセージがまだ1件も無いとき、Receive の画面の2行目（とホームで Discord を選んだときの2行目）にはつながり具合が出る。
 
 | 表示 | 意味 |
 |---|---|
 | `connecting` | 起動直後。まだつなぎにいっていない |
-| `no message` | つながっている。チャンネルにまだ発言が無い |
+| `no message` | つながっている。まだ発言が無い |
 | `relay error` | TLS でつなげなかった。シリアルに `relay: connect failed (ssl <番号> ...)` が出る |
 | `relay 403` など | 中継に断られた。`RELAY_KEY` が違う |
 | `relay no reply` | 応答のヘッダが来なかった |
 | `relay lost` / `relay silent` | 切れた / 90 秒何も届かなかった。30 秒以内につなぎ直す |
-| `ntp failed` | 時計を合わせられなかった |
+| `ntp failed` | 時計を合わせられなかった。10 秒後にやり直す |
 | `wifi off` | `wifi off` で切った |
 | `no RELAY_HOST` | `arduino_secrets.h` に `RELAY_HOST` が無い |
 
-## 11. トラブルシューティング
+## 9. トラブルシューティング
 
 | 症状 | 原因と対処 |
 |---|---|
 | `BluetoothAudio.h: No such file` / `_needsbt.h` のエラー | FQBN に `ipbtstack=ipv4btcble` が入っていない |
 | `No drive to deploy.` で書き込めない | 自動リセットが効かず BOOTSEL に入っていない。`lsusb` が `2e8a:f00a`（スケッチ実行中）のままなら未リセット。`usermod -aG dialout` 後に再ログインしていないのが原因のことが多く、`id` で確認して `sg dialout -c "arduino-cli upload ..."` で叩く |
-| `'WavInfo' has not been declared` | `.ino` はビルド時に関数プロトタイプが先頭へ自動生成される。引数に使う構造体は**ファイル冒頭**で定義する |
+| `'Msg' has not been declared` など、自分で定義した構造体が見つからない | `.ino` はビルド時に関数プロトタイプが先頭へ自動生成される。引数に使う構造体は**ファイル冒頭**で定義する |
 | スキャンに何も出ない | イヤホンがペアリングモードになっていない。既に他機器と接続済みだと出てこない。スマホ側の接続を切る |
 | **接続要求は通るが無反応のまま固まる** | **`gap_ssp_set_auto_accept(true)` を呼んでいない。**6.1 参照。これが最頻出 |
 | `Connection failed, status 0x04` | Page Timeout。イヤホンの電源が入っていない、スリープ、他機器に接続中 |
@@ -1038,18 +922,12 @@ curl -H "X-Key: $KEY" --data-binary 'テストです' $URL/post   # 別の端末
 | `sd` で `no card` | カードが奥まで入っていない、または配線。`sd_test` で確かめる |
 | `sd` で `no mp3` | MP3 がない。m4a は対象外（7.6 節）。`SD_MAX_DEPTH` より深いフォルダも探さない |
 | 接続はするが音が出ない | イヤホン側の音量。`volume:` のログが出ていれば A2DP は繋がっている |
-| `warning: audio underflow` | Wi-Fi が追いついていない。素材を 22050Hz モノラルに落とす。`A2DP_BUFFER` は RAM の都合で増やせない（7.6 節） |
-| Wi-Fi に繋がらないことがある | 起動時の1回だけでは不安定。`WIFI_RETRY_MS` ごとに `loop()` から張り直している |
-| 音がブツブツ切れる | 同上。Wi-Fi と Bluetooth が CYW43439 を共有しているため。ルータとの距離も効く |
-| `http error 404` など | `AUDIO_URL` の IP が PC の LAN IP になっているか確認。`tools/serve_audio.py` が表示する URL を使う |
-| `http error -1` / `music stopped server down?` | `MUSIC_URL` の IP かポートが違う、または `serve_music.py` が止まっている。dynabook で `curl -s localhost:8000/now` を試す |
-| dynabook に繋がらない | Pico は Tailscale を使えない。dynabook が Pico と**同じ LAN** にいるか、`MUSIC_URL` が `100.x.x.x` ではなく LAN IP になっているか確認（9.2 参照） |
-| 昨日まで鳴っていたのに繋がらない | DHCP で dynabook の IP が変わった。ルータで IP 固定するか `MUSIC_URL` を書き直す |
-| `ffmpeg が見つからない` | dynabook 側に `sudo apt install --no-install-recommends ffmpeg` |
-| 曲と曲の間が長い | 次の曲の HTTP と ffmpeg の起動に数百 ms かかる。`A2DP_BUFFER` の 370ms を超えた分が無音になる |
-| LCD の曲名が化ける / 出ない | LCD1602A の文字 ROM に無い文字。サーバが `X-Track` を ASCII に潰して返しているので、それでも化けるならコントラスト調整を疑う |
-| `unsupported: 48000Hz 2ch 16bit` | 7.2 のフォーマット制約。`ffmpeg -ar 22050 -ac 1` で変換する |
-| `bad wav header` | WAV ではない（MP3 を .wav にリネームしただけ等）。`file` コマンドで確認 |
+| `warning: audio underflow` | デコードか SD の読み出しが追いついていない。曲の終わりに出る `mp3: ...` の行の `longest loop` を見る。`A2DP_BUFFER` は RAM の都合で増やせない（7.6 節） |
+| イヤホンにつなぎにいっている間、Wi-Fi・NTP・中継が失敗する | Bluetooth が相手を探している間（最大 15 秒）は、Wi-Fi と無線を取り合う。つながるか諦めれば戻る。イヤホンが無いときは System で SW4 を押さない（7.5 節） |
+| Wi-Fi に繋がらないことがある | 起動時の1回目はつながらないことが多い。`WIFI_RETRY_MS`（30 秒）ごとに `loop()` からつなぎ直している |
+| LCD の画面全体がでたらめな記号やカナになる | I2C の通信が1回化けて、LCD が 4bit の上下を取り違えている。描き直すときに合わせ直すので、長くて5秒で戻る（7.5 節）。何度も起きるなら、SDA・SCL の線を短くする、レベル変換の配線を確かめる |
+| LCD の曲名が化ける / 出ない | 曲名はファイル名をそのまま出すので、日本語など LCD1602A の文字 ROM に無い文字は化ける。英数字のファイル名にする。英数字でも化けるならコントラスト調整を疑う |
+| `unsupported: 48000Hz` | 7.2 のフォーマット制約。`ffmpeg -i in.mp3 -ar 44100 -c:a libmp3lame -b:a 192k out.mp3` で 44100Hz にする |
 | Wi-Fi に繋がらない | Pico W は **2.4GHz のみ**。5GHz 専用の SSID には繋がらない |
 | バックライトも点かない | VCC/GND の配線、`VBUS`（pin40）から 5V が来ているか確認 |
 | バックライトは点くが何も表示されない | コントラスト調整（青い半固定抵抗を回す） |
@@ -1060,9 +938,11 @@ curl -H "X-Key: $KEY" --data-binary 'テストです' $URL/post   # 別の端末
 | 書き込みが始まらない | BOOTSEL ボタンを押しながら USB を挿し直す。`RPI-RP2` ドライブが出たら手動で `.uf2` をコピー |
 | オンボード LED が光らない | Pico W/WH の LED は GP25 ではない。`LED_BUILTIN` を使う |
 | 日本語が表示できない | LCD1602A は英数字とカタカナ（独自コード）のみ。漢字・ひらがなは不可 |
-| メッセージページのカナが記号やキリル文字になる | LCD の文字 ROM が A02（欧文）。半角カナが出るのは A00（日本語）の LCD1602A だけ |
+| Receive の画面のカナが記号やキリル文字になる | LCD の文字 ROM が A02（欧文）。半角カナが出るのは A00（日本語）の LCD1602A だけ |
 | `relay: connect failed (ssl -1000 ...)` が出る、または `heap` が 15KB を切っている | TLS に使う RAM が足りない（7.6 節）。つなぐには 10KB ほど要る。SD の曲数（`SD_MAX_TRACKS`）を減らすなどして空ける |
-| `relay: connect failed` が出るが、`heap` は足りている | 時計が合っていない（`ntp failed`）、Funnel が止まっている、Let's Encrypt がルート CA を替えた（`relay_ca.h` を更新する）のどれか。PC から 10.5 節の curl を試す |
+| `relay: connect failed` が出るが、`heap` は足りている | 時計が合っていない（`ntp failed`）、Funnel が止まっている、Let's Encrypt がルート CA を替えた（`relay_ca.h` を更新する）のどれか。PC から 8.5 節の curl を試す |
 | `relay 403` | `RELAY_KEY` が dynabook の `relay.env` と違う |
-| 発言しても本文が空で届く | Developer Portal で Message Content Intent が OFF（10.3 節） |
-| PC の curl で、発言してもすぐに出ない | `--http1.0` か `-N` を付けていない。`iconv` を通していると、終わるまで溜め込まれる（10.5 節） |
+| 発言しても本文が空で届く | Developer Portal で Message Content Intent が OFF（8.3 節） |
+| espoke から送ると `send: discord 403` | Bot に「メッセージを送信」の権限が無い（8.3 節） |
+| espoke から送ると `send: relay 404` | dynabook の `discord_relay.py` が古い（`POST /stream` が無い）。8.4 節の `scp` で入れ直して再起動する |
+| PC の curl で、発言してもすぐに出ない | `--http1.0` か `-N` を付けていない。`iconv` を通していると、終わるまで溜め込まれる（8.5 節） |

@@ -73,7 +73,7 @@ SEND_TIMEOUT = 10   # Discord に送り終わるのを待つ上限 (秒)。Pico 
 FUNNEL_PORT = 8443  # tailscale funnel で公開するポート (443 / 8443 / 10000 から選べる)
 
 # 送信が詰まったまま何秒待つか。Pico は電源が落ちたり電波が切れたりすると
-# FIN を返さずに消えるので、これを入れないとスレッドが居座る (serve_music.py と同じ)
+# FIN を返さずに消えるので、これを入れないとスレッドが居座る
 STREAM_TIMEOUT = 30
 
 JST = datetime.timezone(datetime.timedelta(hours=9))

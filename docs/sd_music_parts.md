@@ -154,7 +154,7 @@ CS はどの GPIO でもよいので、ユニバーサル基板で線が交差�
 |---|---|---|
 | SD の初期化 | 済 | arduino-pico の `SD` ライブラリで、`SPI.setRX(16); SPI.setSCK(18); SPI.setTX(19);` を呼んでから `SD.begin(20)`（CS は GP20） |
 | MP3 の再生 | 済 | PC で WAV に変換せず、**MP3 のまま** Pico 上でデコードする（`BackgroundAudio` ライブラリに入っている libmad）。44.1kHz ステレオ 192kbps で CPU の約 4 割 |
-| 選曲 | 済 | `sd` で SD から連続再生。`next`・`prev`・`rand` は、最後に選んだ方（SD か Wi-Fi）に効く |
+| 選曲 | 済 | `sd` で SD から連続再生。`next`・`prev`・`rand`・`shuffle` で選ぶ（Wi-Fi から曲を流す機能は消した。音楽は SD だけ） |
 | Discord | まだ | Wi-Fi があるときだけ MQTT につなぐ。外で打ったメッセージは送信待ちとして保存し、つながったら送る。外にいた間の受信は、MQTT の永続セッション（QoS 1）で取りこぼさない |
 | 曲の同期 | まだ | 自宅の Wi-Fi につながったら、PC から新しい MP3 をダウンロードして SD に保存する |
 

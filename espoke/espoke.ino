@@ -1,5 +1,5 @@
 /*
- * espoke — Wi-Fi で受け取った音声を Bluetooth イヤホンで鳴らす
+ * espoke — microSD の MP3 を Bluetooth イヤホンで鳴らし、Discord のメッセージをやりとりする
  *
  * 対応ボード: Raspberry Pi Pico WH
  * FQBN: rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble
@@ -7,27 +7,26 @@
  *
  * 動作:
  *   1. Wi-Fi に接続し、microSD の MP3 を探して曲の一覧を作る
- *   2. Bluetooth イヤホン (A2DP sink) をスキャンして接続
+ *   2. Bluetooth イヤホン (A2DP sink) には、System の画面で Bluetooth を見ながら SW4 を押したときだけつなぐ
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
- *      "music" なら MUSIC_URL の音楽サーバから曲を取ってきて流し続ける
- *      BOOTSEL を押すと、最後に選んだ方 (起動直後は SD に曲があれば SD) で再生を始める
- *      "play" なら AUDIO_URL の通知音を1回だけ
- *   4. LCD1602A に曲名と状態を表示。GP15 のスイッチで表示ページを切り替える
- *   5. SW1〜SW4 (GP10〜13) の役目は表示中のページで変わる
- *      入力ページ: モールス信号を打ってアルファベットを入力する
- *        SW1 backspace / SW2 トン / SW3 ツー / SW4 enter (符号を文字に確定。空なら空白)
- *      メッセージページ: SW2 古いメッセージ / SW3 新しいメッセージ (SW1・SW4 は下と同じ)
- *      それ以外: 再生の操作 (シリアルの pause / prev / next / rand と同じ)
- *        SW1 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 / SW4 ランダムな曲
+ *      BOOTSEL を押しても再生を始める
+ *   4. LCD1602A の画面はホームから選ぶ。ホームで SW2 / SW3 で Music / Discord / System を選び、SW4 で開く。
+ *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
+ *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
+ *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
+ *      Music: 再生の操作 (シリアルの pause / prev / next / shuffle と同じ)
+ *        SW1 長押し 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 (シャッフル中はランダム) / SW4 シャッフルの入り切り
+ *      Receive: SW2 古いメッセージ / SW3 新しいメッセージ
+ *      Send: モールス信号を打ってアルファベットを入力する
+ *        SW1 backspace (長押しで戻る) / SW2 トン / SW3 ツー / SW4 enter (符号を文字に確定。空なら空白、空白のあとなら送信)
+ *      System: SW2 / SW3 で WiFi / Bluetooth / 稼働時間と空きヒープ を切り替える。Bluetooth で SW4 を押すとイヤホンにつなぐ
  *   6. RELAY_HOST の中継 (tools/discord_relay.py) に HTTPS でつなぎ、Discord のメッセージを受け取る。
- *      届いたらメッセージページに切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
- *      変換して送ってくるので、そのまま LCD に書ける
+ *      届いたら Receive の画面に切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
+ *      変換して送ってくるので、そのまま LCD に書ける。Send の画面で打った文は、同じ中継を通して Discord に送る
  *
  * 音声フォーマット:
- *   microSD: MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
- *   Wi-Fi:   16bit PCM の WAV。tools/serve_music.py が mp3 や m4a を ffmpeg で
- *            変換しながら流してくれるので、Pico 側は WAV を読むだけで済む。
- *   どちらもモノラル/ステレオ可。サンプリングレートは 44100 の整数分の1 (44100 / 22050 / 11025)
+ *   MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
+ *   モノラル/ステレオ可。サンプリングレートは 44100 の整数分の1 (44100 / 22050 / 11025)
  *   のみ対応し、整数倍のサンプル&ホールドで 44100 ステレオへ引き伸ばして A2DP に流す。
  *   48000 など割り切れないレートは非対応 (リサンプラを積む余裕がないため)。
  *
@@ -36,7 +35,6 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <HTTPClient.h>
 #include <time.h>
 #include <StackThunk.h>
 #include <BluetoothAudio.h>
@@ -50,7 +48,7 @@
 // libmad を読み込んでいるこのヘッダ経由で取り込む (再生クラス自体は使わない)
 #include <BackgroundAudioMP3.h>
 
-#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / AUDIO_URL / MUSIC_URL / RELAY_HOST / RELAY_KEY
+#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / RELAY_HOST / RELAY_KEY
 #include "relay_ca.h"         // RELAY_CA: 中継の証明書を確かめるルート CA
 
 // 古い arduino_secrets.h でもビルドできるように。RELAY_HOST が空なら Discord は受け取らない
@@ -86,7 +84,7 @@ static const int     PIN_SCL   = 1;   // GP1 (物理2番ピン)
 static const uint8_t LCD_COLS  = 16;
 static const uint8_t LCD_ROWS  = 2;
 static const uint8_t LCD_ADDR_DEFAULT = 0x27;
-// 再生中は通常画面の2行目を、帯域ごとの音の大きさの縦棒 (16 本、8 段) にする。
+// 再生中は Music の画面の2行目を、帯域ごとの音の大きさの縦棒 (16 本、8 段) にする。
 // 音量を掛ける前の音で見るので、vol を変えても棒の高さは変わらない
 static const size_t        FFT_N       = 512;    // 1 回に見るフレーム数。44100Hz で 11.6ms、1 ビン 86Hz
 static const uint32_t      BAR_HOP     = 1024;   // このフレーム数ごとに分析する (23ms)
@@ -94,12 +92,13 @@ static const unsigned long BAR_MS      = 80;     // 棒を描き直す間隔
 static const float         BAR_TOP_DB  = 68.0f;  // 8 段 (いっぱい) になる大きさ。最大振幅の正弦波1本で約 78dB
 static const float         BAR_STEP_DB = 4.5f;   // 1 段あたりの差。この3つは手元の曲で棒の平均が 3〜5 段になるように合わせた
 static const float         BAR_TILT_DB = 0.5f;   // 1 本右へ行くごとに足す。曲は高い帯域ほど弱いので、右の棒も動くように
-static const int     PIN_BUTTON = 15;  // GP15 (物理20番ピン)。もう片側は GND へ
-// SW1〜SW4。コメントは 入力ページでの役目 / それ以外のページでの役目
-static const int     PIN_BACK   = 10;  // SW1 GP10 (物理14番ピン) backspace / 再生・一時停止
+static const int     PIN_BUTTON = 15;  // GP15 (物理20番ピン)。もう片側は GND へ。SW1 と同じく前の画面に戻る
+// SW1〜SW4。コメントは Send (モールス入力) の画面での役目 / Music の画面での役目。
+// ホームなど項目を選ぶ画面では SW1 が戻る、SW2 が ←、SW3 が →、SW4 が開く
+static const int     PIN_BACK   = 10;  // SW1 GP10 (物理14番ピン) backspace、長押しで戻る / 戻る、長押しで再生・一時停止
 static const int     PIN_DOT    = 11;  // SW2 GP11 (物理15番ピン) トン / 前の曲
 static const int     PIN_DASH   = 12;  // SW3 GP12 (物理16番ピン) ツー / 次の曲
-static const int     PIN_ENTER  = 13;  // SW4 GP13 (物理17番ピン) enter / ランダムな曲
+static const int     PIN_ENTER  = 13;  // SW4 GP13 (物理17番ピン) enter / シャッフルの入り切り
 
 // microSD (CK-40)。配線は docs/sd_music_parts.md の 3 章
 static const int     PIN_SD_MISO = 16;  // GP16 (物理21番ピン) ⑦ DAT0
@@ -117,22 +116,14 @@ static const int           MSG_SCROLL_HOLD = 5;    // 本文の頭と末尾で�
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
 // 引数や戻り値に使う型はここで定義しておく必要がある
-struct WavInfo {
-  uint32_t sampleRate;
-  uint16_t channels;
-  uint16_t bits;
-  uint32_t dataBytes;  // 0 なら長さ不明 (最後まで読む)
-};
-
 enum PlayResult {
   PLAY_NONE,   // 中断要求なし (再生ループの中だけで使う)
   PLAY_DONE,   // 最後まで鳴らした
   PLAY_STOP,   // stop で止めた
   PLAY_SKIP,   // next / prev / rand / BOOTSEL で打ち切った
-  PLAY_ERROR,  // Wi-Fi・HTTP・SD のどれかで失敗した
+  PLAY_ERROR,  // SD の読み込みかデコードで失敗した
 };
 
-enum Source { SRC_SD, SRC_WIFI };           // 連続再生で曲を取ってくる先
 enum Step { STEP_NEXT, STEP_PREV, STEP_RAND };  // 次にどの曲へ進むか
 
 // MP3 デコーダの作業領域 (約 29KB)
@@ -176,12 +167,7 @@ static uint8_t  barShown[LCD_COLS];         // LCD に出ている段。0xFF は
 static unsigned long lastBarDraw = 0;
 static int16_t  fftRe[FFT_N], fftIm[FFT_N];
 static int16_t  fftCos[FFT_N / 2], fftSin[FFT_N / 2];  // ひねり係数 (Q15)
-static bool     playing = false;            // playSd / playUrl の再生ループの中か
-
-// 1回の read で 2KB 前後まとめて取る。小刻みに読むと lwIP の往復が増えて
-// スループットが落ち、Bluetooth と帯域を取り合ったときに underflow しやすい
-static const size_t IN_FRAMES = 1024;
-static int16_t inBuf[IN_FRAMES * 2];       // 最大ステレオ
+static bool     playing = false;            // playSd の再生ループの中か
 
 // A2DPSource::write() (arduino-pico 6.1.0) は、リングバッファの終わりをまたぐ書き込みで
 // 後半にデータの先頭部分をもう一度書いてしまう (2回目の memcpy が buffer から読み直している)。
@@ -193,14 +179,16 @@ static_assert(A2DP_BUFFER % A2DP_CHUNK == 0, "A2DP_BUFFER must be a multiple of 
 static int16_t pcmChunk[A2DP_CHUNK];
 static size_t  pcmChunkLen = 0;            // pcmChunk に溜まっているサンプル数
 
-static unsigned long lastScan = 0;
-static const unsigned long RETRY_MS = 15000;           // 未接続時に再試行する間隔
+// イヤホンには自分からはつながない。見つからない相手を探し続けると無線を取り合い、Wi-Fi がほとんど
+// 通らなくなる (NTP や中継の TLS が失敗する)。System の Bluetooth で SW4 を押したときだけ1回つなぎにいく
+static bool   btConnecting = false;        // SW4 か "bt" で頼まれた。loop() がつなぎにいき、済んだら false に戻す
+static String btNote = "";                 // 最後につなぎにいって失敗した理由 ("BT timeout" など)。System に出す
 static const unsigned long CONNECT_TIMEOUT_MS = 15000;  // ストリーム開始を待つ上限
-static const unsigned long WIFI_TIMEOUT_MS = 30000;    // Wi-Fi 接続を待つ上限
-static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi 再接続を試みる間隔
-static const unsigned long HTTP_TIMEOUT_MS = 15000;    // サーバの応答を待つ上限
+static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi につながらないとき、つなぎ直す間隔
+static const unsigned long HTTP_TIMEOUT_MS = 15000;    // 中継の応答を待つ上限
 static const unsigned long RELAY_RETRY_MS = 30000;     // 中継へのつなぎ直しを試みる間隔。失敗が続くと倍ずつ延ばす
 static const int           RELAY_BACKOFF_MAX = 4;      // 延ばすのは 2^4 倍 (8 分) まで
+static const unsigned long RELAY_NTP_RETRY_MS = 10000; // 時刻合わせに失敗したときは、これだけ待ってすぐやり直す
 static const unsigned long RELAY_IDLE_MS = 90000;      // これだけ何も届かなければ切れたとみなす (中継は 30 秒ごとに空行を送る)
 static const size_t        RELAY_LINE_MAX = 300;       // 1行の上限。中継は本文を 200 バイトに切って送ってくる
 // TLS の受信バッファ。既定の 16KB では Wi-Fi につないだ後の空きヒープ (30KB ほど) にほとんど残らない。
@@ -214,15 +202,16 @@ static const int           RELAY_TLS_RX = 4096;
 static const size_t        RELAY_TLS_STACK = 8192;
 static unsigned long lastWiFiTry = 0;
 static bool   wifiEnabled = true;          // "wifi off" で false にすると、つなぎ直しもしない
+static bool   wifiUp = false;              // 前の loop() で Wi-Fi につながっていたか。つながったときに知らせる
 static int    volume = VOLUME_DEFAULT;     // 音量の目盛り。変えるときは applyVolume() を通す
 static int32_t volumeGain = 0;             // writePcm() で振幅に掛ける倍率。65536 で等倍
 
 // 連続再生の状態
 static bool   autoPlay = false;            // 曲を続けて流しているか
 static bool   paused = false;              // 一時停止中か。再生ループは無音を流しながら待つ
-static String progressText = "";           // 通常画面の2行目に出している再生の進み具合
-static Source source = SRC_WIFI;           // 起動時に SD に曲があれば SRC_SD にする
+static String progressText = "";           // Music の画面の2行目に出している再生の進み具合
 static Step   nextStep = STEP_NEXT;        // 次の曲の選び方
+static bool   shuffle = false;             // シャッフル中か。「次の曲」をランダムな曲にする (stepToTake())
 static int    playErrors = 0;              // 連続で失敗した回数
 static unsigned long lastBootsel = 0;      // BOOTSEL を最後に見た時刻
 
@@ -235,34 +224,59 @@ static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
-// LCD の表示ページ。0 は曲名や状態を出す通常画面で、スイッチを押すたびに次へ進む
-enum Page { PAGE_MAIN, PAGE_MSG, PAGE_INPUT, PAGE_WIFI, PAGE_BT, PAGE_SYSTEM, PAGE_COUNT };
-static int    page = PAGE_MAIN;
-static int    pageBeforeMsg = -1;          // 着信でメッセージページに切り替える前のページ。スイッチでここへ戻る
-static String mainLines[2];                // 通常画面の内容。他のページを見ている間も更新しておく
+// LCD の画面。ホームで Music / Discord / System を選んで開き、Discord ではさらに Receive (受信) か Send (送信) を選ぶ。
+// SW1 (か GP15) で前の画面に戻る
+enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM };
+static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system"};  // シリアルに出す名前
+static int    page = PAGE_MUSIC;           // 起動中は Music の画面に状態を出し、setup() の最後でホームにする
+static int    pageBeforeMsg = -1;          // 着信で Receive の画面に切り替える前の画面。戻るときはここへ
+static String mainLines[2];                // Music の画面の内容。他の画面を見ている間も更新しておく
 static unsigned long lastPageDraw = 0;
+// 画面を描き直す間隔。中身が刻々と変わる画面は 1 秒ごと、それ以外も、LCD が化けたときに戻すためにこの間隔で
+static const unsigned long PAGE_REDRAW_MS = 1000;
+static const unsigned long PAGE_REFRESH_MS = 5000;
+
+// ホームと Discord の画面で選ぶ項目。SW2 / SW3 で左右に動かし、SW4 で開く
+struct MenuItem {
+  const char *title;
+  int         page;
+};
+static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Discord", PAGE_DISCORD}, {"System", PAGE_SYSTEM}};
+static const MenuItem DISCORD_MENU[] = {{"Receive", PAGE_MSG}, {"Send", PAGE_INPUT}};
+static const int HOME_COUNT = sizeof(HOME_MENU) / sizeof(HOME_MENU[0]);
+static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
+static int    homeSel = 0;                 // ホームで選んでいる項目
+static int    discordSel = 0;              // Discord の画面で選んでいる項目
+// System の画面で見るもの。SW2 / SW3 で切り替える
+enum SysView { SYS_WIFI, SYS_BT, SYS_INFO, SYS_COUNT };
+static int    sysView = SYS_WIFI;
 
 static const unsigned long DEBOUNCE_MS = 30;
+static const unsigned long LONG_PRESS_MS = 600;  // SW1 をこれだけ押し続けると長押し (Music で再生・一時停止、Send で戻る)
 static bool   buttonStable = HIGH;         // チャタリングを除いた状態 (INPUT_PULLUP なので離すと HIGH)
 static bool   buttonRaw = HIGH;
 static unsigned long buttonChanged = 0;
 
-// SW1〜SW4。入力ページではモールス入力、それ以外のページでは再生の操作に使う
+// SW1〜SW4。役目は開いている画面で変わる (onKey())
 struct KeyState {
   int           pin;
   bool          raw;
   bool          stable;
   unsigned long changedAt;
+  bool          longDone;  // KEY_HOLD を長押しした。離したときの役目はしない
 };
 enum { KEY_BACK, KEY_DOT, KEY_DASH, KEY_ENTER, KEY_COUNT };
+// 長押しのあるスイッチ。基板のスイッチは SW1〜SW4 の4つだけなので、長押しで役目を足す。
+// 短く押したときの役目は、長押しと区別するため離したときにする (トン・ツーの SW2・SW3 はすぐ反応させたいので付けない)
+static const int KEY_HOLD = KEY_BACK;
 static KeyState keys[KEY_COUNT] = {
-  {PIN_BACK,  HIGH, HIGH, 0},
-  {PIN_DOT,   HIGH, HIGH, 0},
-  {PIN_DASH,  HIGH, HIGH, 0},
-  {PIN_ENTER, HIGH, HIGH, 0},
+  {PIN_BACK,  HIGH, HIGH, 0, false},
+  {PIN_DOT,   HIGH, HIGH, 0, false},
+  {PIN_DASH,  HIGH, HIGH, 0, false},
+  {PIN_ENTER, HIGH, HIGH, 0, false},
 };
-// 入力ページ以外で SW1〜SW4 を押したときに出すコマンド。シリアルから打ったのと同じに扱う
-static const char *const PLAY_KEY_COMMANDS[KEY_COUNT] = {"pause", "prev", "next", "rand"};
+// Music の画面で SW1〜SW4 を押したときに出すコマンド (SW1 は長押し)。シリアルから打ったのと同じに扱う
+static const char *const PLAY_KEY_COMMANDS[KEY_COUNT] = {"pause", "prev", "next", "shuffle"};
 static String keyCommand = "";             // スイッチで出して、まだ処理していないコマンド
 
 struct Morse {
@@ -283,27 +297,27 @@ static const size_t MAX_CODE = 6;          // 1文字の符号は最長5つ (数
 static const size_t MAX_TEXT = 64;
 static String morseCode = "";              // 入力中の符号 ("-" と ".")
 static String morseText = "";              // 確定した文章
+static String morseNote = "";              // 送った結果。Send の画面の2行目に、符号を打ち始めるまで出す
 
 // Discord の中継 (tools/discord_relay.py) から受け取ったメッセージ
 static BearSSL::WiFiClientSecure *relay = nullptr;  // 最初につなぐときに作る (TLS のスタック 6.4KB を起動時から取らない)
 static BearSSL::X509List *relayCA = nullptr;
 static bool   relayOpen = false;           // メッセージの流れを受け取っている最中か
 static bool   relayQuiet = false;          // 起動して最初の同期中。前からあった分なので着信として知らせない
-static String relayStatus = "connecting";  // メッセージがまだ無いときにメッセージページに出す
+static String relayStatus = "connecting";  // メッセージがまだ無いときに Receive の画面に出す
 static unsigned long lastRelayTry = 0;     // 最後につなぎにいった時刻
+static unsigned long relayRetryMs = 0;     // lastRelayTry からこれだけたったら、次につなぎにいく
 static int    relayFailures = 0;           // 続けてつなげなかった回数
 static unsigned long lastRelayData = 0;    // 最後に何か (空行を含む) 届いた時刻
 static String relayLine = "";              // 受信途中の1行
 static String relayLastId = "";            // 最後に受け取ったメッセージの ID
+static String relayOutbox = "";            // Discord に送る文。次に中継につなぐとき POST で一緒に送る
 static Msg    msgs[MSG_MAX];               // 古い順に msgCount 件
 static size_t msgCount = 0;
-static int    msgView = 0;                 // メッセージページで見ているもの。0 が最新、1 がその1つ前
+static int    msgView = 0;                 // Receive の画面で見ているもの。0 が最新、1 がその1つ前
 static size_t msgScroll = 0;               // 本文を何文字流したか
 static int    msgHold = 0;                 // 本文の端で止まっている残り回数
 static unsigned long lastMsgScroll = 0;
-
-// 曲名はサーバが X-Track ヘッダで返してくる。collectHeaders() で拾う指定をしておく
-static const char *HTTP_HEADERS[] = { "X-Track" };
 
 // ---------------- LCD ----------------
 
@@ -320,11 +334,19 @@ static bool barsOn() {
   return playing && !paused;
 }
 
-// 通常画面の1行を書き換える。他のページを表示中なら覚えておくだけ。
+// Music の画面の1行を書き換える。他の画面を表示中なら覚えておくだけ。
 // 2行目に棒を出している間は、文字は覚えておくだけにして、棒が消えたときに出す
 static void printLine(uint8_t row, const String &text) {
   mainLines[row] = text;
-  if (page == PAGE_MAIN && !(row == 1 && barsOn())) drawRow(row, text);
+  if (page == PAGE_MUSIC && !(row == 1 && barsOn())) drawRow(row, row == 0 ? musicTop() : text);
+}
+
+// Music の画面の1行目。シャッフル中は右端に印 (自作文字 7。⇄ の形) を出す
+static String musicTop() {
+  if (!shuffle) return mainLines[0];
+  String s = mainLines[0].substring(0, LCD_COLS - 1);
+  while (s.length() < LCD_COLS - 1) s += ' ';
+  return s + '\x07';
 }
 
 static void status(const String &a, const String &b) {
@@ -333,7 +355,7 @@ static void status(const String &a, const String &b) {
   Serial.printf("[%s] %s\n", a.c_str(), b.c_str());
 }
 
-// 再生の進み具合を通常画面の2行目に出す。一時停止中は後ろに "pause" を付ける
+// 再生の進み具合を Music の画面の2行目に出す。一時停止中は後ろに "pause" を付ける
 static void showProgress(const String &text) {
   progressText = text;
   printLine(1, paused ? text + " pause" : text);
@@ -367,6 +389,9 @@ static void setupLCD() {
     for (uint8_t r = 0; r < 8; r++) rows[r] = (r >= 8 - h) ? 0x1F : 0x00;
     lcd->createChar(h - 1, rows);
   }
+  // シャッフルの印 (⇄)。自作文字 7
+  uint8_t mark[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
+  lcd->createChar(7, mark);
 }
 
 // ---------------- 帯域の棒 ----------------
@@ -498,11 +523,35 @@ static void lcdSendRaw(uint8_t b, bool data) {
   }
 }
 
+// LCD の 4bit の区切りを合わせ直す。I2C の通信が1回化けると、LCD は 4bit の上下を取り違えたままになり、
+// 画面全体がでたらめになって戻らない。HD44780 の初期化と同じく 0x3 を3回、0x2 を1回送ると、8bit / 4bit の
+// どちらで、どこまで受け取っていても 4bit の頭に揃う。表示の中身は消えないので、このあと描き直す (5ms ほど)。
+// LiquidCrystal_I2C の init() は 1 秒待つので使わない
+static void lcdResync() {
+  if (!lcd) return;
+  bool first = true;
+  for (uint8_t nibble : {0x30, 0x30, 0x30, 0x20}) {
+    Wire.beginTransmission(lcdAddr);
+    Wire.write(0x08 | nibble | 0x04);
+    Wire.write(0x08 | nibble);
+    Wire.endTransmission();
+    // 1回目で、ずれて組み合わさった命令 (時間のかかる home なども) が終わるのを待つ
+    delayMicroseconds(first ? 4500 : 150);
+    first = false;
+  }
+  // 電源が揺れて LCD がリセットされていたときのために、表示の設定もし直す (LiquidCrystal_I2C の init() と同じ値)
+  Wire.beginTransmission(lcdAddr);
+  lcdSendRaw(0x28, false);  // 4bit、2 行、5x8 ドット
+  lcdSendRaw(0x0C, false);  // 表示 ON、カーソルなし
+  lcdSendRaw(0x06, false);  // 書くたびに右へ進む
+  Wire.endTransmission();
+}
+
 // 今イヤホンへ送り出している所の棒を 2行目に描く。LiquidCrystal_I2C は 4bit ごとに I2C の通信を
 // 3 回するので 16 文字で 20ms ほど止まる。変わった所だけを1回の通信にまとめて送る (100kHz で最大 8ms 程度)
 static void drawBars() {
   lastBarDraw = millis();
-  if (!lcd || page != PAGE_MAIN) return;
+  if (!lcd || page != PAGE_MUSIC) return;
 
   // A2DP のバッファと pcmChunk に残っている分だけ、今鳴っているのは書いた所より前
   const uint32_t queued = (A2DP_BUFFER - 1) - a2dp.availableForWrite() / 2 + pcmChunkLen;
@@ -543,12 +592,12 @@ static char decodeMorse(const String &code) {
   return 0;
 }
 
-// メッセージページで見ている1件。msgCount が 0 のときは呼ばない
+// Receive の画面で見ている1件。msgCount が 0 のときは呼ばない
 static const Msg &viewedMsg() {
   return msgs[msgCount - 1 - msgView];
 }
 
-// メッセージページの2行目に、本文を流した位置から書く
+// Receive の画面の2行目に、本文を流した位置から書く
 static void drawMsgText() {
   drawRow(1, viewedMsg().text.substring(msgScroll));
 }
@@ -574,10 +623,49 @@ static void scrollMsg() {
   drawMsgText();  // 2行目だけ書き直す (16 文字で 20ms ほど)
 }
 
-// 今のページを描き直す。PAGE_MAIN 以外は中身が刻々と変わるので定期的に呼ぶ
+// 選んでいる項目の名前を、左右の矢印で挟んで真ん中に出す。A00 の ROM では 0x7F が ←、0x7E が →
+static String menuTitle(const char *title) {
+  String s = "\x7f";
+  for (int i = (LCD_COLS - 2 - (int)strlen(title)) / 2; i > 0; i--) s += ' ';
+  s += title;
+  while (s.length() < LCD_COLS - 1) s += ' ';
+  return s + '\x7e';
+}
+
+// ホームと Discord の画面の2行目に、選んでいる項目の今の様子を出す
+static String pageSummary(int p) {
+  switch (p) {
+    case PAGE_MUSIC:
+      return mainLines[0];  // 曲名か状態
+    case PAGE_DISCORD:
+    case PAGE_MSG:
+      // 最新の発言者と時刻。まだ無ければ中継とのつながり具合
+      if (!msgCount) return relayStatus;
+      return msgs[msgCount - 1].author + " " + msgs[msgCount - 1].time;
+    case PAGE_INPUT:
+      // 打ちかけの文 (収まらなければ末尾側)。無ければ送った結果
+      if (morseText.length() > LCD_COLS) return morseText.substring(morseText.length() - LCD_COLS);
+      if (morseText.length()) return morseText;
+      return morseNote.length() ? morseNote : String("morse");
+    case PAGE_SYSTEM:
+      return String("WiFi ") + (WiFi.status() == WL_CONNECTED ? "ok" : "--") +
+             "  BT " + (a2dp.connected() ? "ok" : "--");
+  }
+  return "";
+}
+
+// 今の画面を描き直す。LCD の区切りも合わせ直すので、化けていても元に戻る。pollButton() が定期的に呼ぶ
 static void drawPage() {
   lastPageDraw = millis();
+  lcdResync();
   switch (page) {
+    case PAGE_HOME:
+    case PAGE_DISCORD: {
+      const MenuItem &item = (page == PAGE_HOME) ? HOME_MENU[homeSel] : DISCORD_MENU[discordSel];
+      drawRow(0, menuTitle(item.title));
+      drawRow(1, pageSummary(item.page));
+      break;
+    }
     case PAGE_MSG:
       if (msgCount == 0) {
         drawRow(0, "MSG --");
@@ -591,34 +679,13 @@ static void drawPage() {
         drawMsgText();
       }
       break;
-    case PAGE_WIFI:
-      if (WiFi.status() == WL_CONNECTED) {
-        drawRow(0, "WiFi " + String(WiFi.RSSI()) + "dBm");
-        drawRow(1, WiFi.localIP().toString());
-      } else {
-        drawRow(0, "WiFi --");
-        drawRow(1, WIFI_SSID);
-      }
-      break;
-    case PAGE_BT:
-      if (a2dp.connected()) {
-        // "aa:bb:cc:dd:ee:ff" は17文字で1行に収まらないのでコロンを抜く
-        String addr = bd_addr_to_str(a2dp.getSinkAddress());
-        addr.replace(":", "");
-        drawRow(0, "BT connected");
-        drawRow(1, addr);
-      } else {
-        drawRow(0, "BT --");
-        drawRow(1, BT_TARGET_ADDR[0] ? BT_TARGET_ADDR : "scan");
-      }
-      break;
     case PAGE_INPUT: {
       // 1行目は末尾にカーソル代わりの '_' を付け、収まらなければ末尾側を見せる
       String top = morseText + "_";
       if (top.length() > LCD_COLS) top = top.substring(top.length() - LCD_COLS);
       drawRow(0, top);
-      // 2行目は左に符号、右端に確定したときの文字
-      String bottom = morseCode;
+      // 2行目は左に符号、右端に確定したときの文字。符号が無いときは送った結果
+      String bottom = morseCode.length() ? morseCode : morseNote;
       if (morseCode.length()) {
         char ch = decodeMorse(morseCode);
         while (bottom.length() < LCD_COLS - 3) bottom += ' ';
@@ -628,16 +695,32 @@ static void drawPage() {
       drawRow(1, bottom);
       break;
     }
-    case PAGE_SYSTEM: {
-      unsigned long sec = millis() / 1000;
-      char up[17];
-      snprintf(up, sizeof(up), "up %luh%02lum%02lus", sec / 3600, sec / 60 % 60, sec % 60);
-      drawRow(0, up);
-      drawRow(1, "heap " + String(rp2040.getFreeHeap() / 1024) + "KB");
+    case PAGE_SYSTEM:
+      if (sysView == SYS_WIFI && WiFi.status() == WL_CONNECTED) {
+        drawRow(0, "WiFi " + String(WiFi.RSSI()) + "dBm");
+        drawRow(1, WiFi.localIP().toString());
+      } else if (sysView == SYS_WIFI) {
+        drawRow(0, "WiFi --");
+        drawRow(1, WIFI_SSID);
+      } else if (sysView == SYS_BT && a2dp.connected()) {
+        // "aa:bb:cc:dd:ee:ff" は17文字で1行に収まらないのでコロンを抜く
+        String addr = bd_addr_to_str(a2dp.getSinkAddress());
+        addr.replace(":", "");
+        drawRow(0, "BT connected");
+        drawRow(1, addr);
+      } else if (sysView == SYS_BT) {
+        drawRow(0, "BT --");
+        drawRow(1, btConnecting ? String("connecting...") : btNote.length() ? btNote : String("SW4: connect"));
+      } else {
+        unsigned long sec = millis() / 1000;
+        char up[17];
+        snprintf(up, sizeof(up), "up %luh%02lum%02lus", sec / 3600, sec / 60 % 60, sec % 60);
+        drawRow(0, up);
+        drawRow(1, "heap " + String(rp2040.getFreeHeap() / 1024) + "KB");
+      }
       break;
-    }
-    default:
-      drawRow(0, mainLines[0]);
+    default:  // PAGE_MUSIC
+      drawRow(0, musicTop());
       if (barsOn()) {
         invalidateBars();
         drawBars();
@@ -648,22 +731,124 @@ static void drawPage() {
   }
 }
 
-static void onKey(int id) {
-  // メッセージページでは、曲の 前 / 次 の代わりにメッセージの 古い方 / 新しい方 を見る
-  if (page == PAGE_MSG && (id == KEY_DOT || id == KEY_DASH)) {
-    if (id == KEY_DOT && msgView + 1 < (int)msgCount) msgView++;
-    if (id == KEY_DASH && msgView > 0) msgView--;
+// 入力した文を Discord に送る。TLS の握手で数秒止まるので、ここでは頼むだけにして loop() か pollAbort() が送る
+static void requestSend() {
+  if (!RELAY_HOST[0]) {
+    morseNote = "no RELAY_HOST";
+  } else if (WiFi.status() != WL_CONNECTED) {
+    morseNote = "send: no wifi";
+  } else {
+    relayOutbox = morseText;
+    relayOutbox.trim();
+    morseNote = "sending...";
+  }
+}
+
+// 送った結果を Send の画面に出す。送れたら入力した文を消す。送れなければ残すので、enter でもう一度送れる。
+// 送っていなければ (relayOutbox が空なら) 何もしない
+static void sendDone(const String &result) {
+  if (!relayOutbox.length()) return;
+  Serial.printf("send: %s\n", result.c_str());
+  relayOutbox = "";
+  if (result == "ok") {
+    morseText = "";
+    morseNote = "sent";
+  } else {
+    morseNote = "send: " + result;
+  }
+  if (page == PAGE_INPUT) drawPage();
+}
+
+// 画面を開く。Receive の画面は最新のメッセージを頭から出す
+static void openPage(int p) {
+  page = p;
+  pageBeforeMsg = -1;
+  if (p == PAGE_MSG) {
+    msgView = 0;
     resetMsgScroll();
-    drawPage();
+  }
+  Serial.printf("page %s\n", PAGE_NAMES[p]);
+  drawPage();
+}
+
+// 前 (1つ上) の画面に戻る (SW1 か GP15)。着信で切り替わった Receive の画面からは、元の画面に戻る
+static void goBack() {
+  if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
+  else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
+  else if (page != PAGE_HOME) openPage(PAGE_HOME);
+}
+
+// SW2 で1つ左 (前)、SW3 で1つ右 (次) へ。端まで行くと反対の端に回る
+static int stepSel(int sel, int n, int id) {
+  return (sel + (id == KEY_DASH ? 1 : n - 1)) % n;
+}
+
+static void onKey(int id) {
+  if (page == PAGE_INPUT) {
+    onMorseKey(id);
+    return;
+  }
+  // SW1 はどの画面でも前の画面に戻る (Send だけは backspace で、戻るのは長押し)
+  if (id == KEY_BACK) {
+    goBack();
     return;
   }
 
-  if (page != PAGE_INPUT) {
-    keyCommand = PLAY_KEY_COMMANDS[id];
+  switch (page) {
+    case PAGE_HOME:
+    case PAGE_DISCORD: {
+      // SW2 / SW3 で項目を選び、SW4 で開く
+      bool home = page == PAGE_HOME;
+      int &sel = home ? homeSel : discordSel;
+      if (id == KEY_DOT || id == KEY_DASH) {
+        sel = stepSel(sel, home ? HOME_COUNT : DISCORD_COUNT, id);
+        drawPage();
+        return;
+      }
+      if (id == KEY_ENTER) openPage(home ? HOME_MENU[sel].page : DISCORD_MENU[sel].page);
+      break;
+    }
+    case PAGE_MUSIC:
+      // SW2 前の曲 / SW3 次の曲 / SW4 シャッフルの入り切り
+      keyCommand = PLAY_KEY_COMMANDS[id];
+      Serial.printf("key: %s\n", keyCommand.c_str());
+      break;
+    case PAGE_MSG:
+      // 曲の 前 / 次 の代わりに、メッセージの 古い方 / 新しい方 を見る
+      if (id == KEY_DOT || id == KEY_DASH) {
+        if (id == KEY_DOT && msgView + 1 < (int)msgCount) msgView++;
+        if (id == KEY_DASH && msgView > 0) msgView--;
+        resetMsgScroll();
+        drawPage();
+      }
+      break;
+    case PAGE_SYSTEM:
+      if (id == KEY_DOT || id == KEY_DASH) {
+        sysView = stepSel(sysView, SYS_COUNT, id);
+        drawPage();
+      }
+      // Bluetooth を見ているときの SW4 でイヤホンにつなぐ。数秒〜15 秒止まるので、ここでは頼むだけにして loop() がつなぐ
+      if (id == KEY_ENTER && sysView == SYS_BT && !a2dp.connected()) {
+        btConnecting = true;
+        drawPage();
+      }
+      break;
+  }
+}
+
+// SW1 の長押し。Music では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る
+static void onHold() {
+  if (page == PAGE_MUSIC) {
+    keyCommand = PLAY_KEY_COMMANDS[KEY_BACK];
     Serial.printf("key: %s\n", keyCommand.c_str());
-    return;
+  } else {
+    goBack();
   }
+}
 
+// Send の画面のスイッチ。モールスで文を打ち、enter で Discord に送る
+static void onMorseKey(int id) {
+  morseNote = "";
   switch (id) {
     case KEY_DASH:
     case KEY_DOT:
@@ -682,7 +867,10 @@ static void onKey(int id) {
         if (ch && morseText.length() < MAX_TEXT) morseText += ch;
         if (!ch) Serial.printf("unknown code: %s\n", morseCode.c_str());
         morseCode = "";
-      } else if (morseText.length() && morseText.length() < MAX_TEXT) {
+      } else if (morseText.endsWith(" ") || morseText.length() >= MAX_TEXT) {
+        // 空の enter を2回続けると (1回目で空白が入る) 送る。いっぱいで空白が入らないときは1回で送る
+        requestSend();
+      } else if (morseText.length()) {
         morseText += ' ';
       }
       break;
@@ -691,7 +879,7 @@ static void onKey(int id) {
   drawPage();
 }
 
-// スイッチを見て、押されたらページを送る。再生中も呼ばれるので待たずに返す
+// スイッチを見て、押されたらそれぞれの役目をする。再生中も呼ばれるので待たずに返す
 static void pollButton() {
   for (int i = 0; i < KEY_COUNT; i++) {
     KeyState &k = keys[i];
@@ -701,7 +889,18 @@ static void pollButton() {
       k.changedAt = millis();
     } else if (raw != k.stable && millis() - k.changedAt >= DEBOUNCE_MS) {
       k.stable = raw;
-      if (raw == LOW) onKey(i);
+      if (i == KEY_HOLD) {
+        // 長押しと区別するため、短く押したときの役目は離したときにする
+        if (raw == LOW) k.longDone = false;
+        else if (!k.longDone) onKey(i);
+      } else if (raw == LOW) {
+        onKey(i);
+      }
+    }
+    // 長押しは離すのを待たずに動く。押している間に切り替わるので、手応えがある
+    if (i == KEY_HOLD && k.stable == LOW && !k.longDone && millis() - k.changedAt >= LONG_PRESS_MS) {
+      k.longDone = true;
+      onHold();
     }
   }
 
@@ -711,21 +910,13 @@ static void pollButton() {
     buttonChanged = millis();
   } else if (raw != buttonStable && millis() - buttonChanged >= DEBOUNCE_MS) {
     buttonStable = raw;
-    if (buttonStable == LOW) {
-      // 着信で切り替わったメッセージページからは、元のページに戻る
-      page = (page == PAGE_MSG && pageBeforeMsg >= 0) ? pageBeforeMsg : (page + 1) % PAGE_COUNT;
-      pageBeforeMsg = -1;
-      if (page == PAGE_MSG) resetMsgScroll();
-      Serial.printf("page %d\n", page);
-      drawPage();
-    }
+    if (buttonStable == LOW) goBack();
   }
 
-  if (page == PAGE_MSG && msgCount) {
-    if (millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
-  } else if (page != PAGE_MAIN && page != PAGE_INPUT && millis() - lastPageDraw >= 1000) {
-    drawPage();
-  }
+  if (page == PAGE_MSG && msgCount && millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
+  // Music (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文は、描き直す間隔を空ける
+  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && !(page == PAGE_MSG && msgCount);
+  if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
 }
 
 // ---------------- シリアル ----------------
@@ -852,82 +1043,6 @@ static bool scanAndConnect() {
   return connectTo(found[pick].address(), found[pick].name());
 }
 
-// ---------------- WAV ----------------
-
-// stream から len バイト読み切る。読めた分を返す
-static size_t readExact(WiFiClient *s, uint8_t *buf, size_t len, unsigned long timeoutMs) {
-  size_t got = 0;
-  unsigned long start = millis();
-  while (got < len && millis() - start < timeoutMs) {
-    int n = s->read(buf + got, len - got);
-    if (n > 0) {
-      got += n;
-      start = millis();
-    } else if (!s->connected() && s->available() == 0) {
-      break;
-    } else {
-      delay(1);
-    }
-  }
-  return got;
-}
-
-static bool skipBytes(WiFiClient *s, uint32_t len) {
-  uint8_t junk[64];
-  while (len > 0) {
-    size_t chunk = len > sizeof(junk) ? sizeof(junk) : len;
-    if (readExact(s, junk, chunk, 3000) != chunk) return false;
-    len -= chunk;
-  }
-  return true;
-}
-
-static uint32_t le32(const uint8_t *p) {
-  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static uint16_t le16(const uint8_t *p) {
-  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-// RIFF ヘッダを読み進め、data チャンクの直前まで進める
-static bool parseWav(WiFiClient *s, WavInfo *info) {
-  uint8_t hdr[12];
-  if (readExact(s, hdr, 12, 5000) != 12) return false;
-  if (memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0) {
-    Serial.println("not a RIFF/WAVE file");
-    return false;
-  }
-
-  bool haveFmt = false;
-  for (int guard = 0; guard < 16; guard++) {
-    uint8_t ck[8];
-    if (readExact(s, ck, 8, 5000) != 8) return false;
-    uint32_t size = le32(ck + 4);
-
-    if (memcmp(ck, "fmt ", 4) == 0) {
-      uint8_t fmt[16];
-      if (size < 16 || readExact(s, fmt, 16, 5000) != 16) return false;
-      uint16_t format   = le16(fmt);
-      info->channels    = le16(fmt + 2);
-      info->sampleRate  = le32(fmt + 4);
-      info->bits        = le16(fmt + 14);
-      if (format != 1) {
-        Serial.printf("unsupported WAV format tag %u (PCM only)\n", format);
-        return false;
-      }
-      if (size > 16 && !skipBytes(s, size - 16)) return false;
-      haveFmt = true;
-    } else if (memcmp(ck, "data", 4) == 0) {
-      if (!haveFmt) return false;
-      info->dataBytes = size;
-      return true;
-    } else {
-      if (!skipBytes(s, size + (size & 1))) return false;
-    }
-  }
-  return false;
-}
-
 // ---------------- 再生 ----------------
 
 // 溜まった pcmChunk を A2DP に書く。丸ごと入る空きができるまで待つ
@@ -1018,7 +1133,7 @@ static void setWiFi(const String &cmd) {
   } else if (cmd == "wifi on") {
     wifiEnabled = true;
     lastWiFiTry = millis() - WIFI_RETRY_MS;  // 次の loop() ですぐつなぎにいく
-    Serial.println("WiFi: reconnect when not playing from SD");
+    Serial.println("WiFi: reconnect when not playing");
   } else {
     Serial.printf("wifi=%s connected=%d\n", wifiEnabled ? "on" : "off", WiFi.status() == WL_CONNECTED);
   }
@@ -1048,6 +1163,13 @@ static void setVolume(const String &cmd) {
   }
 }
 
+// シャッフルを入り切りする。Music の画面の1行目の右端に印を出す。再生中でも次に選ぶ曲から効く
+static void toggleShuffle() {
+  shuffle = !shuffle;
+  Serial.printf("shuffle=%s\n", shuffle ? "on" : "off");
+  if (page == PAGE_MUSIC) drawRow(0, musicTop());
+}
+
 // 一時停止と再開を切り替える。再生ループは、止めている間は曲を読み進めずに無音を流す
 static void togglePause() {
   paused = !paused;
@@ -1060,6 +1182,11 @@ static void togglePause() {
 static PlayResult pollAbort() {
   pollButton();
   pollRelay();
+  // enter で送ると決めた文は、曲の途中でも待たずに送る。TLS の握手の間 (4〜8 秒) は無音になり、その後は続きから鳴る
+  if (relayOutbox.length() && WiFi.status() == WL_CONNECTED) {
+    fillSilence();
+    relayConnect();
+  }
 
   String cmd = nextCommand();
   if (cmd.length()) {
@@ -1071,6 +1198,10 @@ static PlayResult pollAbort() {
     if (cmd == "next") { nextStep = STEP_NEXT; return PLAY_SKIP; }
     if (cmd == "prev") { nextStep = STEP_PREV; return PLAY_SKIP; }
     if (cmd == "rand") { nextStep = STEP_RAND; return PLAY_SKIP; }
+    if (cmd == "shuffle") {
+      toggleShuffle();
+      return PLAY_NONE;
+    }
     if (cmd.startsWith("wifi")) {
       setWiFi(cmd);
       return PLAY_NONE;
@@ -1079,7 +1210,7 @@ static PlayResult pollAbort() {
       setVolume(cmd);
       return PLAY_NONE;
     }
-    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / vol [0-100|+|-] / wifi on / wifi off");
+    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / shuffle / vol [0-100|+|-] / wifi on / wifi off");
   }
 
   // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
@@ -1092,127 +1223,6 @@ static PlayResult pollAbort() {
     }
   }
   return PLAY_NONE;
-}
-
-static PlayResult playUrl(const String &url) {
-  if (WiFi.status() != WL_CONNECTED) {
-    status("no wifi", "cannot play");
-    return PLAY_ERROR;
-  }
-  if (!a2dp.connected()) {
-    status("no earphone", "cannot play");
-    return PLAY_ERROR;
-  }
-  // SD の再生で省電力にしていたら戻す。WAV を取ってくるには常時受信のほうが速い
-  WiFi.noLowPowerMode();
-
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) {
-    status("bad url", url.substring(0, LCD_COLS));
-    return PLAY_ERROR;
-  }
-  http.collectHeaders(HTTP_HEADERS, 1);
-
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    status("http error", String(code));
-    http.end();
-    return PLAY_ERROR;
-  }
-
-  // 曲名はサーバが教えてくれる。無ければ URL の末尾で代用する
-  String title = http.header("X-Track");
-  if (!title.length()) {
-    int slash = url.lastIndexOf('/');
-    title = (slash >= 0) ? url.substring(slash + 1) : url;
-  }
-
-  WiFiClient *stream = http.getStreamPtr();
-  WavInfo info = {0, 0, 0, 0};
-  if (!parseWav(stream, &info)) {
-    status("bad wav", "header");
-    http.end();
-    return PLAY_ERROR;
-  }
-
-  uint32_t rateMul = (info.sampleRate > 0) ? (uint32_t)A2DP_RATE / info.sampleRate : 0;
-  if (info.bits != 16 || info.channels < 1 || info.channels > 2 ||
-      rateMul == 0 || rateMul > 4 || rateMul * info.sampleRate != (uint32_t)A2DP_RATE) {
-    Serial.printf("unsupported: %luHz %uch %ubit\n",
-                  (unsigned long)info.sampleRate, info.channels, info.bits);
-    status("unsupported", String(info.sampleRate) + "Hz " + String(info.channels) + "ch");
-    http.end();
-    return PLAY_ERROR;
-  }
-
-  Serial.printf("playing %s — %luHz %uch %ubit, %lu bytes (x%lu upsample)\n",
-                title.c_str(), (unsigned long)info.sampleRate, info.channels, info.bits,
-                (unsigned long)info.dataBytes, (unsigned long)rateMul);
-  printLine(0, title);
-
-  const size_t inBytesMax  = IN_FRAMES * info.channels * 2;
-  // 書く量に、pcmChunk に溜まっている端数を書き出す分 (最大1チャンク) を足す
-  const size_t outBytesMax = IN_FRAMES * rateMul * 2 * 2 + sizeof(pcmChunk);
-  uint32_t remaining = info.dataBytes;
-  uint32_t played    = 0;
-  unsigned long lastLcd = 0;
-  PlayResult result = PLAY_DONE;
-
-  // A2DP ストリームは接続直後から流れ続けているので、play を打つまでの無音区間でも
-  // underflow フラグが立つ。再生直前に一度読み捨てて、以降の取りこぼしだけを見る
-  a2dp.getUnderflow();
-  startBars();
-
-  while (a2dp.connected()) {
-    PlayResult abort = pollAbort();
-    if (abort != PLAY_NONE) {
-      result = abort;
-      break;
-    }
-
-    // 一時停止中は読まずに待つ。サーバは送れない間 STREAM_TIMEOUT (30秒) 待って接続を切るので、
-    // それより長く止めると、再開したとき手元に届いていた分だけ鳴らして次の曲へ進む
-    if (paused) {
-      feedSilence();
-      delay(1);
-      continue;
-    }
-
-    if ((size_t)a2dp.availableForWrite() < outBytesMax) {
-      delay(1);
-      continue;
-    }
-
-    size_t want = inBytesMax;
-    if (info.dataBytes && want > remaining) want = remaining;
-    if (want == 0) break;
-
-    size_t got = readExact(stream, (uint8_t *)inBuf, want, 4000);
-    if (got < 2) break;
-    got &= ~(size_t)(info.channels * 2 - 1);  // フレーム境界に切り詰める
-
-    writePcm(inBuf, got / (info.channels * 2), info.channels, rateMul);
-
-    played += got;
-    if (info.dataBytes) remaining -= got;
-
-    if (millis() - lastBarDraw >= BAR_MS) drawBars();
-
-    if (millis() - lastLcd >= 500) {
-      lastLcd = millis();
-      if (info.dataBytes) {
-        showProgress("play " + String(played * 100 / info.dataBytes) + "%");
-      } else {
-        showProgress("play " + String(played / 1024) + "KB");
-      }
-    }
-  }
-  http.end();
-
-  finishPlayback(result, String(played / 1024) + "KB", "Wi-Fi が追いついていない");
-  return result;
 }
 
 // ---------------- microSD ----------------
@@ -1266,10 +1276,15 @@ static bool setupSD() {
   return !sdTracks.empty();
 }
 
-// nextStep に従って次の曲を選ぶ
+// 実際に進む先。シャッフル中は「次の曲」をランダムな曲にする。SW3 (next)・曲の終わり・BOOTSEL・再生の開始のどれでも
+static Step stepToTake() {
+  return (shuffle && nextStep == STEP_NEXT) ? STEP_RAND : nextStep;
+}
+
+// stepToTake() に従って次の曲を選ぶ
 static int pickSdTrack() {
   int n = sdTracks.size();
-  switch (nextStep) {
+  switch (stepToTake()) {
     case STEP_PREV:
       return sdIndex <= 0 ? n - 1 : sdIndex - 1;
     case STEP_RAND: {
@@ -1376,7 +1391,9 @@ static PlayResult playSd(int index) {
   uint32_t lastIter = micros();
   unsigned long lastLcd = 0;
   unsigned long started = millis();
-  a2dp.getUnderflow();  // playUrl と同じく、再生前の無音区間の underflow は数えない
+  // A2DP ストリームは接続直後から流れ続けているので、再生を始めるまでの無音区間でも
+  // underflow フラグが立つ。再生直前に一度読み捨てて、以降の取りこぼしだけを見る
+  a2dp.getUnderflow();
   startBars();
 
   while (a2dp.connected()) {
@@ -1481,7 +1498,7 @@ static size_t tlsStackUsed() {
   return (words - i) * 4;
 }
 
-// 中継とのつながりを切る。つなぎ直しは loop() が RELAY_RETRY_MS ごとに試みる
+// 中継とのつながりを切る。つなぎ直しは loop() が relayRetryMs たってから試みる
 static void relayClose(const String &why) {
   if (relayOpen) Serial.printf("relay: closed (%s)\n", why.c_str());
   relayOpen = false;
@@ -1489,9 +1506,16 @@ static void relayClose(const String &why) {
   if (relay) relay->stop();  // TLS の受信バッファなどを返す
 }
 
+// 中継につなげなかった。中継が落ちていると握手のタイムアウト (15 秒) まで待つので、
+// 続くたびに間隔を倍にし、曲の合間が何度も止まらないようにする
+static void relayFailed() {
+  relayFailures++;
+  relayRetryMs = RELAY_RETRY_MS << std::min(relayFailures, RELAY_BACKOFF_MAX);
+}
+
 // 中継につなぎ、メッセージの流れを受け取り始める。TLS の握手に 4〜8 秒かかり (P-384 の証明書を確かめるのが重い)、
-// A2DP のバッファ (370ms) では持たないので、再生ループの中 (pollAbort) からは呼ばない。
-// loop() が、止まっている間か曲の合間に呼ぶ
+// A2DP のバッファ (370ms) では持たないので、再生ループの中 (pollAbort) からは送る文があるときしか呼ばない。
+// loop() が、止まっている間か曲の合間に呼ぶ。送る文 (relayOutbox) があれば、POST で一緒に送る
 static void relayConnect() {
   lastRelayTry = millis();
   if (!relay) {
@@ -1499,20 +1523,26 @@ static void relayConnect() {
     relay = new BearSSL::WiFiClientSecure();  // ここで BearSSL のスタックが確保される
     relay->setTrustAnchors(relayCA);
     relay->setBufferSizes(RELAY_TLS_RX, 512);
+    relay->setTimeout(HTTP_TIMEOUT_MS);  // 送るときは、中継が Discord に送り終えるまで返事が来ない
     growTlsStack();
   }
+  // 送るときは、受け取っている最中でもつなぎ直す。POST の返事がそのまま新しい流れになる
+  if (relayOpen) relayClose("sending");
   // 証明書の期限を確かめるのに時計が要る。起動してまだ合わせていなければ NTP で合わせる
   if (time(nullptr) < 1700000000) {
     NTP.begin("ntp.nict.jp", "pool.ntp.org");
     if (!NTP.waitSet(5000)) {
+      // Wi-Fi につないだ直後は、DNS や最初の問い合わせが通らないことがある。中継の失敗とは数えず、
+      // 間隔も延ばさずに少し待ってやり直す (NTP.begin() からやり直すので、名前も引き直す)
       Serial.println("relay: ntp failed");
       relayStatus = "ntp failed";
-      relayFailures++;
+      relayRetryMs = RELAY_NTP_RETRY_MS;
+      sendDone(relayStatus);
       return;
     }
   }
 
-  // TLS は受信バッファ (RELAY_TLS_RX)、BearSSL のスタック 6.4KB、コンテキストなどを使う。足りているかをログで見る
+  // TLS は受信バッファ (RELAY_TLS_RX)、BearSSL のスタック (RELAY_TLS_STACK)、コンテキストなどを使う。足りているかをログで見る
   uint32_t heap = rp2040.getFreeHeap();
   unsigned long t0 = millis();
   if (!relay->connect(RELAY_HOST, RELAY_PORT)) {
@@ -1520,34 +1550,53 @@ static void relayConnect() {
     int code = relay->getLastSSLError(err, sizeof(err));
     Serial.printf("relay: connect failed (ssl %d %s), heap %luKB\n", code, err, (unsigned long)(heap / 1024));
     relayClose("relay error");
-    relayFailures++;
+    relayFailed();
+    sendDone(relayStatus);
     return;
   }
   Serial.printf("relay: tls %lu ms, heap %luKB -> %luKB, bearssl stack %u/%u bytes\n", millis() - t0,
                 (unsigned long)(heap / 1024), (unsigned long)(rp2040.getFreeHeap() / 1024),
                 (unsigned)tlsStackUsed(), (unsigned)RELAY_TLS_STACK);
 
-  // HTTP/1.0 で頼む。Funnel の手前の Go のプロキシが chunked にせず、届いた分をそのまま流してくる
-  relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n\r\n",
-                relayLastId.c_str(), RELAY_HOST, RELAY_KEY);
+  // HTTP/1.0 で頼む。Funnel の手前の Go のプロキシが chunked にせず、届いた分をそのまま流してくる。
+  // 送る文があれば POST の本文にする。中継は Discord に送ってから、GET と同じく流し始める
+  if (relayOutbox.length()) {
+    relay->printf("POST /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n"
+                  "Content-Type: text/plain\r\nContent-Length: %u\r\n\r\n%s",
+                  relayLastId.c_str(), RELAY_HOST, RELAY_KEY, relayOutbox.length(), relayOutbox.c_str());
+  } else {
+    relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n\r\n",
+                  relayLastId.c_str(), RELAY_HOST, RELAY_KEY);
+  }
   String head = relay->readStringUntil('\n');  // "HTTP/1.0 200 OK"
   head.trim();
   if (head.substring(9, 12) != "200") {
     Serial.printf("relay: \"%s\"\n", head.c_str());
     relayClose(head.length() ? "relay " + head.substring(9, 12) : String("relay no reply"));
-    relayFailures++;
+    relayFailed();
+    sendDone(relayStatus);
     return;
   }
-  // ヘッダは読み捨てる。空行 ("\r") で終わる
-  while (relay->connected() && relay->readStringUntil('\n').length() > 1) {}
+  // ヘッダは空行 ("\r") で終わる。送ったときは、その結果 ("ok" か理由) が X-Sent に入っている
+  String sent = "no answer";
+  while (relay->connected()) {
+    String h = relay->readStringUntil('\n');
+    if (h.length() <= 1) break;
+    if (h.substring(0, 7).equalsIgnoreCase("X-Sent:")) {
+      sent = h.substring(7);
+      sent.trim();
+    }
+  }
 
   relayOpen = true;
   relayFailures = 0;
+  relayRetryMs = RELAY_RETRY_MS;  // 切れたら、つないでから RELAY_RETRY_MS たっていればすぐつなぎ直す
   relayQuiet = relayLastId.length() == 0;
   relayLine = "";
   lastRelayData = millis();
   relayStatus = "no message";
   Serial.printf("relay: connected (after=%s)\n", relayLastId.c_str());
+  sendDone(sent);
 }
 
 // 中継から届いた1行を処理する。"ID TAB HH:MM TAB 名前 TAB 本文"。空行は生存確認で、
@@ -1580,7 +1629,7 @@ static void onRelayLine(const String &line) {
   Serial.printf("relay: %s %s %s\n", m.id.c_str(), m.time.c_str(), m.author.c_str());
 
   if (relayQuiet) {
-    // 起動前からあった分。表示は切り替えず、メッセージページの中身だけ新しくしておく。
+    // 起動前からあった分。表示は切り替えず、Receive の画面の中身だけ新しくしておく。
     // 古いものを見ていたら同じものを見続け、最新を見ていたら新しく来た方を頭から出す
     if (msgView > 0) msgView = std::min<int>(msgView + 1, msgCount - 1);
     else resetMsgScroll();
@@ -1588,7 +1637,7 @@ static void onRelayLine(const String &line) {
     return;
   }
 
-  // 着信。メッセージページに切り替えて最新を出す。スイッチで元のページに戻れるよう覚えておく
+  // 着信。Receive の画面に切り替えて最新を出す。戻るときに元の画面へ戻れるよう覚えておく
   if (page != PAGE_MSG) pageBeforeMsg = page;
   page = PAGE_MSG;
   msgView = 0;
@@ -1621,28 +1670,6 @@ static void pollRelay() {
 
 // ---------------- コマンド ----------------
 
-// MUSIC_URL 配下のテキストを取ってきてシリアルに出す
-static void showText(const String &path) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("no wifi");
-    return;
-  }
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(client, String(MUSIC_URL) + path)) {
-    Serial.println("MUSIC_URL がおかしい");
-    return;
-  }
-  int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    Serial.println(http.getString());
-  } else {
-    Serial.printf("http %d (%s が動いているか?)\n", code, MUSIC_URL);
-  }
-  http.end();
-}
-
 static void startAutoPlay(Step step) {
   nextStep = step;
   autoPlay = true;
@@ -1661,30 +1688,20 @@ static void printSdTracks() {
 }
 
 static const char *HELP =
-    "commands: sd / music / play [url] / pause / next / prev / rand / stop /"
-    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / scan / relay / status";
+    "commands: sd / pause / next / prev / rand / stop /"
+    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / bt / scan / relay / status";
 
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
 
-  if (cmd.startsWith("play")) {
-    String url = cmd.substring(4);
-    url.trim();
-    autoPlay = false;
-    paused = false;
-    playUrl(url.length() ? url : String(AUDIO_URL));
-  } else if (cmd == "sd") {
+  if (cmd == "sd") {
     // カードを挿し直したときのために、毎回読み直す
     autoPlay = false;
     if (setupSD()) {
-      source = SRC_SD;
       startAutoPlay(STEP_NEXT);
     } else {
       status("sd", sdReady ? "no mp3" : "no card");
     }
-  } else if (cmd == "music") {
-    source = SRC_WIFI;
-    startAutoPlay(STEP_NEXT);
   } else if (cmd == "pause") {
     // 止まっているときは再生を始める (BOOTSEL と同じ)。曲の合間やイヤホンのつなぎ直しを
     // 待っている間なら一時停止を切り替え、次の曲を止めた状態で始めるかを決める
@@ -1701,15 +1718,12 @@ static void handleCommand(String cmd) {
     paused = false;
     status("espoke", "stopped");
   } else if (cmd == "list") {
-    if (source == SRC_SD) printSdTracks();
-    else showText("/list");
+    printSdTracks();
   } else if (cmd == "now") {
-    if (source != SRC_SD) showText("/now");
-    else if (sdIndex >= 0) Serial.printf("%d/%u %s\n", sdIndex + 1, (unsigned)sdTracks.size(), sdTracks[sdIndex].c_str());
+    if (sdIndex >= 0) Serial.printf("%d/%u %s\n", sdIndex + 1, (unsigned)sdTracks.size(), sdTracks[sdIndex].c_str());
     else Serial.println("SD: not started");
   } else if (cmd == "shuffle") {
-    if (source == SRC_SD) Serial.println("SD では rand で曲を飛ばす");
-    else showText("/shuffle");
+    toggleShuffle();
   } else if (cmd.startsWith("wifi")) {
     setWiFi(cmd);
   } else if (cmd.startsWith("vol")) {
@@ -1719,17 +1733,18 @@ static void handleCommand(String cmd) {
     a2dp.disconnect();
     a2dp.clearPairing();
     findAndConnect();
-    lastScan = millis();
+  } else if (cmd == "bt") {
+    btConnecting = !a2dp.connected();  // System の Bluetooth で SW4 を押したのと同じ
   } else if (cmd == "relay") {
     // 中継につなぎ直す。失敗が続いて延びていた間隔も戻し、次の loop() ですぐつなぎにいく
     relayClose("reconnect");
     relayFailures = 0;
-    lastRelayTry = millis() - RELAY_RETRY_MS;
+    relayRetryMs = 0;
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d pause=%d vol=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\" relay=%d (%s) msgs=%u\n",
+    Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                  a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, paused, volume, sdReady,
-                  (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), page,
+                  a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
+                  (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
                   digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
                   morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount);
   } else {
@@ -1739,37 +1754,27 @@ static void handleCommand(String cmd) {
 
 // ---------------- setup / loop ----------------
 
-static bool connectWiFi() {
+// Wi-Fi につなぎ始める。WiFi.begin() はつながるまで最大 30 秒待つので、待たない方を使う。
+// つながったかは loop() が見る
+static void startWiFi() {
+  lastWiFiTry = millis();
   status("WiFi", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
-    pollButton();
-    delay(10);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    status("WiFi ok", WiFi.localIP().toString());
-    return true;
-  }
-  status("WiFi failed", WIFI_SSID);
-  return false;
+  WiFi.beginNoBlock(WIFI_SSID, WIFI_PASS);
 }
 
 void setup() {
+  // シリアルがつながるのは待たない (電源を入れたらすぐホームを出すため)。PC でログを見るときは、
+  // つながる前の分は出ない
   Serial.begin(115200);
-  unsigned long start = millis();
-  while (!Serial && millis() - start < 3000) delay(10);
 
   applyVolume(VOLUME_DEFAULT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   for (KeyState &k : keys) pinMode(k.pin, INPUT_PULLUP);
-  setupLCD();
+  setupLCD();  // LiquidCrystal_I2C の init() が 1 秒待つので、ホームが出るのは電源を入れて 1 秒ほど後
   setupBars();
-  status("espoke", "booting...");
+  // 電源が入ったらすぐホームを出す。Bluetooth・SD・Wi-Fi の準備はこのあと。様子は Music の画面に出る
+  openPage(PAGE_HOME);
 
-  connectWiFi();
-  lastWiFiTry = millis();
-  lastRelayTry = millis() - RELAY_RETRY_MS;  // 最初の loop() ですぐ中継につなぎにいく
   if (!RELAY_HOST[0]) relayStatus = "no RELAY_HOST";
 
   a2dp.setName(BT_LOCAL_NAME);
@@ -1791,36 +1796,32 @@ void setup() {
     gap_ssp_set_auto_accept(true);
   }
 
-  // SD に曲があれば、BOOTSEL や next で SD から流す
-  if (setupSD()) source = SRC_SD;
-
-  findAndConnect();
-  lastScan = millis();
-
+  setupSD();
+  startWiFi();
   Serial.println(HELP);
 }
 
 void loop() {
-  // Wi-Fi は起動時に落ちることがあるので、切れていれば定期的に張り直す。
-  // ただし張り直しは最大 WIFI_TIMEOUT_MS 待つので、SD から流している間はやらない
-  // (外で聞いているときに、曲の合間が無音で止まってしまう)
-  bool sdPlaying = autoPlay && source == SRC_SD;
-  if (wifiEnabled && !sdPlaying && WiFi.status() != WL_CONNECTED &&
-      millis() - lastWiFiTry >= WIFI_RETRY_MS) {
-    lastWiFiTry = millis();
-    connectWiFi();
-  }
+  // Wi-Fi は最初の1回でつながらないことがあるので、つながらなければ WIFI_RETRY_MS ごとにつなぎ直す。
+  // 連続再生している間はやらない (外で聞いているときに、無線が電波を探して音が途切れないように)
+  bool up = WiFi.status() == WL_CONNECTED;
+  if (up && !wifiUp) status("WiFi ok", WiFi.localIP().toString());
+  wifiUp = up;
+  if (wifiEnabled && !autoPlay && !up && millis() - lastWiFiTry >= WIFI_RETRY_MS) startWiFi();
 
-  if (!a2dp.connected() && millis() - lastScan >= RETRY_MS) {
-    lastScan = millis();
-    findAndConnect();
+  // イヤホンには頼まれたときだけつなぎにいく (btConnecting の説明を参照)。失敗の理由は status() が
+  // Music の1行目に出したもの ("BT timeout" など) をそのまま System にも出す
+  if (btConnecting) {
+    btNote = findAndConnect() ? String() : mainLines[0];
+    btConnecting = false;
+    if (page == PAGE_SYSTEM) drawPage();
   }
 
   // Discord の中継につなぐ。TLS の握手で 4〜8 秒止まるので、再生ループの外 (止まっている間か曲の合間) でだけ。
-  // 止まる前にバッファを無音で埋めておく。中継が落ちていると握手のタイムアウト (15 秒) まで待つので、
-  // 失敗が続いたら間隔を延ばし、曲の合間が何度も止まらないようにする
-  if (RELAY_HOST[0] && !relayOpen && WiFi.status() == WL_CONNECTED &&
-      millis() - lastRelayTry >= (RELAY_RETRY_MS << std::min(relayFailures, RELAY_BACKOFF_MAX))) {
+  // 止まる前にバッファを無音で埋めておく。待つ間隔 (relayRetryMs) は前回の結果で決まる (起動直後は 0)。
+  // 送る文があれば、つながっていても待たずにつなぎ直す
+  if (RELAY_HOST[0] && WiFi.status() == WL_CONNECTED &&
+      (relayOutbox.length() || (!relayOpen && millis() - lastRelayTry >= relayRetryMs))) {
     fillSilence();
     relayConnect();
   }
@@ -1845,39 +1846,32 @@ void loop() {
     return;
   }
 
-  // イヤホン (Wi-Fi から流すときは Wi-Fi も) が切れている間は再接続を待つ (張り直しは上の処理に任せる)
-  if (!a2dp.connected() || (source == SRC_WIFI && WiFi.status() != WL_CONNECTED)) {
+  // イヤホンが切れている間は待つ。イヤホンには自分からはつながないので、つなぎ方を出しておく
+  // (同じ表示なら書き直さない)
+  if (!a2dp.connected()) {
+    if (mainLines[0] != "no earphone") status("no earphone", "System > BT");
     feedSilence();
     delay(100);
     return;
   }
 
-  PlayResult r;
-  if (source == SRC_SD) {
-    if (sdTracks.empty()) {
-      autoPlay = false;
-      status("sd", sdReady ? "no mp3" : "no card");
-      return;
-    }
-    sdIndex = pickSdTrack();
-    r = playSd(sdIndex);
-  } else {
-    static const char *const STEP_PATHS[] = {"/next.wav", "/prev.wav", "/random.wav"};  // Step の順
-    r = playUrl(String(MUSIC_URL) + STEP_PATHS[nextStep]);
+  if (sdTracks.empty()) {
+    autoPlay = false;
+    status("sd", sdReady ? "no mp3" : "no card");
+    return;
   }
+  sdIndex = pickSdTrack();
+  PlayResult r = playSd(sdIndex);
 
   if (r == PLAY_STOP) {
     autoPlay = false;
     nextStep = STEP_NEXT;
   } else if (r == PLAY_ERROR) {
-    // 一時的なものかもしれないので数回は粘り、それでも駄目なら止める。
-    // SD では同じ向きに次の曲へ進むので、読めない曲が1曲あっても飛ばして続く
+    // 同じ向きに次の曲へ進むので、読めない曲が1曲あっても飛ばして続く。続けて失敗したらカードを疑って止める
     if (++playErrors >= 3) {
       autoPlay = false;
       playErrors = 0;
-      status("music stopped", source == SRC_SD ? "sd card?" : "server down?");
-    } else if (source == SRC_WIFI) {
-      delay(2000);
+      status("music stopped", "sd card?");
     }
   } else {
     playErrors = 0;
