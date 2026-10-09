@@ -477,12 +477,15 @@ playing 22050Hz 1ch 16bit, 35280 bytes (x2 upsample)
 | `shuffle` | サーバ側のシャッフルを ON/OFF（Wi-Fi のときだけ。SD では `rand` を使う） |
 | `play` | `AUDIO_URL` の通知音を1回鳴らす |
 | `play <url>` | 指定した URL を1回鳴らす |
+| `vol` | 今の音量を表示 |
+| `vol <0-100>` | 音量の目盛りを指定（再生中でも効く）。100 が等倍（0dB）で、1 目盛り 0.6dB ずつ下がる。0 は無音。起動時は 35（-39dB） |
+| `vol +` / `vol -` | 音量を 5 目盛り（3dB）ずつ上げる / 下げる |
 | `wifi off` | Wi-Fi を切り、つなぎ直しもやめる（外で使うとき）。Bluetooth はそのまま |
 | `wifi on` | Wi-Fi のつなぎ直しを再開する（SD から流している間は、止めてからつなぐ） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
-| `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / SD の曲数 / 空きヒープの状態を表示 |
+| `status` | Wi-Fi / IP / Bluetooth / 再生元（`src`）/ 連続再生 / 音量 / SD の曲数 / 空きヒープの状態を表示 |
 
-**再生中に受け付けるのは `stop` / `next` / `prev` / `rand` / `wifi on` / `wifi off` だけ。**
+**再生中に受け付けるのは `stop` / `next` / `prev` / `rand` / `vol` / `wifi on` / `wifi off` だけ。**
 他のコマンドは曲が終わるまで処理されない。
 
 BOOTSEL ボタンは状況で意味が変わる。

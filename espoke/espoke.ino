@@ -54,6 +54,13 @@ static const int    A2DP_RATE     = 44100;     // A2DPSource は 44100 か 48000
 // 65536 (128KB) にすると a2dp.begin() が確保に失敗して Bluetooth が動かなくなる
 static const size_t A2DP_BUFFER   = 32768;
 static const bool   BOOTSEL_SKIP  = true;      // 再生中の BOOTSEL で次の曲へ送る
+// 音量の目盛り (0〜100)。100 が等倍 (0dB) で、1 目盛りごとに VOLUME_TENTH_DB だけ下がる。0 は無音。
+// 耳の感じ方に合わせて dB で刻む (振幅に比例させると、小さい音量のあたりで1目盛りの差が大きすぎた)
+static const int    VOLUME_TENTH_DB = 6;       // 1 目盛りの大きさ (0.1dB 単位)。1〜100 で -59.4〜0dB
+// 起動時の音量。イヤホン (a0:0c:e2:c6:1d:04) はつなぐたびに自分の音量を 80% に戻すので、
+// その状態で耳で合わせた値 (-39dB)。細かい調整はイヤホンのボタンでする
+static const int    VOLUME_DEFAULT = 35;
+static const int    VOLUME_STEP    = 5;        // "vol +" / "vol -" で変える目盛り (3dB)
 
 static const int     PIN_SDA   = 0;   // GP0 (物理1番ピン)
 static const int     PIN_SCL   = 1;   // GP1 (物理2番ピン)
@@ -131,6 +138,8 @@ static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi 再接続を試�
 static const unsigned long HTTP_TIMEOUT_MS = 15000;    // サーバの応答を待つ上限
 static unsigned long lastWiFiTry = 0;
 static bool   wifiEnabled = true;          // "wifi off" で false にすると、つなぎ直しもしない
+static int    volume = VOLUME_DEFAULT;     // 音量の目盛り。変えるときは applyVolume() を通す
+static int32_t volumeGain = 0;             // writePcm() で振幅に掛ける倍率。65536 で等倍
 
 // 連続再生の状態
 static bool   autoPlay = false;            // 曲を続けて流しているか
@@ -396,6 +405,12 @@ static void onConnect(void *, bool connected) {
   }
 }
 
+// イヤホン側の音量 (AVRCP の Absolute Volume)。つないだときと、イヤホンのボタンで変えたときに届く。
+// イヤホンは自分でこの音量を掛けるので、Pico の vol とは別に効く
+static void onVolume(void *, int pct) {
+  Serial.printf("earphone volume: %d%%\n", pct);
+}
+
 // "aa:bb:cc:dd:ee:ff" を 6バイトに変換する
 static bool parseAddr(const char *str, uint8_t *out) {
   unsigned v[6];
@@ -570,12 +585,15 @@ static void feedSilence() {
   }
 }
 
-// 16bit PCM (channels 本のインターリーブ) を rateMul 倍のサンプル&ホールドで
+// 16bit PCM (channels 本のインターリーブ) に音量を掛け、rateMul 倍のサンプル&ホールドで
 // 44100 ステレオに引き伸ばして A2DP に書く。A2DP_CHUNK に満たない端数は次に回す
 static void writePcm(const int16_t *in, size_t frames, int channels, uint32_t rateMul) {
+  const int32_t gain = volumeGain;  // 等倍以下しか掛けないので 16bit からはみ出さない
   for (size_t f = 0; f < frames; f++) {
-    int16_t l = in[f * channels];
-    int16_t r = (channels == 2) ? in[f * channels + 1] : l;
+    const int16_t inL = in[f * channels];
+    const int16_t inR = (channels == 2) ? in[f * channels + 1] : inL;
+    int16_t l = (int16_t)((inL * gain) >> 16);
+    int16_t r = (int16_t)((inR * gain) >> 16);
     for (uint32_t k = 0; k < rateMul; k++) {
       pcmChunk[pcmChunkLen++] = l;
       pcmChunk[pcmChunkLen++] = r;
@@ -624,6 +642,30 @@ static void setWiFi(const String &cmd) {
   }
 }
 
+// 音量の目盛りを決め、振幅に掛ける倍率を求めておく。再生中でも次に書くサンプルから効く
+static void applyVolume(int v) {
+  volume = constrain(v, 0, 100);
+  float db = -(100 - volume) * VOLUME_TENTH_DB / 10.0f;
+  volumeGain = volume ? (int32_t)lroundf(powf(10.0f, db / 20.0f) * 65536.0f) : 0;
+}
+
+// "vol 40" で目盛りを 40 に、"vol +" / "vol -" で VOLUME_STEP ずつ変える。"vol" だけなら今の値を出す
+static void setVolume(const String &cmd) {
+  String arg = cmd.substring(3);
+  arg.trim();
+  int v = volume;
+  if (arg == "+") v += VOLUME_STEP;
+  else if (arg == "-") v -= VOLUME_STEP;
+  else if (arg.length()) v = arg.toInt();
+  applyVolume(v);
+  if (volume == 0) {
+    Serial.println("volume=0 (mute)");
+  } else {
+    int tenths = (100 - volume) * VOLUME_TENTH_DB;
+    Serial.printf("volume=%d (-%d.%ddB)\n", volume, tenths / 10, tenths % 10);
+  }
+}
+
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
@@ -638,7 +680,11 @@ static PlayResult pollAbort() {
       setWiFi(cmd);
       return PLAY_NONE;
     }
-    Serial.println("再生中に使えるのは stop / next / prev / rand / wifi on / wifi off");
+    if (cmd.startsWith("vol")) {
+      setVolume(cmd);
+      return PLAY_NONE;
+    }
+    Serial.println("再生中に使えるのは stop / next / prev / rand / vol [0-100|+|-] / wifi on / wifi off");
   }
 
   // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
@@ -1040,7 +1086,7 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / music / play [url] / next / prev / rand / stop /"
-    " list / now / shuffle / wifi on|off / scan / status";
+    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / scan / status";
 
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
@@ -1083,6 +1129,8 @@ static void handleCommand(String cmd) {
     else showText("/shuffle");
   } else if (cmd.startsWith("wifi")) {
     setWiFi(cmd);
+  } else if (cmd.startsWith("vol")) {
+    setVolume(cmd);
   } else if (cmd == "scan") {
     autoPlay = false;
     a2dp.disconnect();
@@ -1090,9 +1138,9 @@ static void handleCommand(String cmd) {
     findAndConnect();
     lastScan = millis();
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\"\n",
+    Serial.printf("wifi=%d ip=%s bt=%d src=%s auto=%d vol=%d sd=%d tracks=%u heap=%luKB page=%d button=%s text=\"%s\"\n",
                   WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                  a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, sdReady,
+                  a2dp.connected(), source == SRC_SD ? "sd" : "wifi", autoPlay, volume, sdReady,
                   (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), page,
                   digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
                   morseText.c_str());
@@ -1124,6 +1172,7 @@ void setup() {
   unsigned long start = millis();
   while (!Serial && millis() - start < 3000) delay(10);
 
+  applyVolume(VOLUME_DEFAULT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   for (KeyState &k : keys) pinMode(k.pin, INPUT_PULLUP);
   setupLCD();
@@ -1136,6 +1185,7 @@ void setup() {
   a2dp.setFrequency(A2DP_RATE);
   a2dp.setBufferSize(A2DP_BUFFER);
   a2dp.onConnect(onConnect);
+  a2dp.onVolume(onVolume);
   // A2DP のバッファは大きいので、ヒープが細切れになる前 (SD の曲一覧を作る前) に確保させる
   if (!a2dp.begin()) {
     status("BT init failed", "out of memory?");
