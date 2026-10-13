@@ -10,7 +10,8 @@
  *   2. Bluetooth イヤホン (A2DP sink) には、System の画面で Bluetooth を見ながら SW4 を押したときだけつなぐ
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
  *      BOOTSEL を押しても再生を始める
- *   4. LCD1602A の画面はホームから選ぶ。ホームで SW2 / SW3 で Music / Discord / System を選び、SW4 で開く。
+ *   4. LCD1602A の画面はホームから選ぶ。ホームの1行目は月日と時刻 (NTP で合わせた日本時間)、2行目で
+ *      SW2 / SW3 で Music / Discord / System を選び、SW4 で開く。
  *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
  *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
@@ -187,6 +188,8 @@ static String btNote = "";                 // 最後につなぎにいって失�
 static const unsigned long CONNECT_TIMEOUT_MS = 15000;  // ストリーム開始を待つ上限
 static const unsigned long WIFI_RETRY_MS = 30000;      // Wi-Fi につながらないとき、つなぎ直す間隔
 static const unsigned long HTTP_TIMEOUT_MS = 15000;    // 中継の応答を待つ上限
+static const time_t        CLOCK_SET_AFTER = 1700000000; // time() がこれより前なら、時計はまだ NTP で合わせていない
+static const char *const   CLOCK_TZ = "JST-9";         // ホームの時計のタイムゾーン (POSIX の TZ の書き方)
 static const unsigned long RELAY_RETRY_MS = 30000;     // 中継へのつなぎ直しを試みる間隔。失敗が続くと倍ずつ延ばす
 static const int           RELAY_BACKOFF_MAX = 4;      // 延ばすのは 2^4 倍 (8 分) まで
 static const unsigned long RELAY_NTP_RETRY_MS = 10000; // 時刻合わせに失敗したときは、これだけ待ってすぐやり直す
@@ -707,12 +710,19 @@ static String menuTitle(const char *title) {
   return s + '\x7e';
 }
 
-// ホームと Discord の画面の2行目に、選んでいる項目の今の様子を出す
+// ホームの1行目。左に月日、右に時刻 (日本時間)。NTP で合わせるまでは数字の代わりに "--" を出す
+static String clockLine() {
+  time_t now = time(nullptr);
+  struct tm t;
+  if (now < CLOCK_SET_AFTER || !localtime_r(&now, &t)) return "--/--      --:--";
+  char s[LCD_COLS + 1];
+  snprintf(s, sizeof(s), "%02d/%02d      %02d:%02d", t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
+  return s;
+}
+
+// Discord の画面の2行目に、選んでいる項目の今の様子を出す
 static String pageSummary(int p) {
   switch (p) {
-    case PAGE_MUSIC:
-      return mainLines[0];  // 曲名か状態
-    case PAGE_DISCORD:
     case PAGE_MSG:
       // 最新の発言者と時刻。まだ無ければ中継とのつながり具合
       if (!msgCount) return relayStatus;
@@ -722,9 +732,6 @@ static String pageSummary(int p) {
       if (morseText.length() > LCD_COLS) return morseText.substring(morseText.length() - LCD_COLS);
       if (morseText.length()) return morseText;
       return morseNote.length() ? morseNote : String("morse");
-    case PAGE_SYSTEM:
-      return String("WiFi ") + (WiFi.status() == WL_CONNECTED ? "ok" : "--") +
-             "  BT " + (a2dp.connected() ? "ok" : "--");
   }
   return "";
 }
@@ -735,12 +742,13 @@ static void drawPage() {
   lcdResync();
   switch (page) {
     case PAGE_HOME:
-    case PAGE_DISCORD: {
-      const MenuItem &item = (page == PAGE_HOME) ? HOME_MENU[homeSel] : DISCORD_MENU[discordSel];
-      drawRow(0, menuTitle(item.title));
-      drawRow(1, pageSummary(item.page));
+      drawRow(0, clockLine());
+      drawRow(1, menuTitle(HOME_MENU[homeSel].title));
       break;
-    }
+    case PAGE_DISCORD:
+      drawRow(0, menuTitle(DISCORD_MENU[discordSel].title));
+      drawRow(1, pageSummary(DISCORD_MENU[discordSel].page));
+      break;
     case PAGE_MSG:
       if (msgCount == 0) {
         drawRow(0, "MSG --");
@@ -1608,7 +1616,7 @@ static void relayConnect() {
   // 送るときは、受け取っている最中でもつなぎ直す。POST の返事がそのまま新しい流れになる
   if (relayOpen) relayClose("sending");
   // 証明書の期限を確かめるのに時計が要る。起動してまだ合わせていなければ NTP で合わせる
-  if (time(nullptr) < 1700000000) {
+  if (time(nullptr) < CLOCK_SET_AFTER) {
     NTP.begin("ntp.nict.jp", "pool.ntp.org");
     if (!NTP.waitSet(5000)) {
       // Wi-Fi につないだ直後は、DNS や最初の問い合わせが通らないことがある。中継の失敗とは数えず、
@@ -1848,6 +1856,8 @@ void setup() {
   // つながる前の分は出ない
   Serial.begin(115200);
 
+  setenv("TZ", CLOCK_TZ, 1);  // localtime_r() を日本時間にする。time() (UTC) と証明書の期限の確認は変わらない
+  tzset();
   applyVolume(VOLUME_DEFAULT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   for (KeyState &k : keys) pinMode(k.pin, INPUT_PULLUP);
@@ -1886,7 +1896,11 @@ void loop() {
   // Wi-Fi は最初の1回でつながらないことがあるので、つながらなければ WIFI_RETRY_MS ごとにつなぎ直す。
   // 連続再生している間はやらない (外で聞いているときに、無線が電波を探して音が途切れないように)
   bool up = WiFi.status() == WL_CONNECTED;
-  if (up && !wifiUp) status("WiFi ok", WiFi.localIP().toString());
+  if (up && !wifiUp) {
+    status("WiFi ok", WiFi.localIP().toString());
+    // ホームの時計を合わせ始める (待たない)。中継を使うときは relayConnect() が合わせるので任せる
+    if (!RELAY_HOST[0] && time(nullptr) < CLOCK_SET_AFTER) NTP.begin("ntp.nict.jp", "pool.ntp.org");
+  }
   wifiUp = up;
   if (wifiEnabled && !autoPlay && !up && millis() - lastWiFiTry >= WIFI_RETRY_MS) startWiFi();
 
