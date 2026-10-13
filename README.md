@@ -427,7 +427,7 @@ $EDITOR espoke/arduino_secrets.h
 #define RELAY_KEY  "your-relay-key"
 ```
 
-`RELAY_HOST` を書かなければ Discord は使わない。前からある `arduino_secrets.h` に `AUDIO_URL` や `MUSIC_URL` が残っていても、使わないだけでビルドは通る。
+`RELAY_HOST` を書かなければ Discord は使わない。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
 
 ### 7.2 音声フォーマットの制約
 

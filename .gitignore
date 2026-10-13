@@ -3,5 +3,4 @@ design.md
 *.swp
 build/
 arduino_secrets.h
-tools/audio/
 __pycache__/
