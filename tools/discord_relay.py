@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-espoke 用の Discord 中継。常時動かしておく PC (学校の dynabook) の上で動かす。
+espoke 用の Discord と Spotify の中継。常時動かしておく PC (学校の dynabook) の上で動かす。
 
 Discord の決めたサーバー (かチャンネル) に書き込まれた発言を受け取り、LCD1602A に出せる文字だけの
 1行にして Pico WH へ流す。LCD の文字 ROM (A00) にあるのは英数字と半角カタカナだけで、
 その並びは JIS X 0201 (cp932 の1バイト文字) と同じ。漢字は MeCab (fugashi + unidic-lite)
 で読みに直してから半角カナにする。辞書は数十 MB あって Pico には載らないので、ここでやる。
 逆向きに、Pico でモールス入力した文を Bot として Discord に送る。
+
+Spotify は、同じ PC で動かす go-librespot (非公式の Spotify Connect クライアント) の音を MP3 にして
+Pico へ流す。Pico は SD の曲と同じく libmad で鳴らす。プレイリストの一覧や曲送りは go-librespot の
+API を呼ぶ (Spotify の Web API や開発者アプリは使わない)。使い方は下の「Spotify」の節。
 
 Pico は Tailscale に入れないので、tailscale funnel でこのサーバを
 https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HTTPS でつながせる。
@@ -16,6 +20,7 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
 必要なもの:
     python3 -m venv ~/espoke/venv
     ~/espoke/venv/bin/pip install discord.py 'fugashi[unidic-lite]'
+    ~/espoke/venv/bin/pip install lameenc     # Spotify を使うときだけ
 
 設定 (環境変数。--env で読むファイルにも書ける):
     DISCORD_TOKEN       Bot のトークン
@@ -24,6 +29,10 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     DISCORD_SEND_CHANNEL_ID  Pico からの文を送るチャンネルの ID。無ければ DISCORD_CHANNEL_ID、
                         それも無ければ最後に発言を受け取ったチャンネルに送る
     RELAY_KEY           Pico と決めておく合言葉。Funnel で誰でもつなげるので、これで弾く
+    SPOTIFY_PIPE        go-librespot が音を書く FIFO のパス。無ければ Spotify は使わない (/spotify は 404)
+    SPOTIFY_API         go-librespot の API。既定 http://127.0.0.1:3678
+    SPOTIFY_KBPS        Pico へ流す MP3 のビットレート。既定 128 (途切れるなら 96)
+    SPOTIFY_TLS_PORT    Spotify の TLS を受けるポート (Funnel の 10000 番の転送先)。既定 8010
 
 使い方:
     ~/espoke/venv/bin/python discord_relay.py                 # ~/espoke/relay.env を読んで動かす
@@ -34,6 +43,7 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     POST /stream?after=<id>  本文 (UTF-8) を Discord に送ってから、GET と同じく流す (X-Key ヘッダが要る)。
                              送った結果は X-Sent ヘッダ ("ok" か理由)。--no-discord なら差出人 espoke の発言として流し返す
     POST /post               本文 (UTF-8) を差出人 test の発言として流す。試験用 (X-Key ヘッダが要る)
+    GET  /spotify?win=<n>    WebSocket。Spotify の音と操作をやりとりする (X-Key ヘッダが要る。下の「Spotify」の節)
 
 1行は  <メッセージ ID> TAB <HH:MM> TAB <名前> TAB <本文> LF  で、cp932 のバイト列。
 サーバー全体を受け取るときは、本文の頭に "#チャンネル名 " を付ける。
@@ -43,23 +53,75 @@ ID は Discord のメッセージ ID (snowflake) で、時間とともに増え�
 空行は2つの意味で送る。つないだ直後は、溜まっていた分のあとに1つ送り、「つなぐ前から
 あった分はここまで」と知らせる (Pico は起動直後の古い発言で着信を知らせないようにする)。
 その後は何もない間 HEARTBEAT 秒ごとに送り、Pico が「つながっているが新着がない」と分かるようにする。
+
+Spotify:
+    go-librespot (https://github.com/devgianlu/go-librespot) を同じ PC で動かし、音を FIFO に書かせる。
+    ~/espoke/librespot/config.yml の例 (--config_dir ~/espoke/librespot で読ませる):
+        device_name: espoke
+        zeroconf_enabled: false
+        credentials: {type: device_auth}       # 初回はログに出るコードを spotify.com/pair で入れる
+        audio_backend: pipe
+        audio_output_pipe: /home/<user>/espoke/spotify.pcm
+        audio_output_pipe_format: s16le
+        audio_output_pipe_wait_for_reader: true
+        skip_debounce_ms: 0                    # 曲送りをすぐ効かせる (Pico は切り替わるまでの音を捨てて待つ)
+        prefer_firewall_friendly_ports: true   # 学校のネットワークでは 4070 番が通らないことがある
+        server: {enabled: true, address: 127.0.0.1, port: 3678}   # 外に開けない (POST /token でトークンが取れる)
+    relay.env に SPOTIFY_PIPE=/home/<user>/espoke/spotify.pcm を書くと有効になる。
+
+    Pico は Spotify のときだけ、Funnel の 10000 番に TCP のままつなぎ、TLS はこの中継が受ける:
+        sudo tailscale set --operator=$USER                       # 一度だけ (tailscale cert と funnel を sudo なしで)
+        tailscale funnel --bg --tcp=10000 tcp://127.0.0.1:8010
+    証明書は tailscale cert で、Funnel の 8443 番と同じものを ~/espoke/tls.crt と tls.key に取り出す (起動時と1日ごと)。
+    8443 番 (tailscaled が TLS を受ける) にしないのは、TLS のレコードの大きさをこちらで決めるため。Go の TLS は
+    送った量が 128KB を超えるとレコードを最大 16KB にするが、Pico の受信バッファは 4KB しかない。
+    Funnel の入口から dynabook までは往復 1 秒ほどかかる (実測) ので、Pico がまだ読んでいない量 (win) を
+    受信バッファより小さくしてレコードを抑えると、1 秒に win しか届かず 128kbps (16KB/秒) に足りない。
+    この中継で TLS を受ければ、1 フレーム (1KB) ずつ書くのでレコードは 1KB ほどになり、win は 48KB にできる。
+
+    Pico とは WebSocket で1本つなぐ (GET /spotify?win=<n>)。フレームはすべてバイナリで、先頭1バイトが種類:
+        下り A  MP3
+             L  番号 TAB 総数 TAB プレイリスト名     (つないだ直後に全部。0 番はお気に入りの曲)
+             T  曲名 TAB アーティスト
+             I  プレイリストの番号 TAB 曲の番号 TAB 曲の数 TAB 曲名 TAB アーティスト
+                (Q への返事。空のプレイリストは曲の番号が -1)
+             S  playing|paused|stopped TAB シャッフル 0/1 TAB 再生中のプレイリストの番号 (無ければ -1)
+                TAB それまでに受け取った操作 (P U N B K R) の数。Pico はこれで、自分の操作より前の古い知らせを見分ける
+                TAB 再生中の曲がプレイリストの何番目か (分からなければ -1)
+             Z  切れ目。選曲・曲送りより前の音はここまで (Pico はそれまでの A を捨てて待つ)
+             H  生存確認 (HEARTBEAT 秒ごと)
+             E  エラー ("librespot down" など)
+        上り C<n> 読んだ量の累計 / P<n> n 番目のプレイリストを頭から再生 / P<n>:<i> その i 番目の曲から再生 /
+             U<n> シャッフルで再生 (どの曲から鳴るかもランダム) / Q<n>:<i> i 番目から SP_PAGE 曲の名前を送らせる /
+             N 次 / B 前 / K 一時停止 / R 再開 / F シャッフルの入り切り
+    文字はすべて LCD の文字コード (cp932 の1バイト文字)。
+    中継は Pico がまだ読んでいない量を win 以下に抑える。Pico は受信リングに空きが無ければ読まないので、
+    流す速さは Pico が決める。win は、曲送りのときに捨てる前の曲の量の上限でもある
 """
 
 import argparse
 import asyncio
+import base64
 import bisect
 import concurrent.futures
 import datetime
+import hashlib
 import hmac
 import json
 import os
 import re
+import select
 import socket
+import ssl
+import stat
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 NAME_MAX = 10   # 名前のバイト数。LCD の1行目に、右端の HH:MM と並べて出す
@@ -71,12 +133,38 @@ HEARTBEAT = 30  # 新着がないときに空行を送る間隔 (秒)
 SEND_MAX = 2000     # Pico から送る文の長さの上限 (Discord の上限)。Pico で打てるのは 64 文字まで
 SEND_TIMEOUT = 10   # Discord に送り終わるのを待つ上限 (秒)。Pico は 15 秒まで返事を待つ
 FUNNEL_PORT = 8443  # tailscale funnel で公開するポート (443 / 8443 / 10000 から選べる)
+SPOTIFY_FUNNEL_PORT = 10000  # Spotify 用に TCP のまま公開するポート (TLS はこの中継で受ける。下の「Spotify」の節)
+SPOTIFY_TLS_PORT = 8010      # その転送先。SPOTIFY_TLS_PORT で変えられる
+CERT_CHECK = 24 * 3600       # tailscale cert で証明書を取り直す間隔 (秒)。期限が近ければ tailscaled が更新する
 
 # 送信が詰まったまま何秒待つか。Pico は電源が落ちたり電波が切れたりすると
 # FIN を返さずに消えるので、これを入れないとスレッドが居座る
 STREAM_TIMEOUT = 30
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
+
+# Spotify
+SP_RATE = 44100 * 4        # go-librespot の出す PCM (s16le ステレオ) の 1 秒あたりのバイト数
+SP_CHUNK = 1152 * 4        # 一度に MP3 にする量 (MP3 の 1 フレーム分)
+SP_READY = SP_RATE // 2    # Pico に送れる状態で溜めておく PCM。これより少なくなったら FIFO から読む
+SP_HOLD = SP_RATE * 10     # 溜める上限。Pico が止まっている間に go-librespot を操作すると、これまで溜まる
+SP_FRAME = 1024            # 1 フレームに入れる MP3 のバイト数
+SP_WIN_MIN = 1500          # Pico が win に書いてよい範囲
+SP_WIN_MAX = 65536
+SP_LISTS = 50              # Pico に送るプレイリストの数の上限
+SP_TITLE_MAX = 64          # 曲名・アーティストのバイト数
+SP_NAME_MAX = 24           # プレイリスト名のバイト数。Pico は 14 文字だけ出し、50 個を RAM に持つ
+SP_PAGE = 16               # 曲の一覧を Pico に送るときの、1 回の曲の数 (Pico は 32 曲分だけ持つ)
+SP_TRACK_MAX = 48          # 曲名のバイト数 (Pico は 16 文字に収まらなければ流して出す)
+SP_ARTIST_MAX = 32         # 曲選択で出すアーティスト名のバイト数
+SP_TRACKS_TTL = 300        # 曲の一覧を覚えておく時間 (秒)。go-librespot も 5 分は同じ一覧を返す
+SP_TRACKS_WAIT = 10.0      # go-librespot が曲の一覧と曲名を集め終えるのを待つ上限 (秒)
+LIKED_NAME = "Liked Songs"  # 一覧の先頭に足すお気に入りの曲の名前
+SP_DISCARD_WAIT = 0.1      # 選曲・曲送りで go-librespot を止めたあと、FIFO に残った前の曲を読み捨てる時間 (秒)
+SP_POLL = 1.0              # go-librespot の状態を見る間隔 (秒)
+SP_HOLD_WAIT = 2.0         # Pico が一時停止を頼んでから、状態が「再生中」でも音を止めたままにする時間 (秒)
+SP_TIMEOUT = 90            # Pico から何も来なければ切る (秒)。Pico は 30 秒ごとに C を送ってくる
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 # ---------------- LCD 用の変換 ----------------
 
@@ -221,6 +309,566 @@ def send_test(text):
 SEND = send_test
 
 
+# ---------------- Spotify ----------------
+
+def ws_frame(payload, opcode=0x2):
+    """WebSocket のフレーム (サーバーから送るので、マスクしない)"""
+    n = len(payload)
+    if n < 126:
+        head = bytes([0x80 | opcode, n])
+    elif n < 65536:
+        head = bytes([0x80 | opcode, 126]) + n.to_bytes(2, "big")
+    else:
+        head = bytes([0x80 | opcode, 127]) + n.to_bytes(8, "big")
+    return head + payload
+
+
+def ws_read(read):
+    """クライアントのフレームを1つ読む。read(n) はちょうど n バイト返す (切れたら EOFError)。
+    (opcode, 中身)。おかしなフレームなら (None, b"")"""
+    head = read(2)
+    opcode, n = head[0] & 0x0F, head[1] & 0x7F
+    if n == 126:
+        n = int.from_bytes(read(2), "big")
+    elif n == 127:
+        n = int.from_bytes(read(8), "big")
+    if n > 4096:  # Pico が送るのは短い命令だけ
+        return None, b""
+    mask = read(4) if head[1] & 0x80 else b""
+    data = read(n) if n else b""
+    if mask:
+        data = bytes(b ^ mask[i & 3] for i, b in enumerate(data))
+    return opcode, data
+
+
+class SessionClosed(Exception):
+    pass
+
+
+class SpotifySession:
+    """Pico との WebSocket 1本。送る側は、Pico がまだ読んでいない量を win 以下に抑える。
+    音 (A) より、それ以外のフレーム (曲名や状態) を先に送る (音を送り続けると、状態の知らせがなかなか割り込めない)。
+    wlock は書く順番をそろえる。cond は数と状態を守る"""
+
+    def __init__(self, sock, win):
+        self.sock = sock
+        self.win = win
+        self.cond = threading.Condition()
+        self.sent = 0       # 送ったバイト数の累計 (フレームの頭も数える)
+        self.acked = 0      # Pico が読んだと知らせてきた累計
+        self.unread_max = 0
+        self.audio = 0      # 送った MP3 のバイト数
+        self.last_send = time.monotonic()
+        self.urgent = 0     # 待っている、音以外のフレームの数。0 になるまで音は送らない
+        self.closed = False
+        self.wlock = threading.Lock()  # フレームが混ざらないように、書くのは1つずつ
+        # 読むのと書くのを同時にしない。TLS (ssl.SSLSocket) は、別のスレッドから同時に読み書きすると壊れる
+        # (全速で受け取らせると数秒で切れた)。読むのは届いているときだけにして、書く側をあまり待たせない
+        self.io_lock = threading.Lock()
+        self.inbuf = bytearray()
+        self.uris = []      # L で送ったプレイリストの URI。P<n> の n はこの並び
+        self.cmds = 0       # 受け取った操作 (P N B K R) の数。S に付けて送る
+
+    def send(self, kind, payload=b"", opcode=0x2, held=None):
+        """1フレーム送る。音は、held() が真なら (一時停止や曲送りの途中なら) 送らずに False を返す。
+        書く順番は送ると決めた順番にそろえ、一時停止の知らせのあとに音が続かないようにする"""
+        frame = ws_frame(kind + payload, opcode)
+        audio = kind == b"A"
+        with self.cond:
+            if audio:
+                self.cond.wait_for(lambda: self.closed or not self.urgent)  # 音以外が待っていたら先に通す
+            else:
+                self.urgent += 1
+        try:
+            with self.wlock:
+                with self.cond:
+                    while not self.closed and self.sent + len(frame) - self.acked > self.win:
+                        self.cond.wait()
+                    if self.closed:
+                        raise SessionClosed
+                    if held and held():
+                        return False
+                    self.sent += len(frame)
+                    self.unread_max = max(self.unread_max, self.sent - self.acked)
+                    self.last_send = time.monotonic()
+                try:
+                    with self.io_lock:
+                        self.sock.sendall(frame)
+                except OSError:
+                    self.close()
+                    raise SessionClosed
+            return True
+        finally:
+            if not audio:
+                with self.cond:
+                    self.urgent -= 1
+                    self.cond.notify_all()
+
+    def read(self, n):
+        """ちょうど n バイト読む。届いているときだけ io_lock を取って読む"""
+        while len(self.inbuf) < n:
+            pending = self.sock.pending() if isinstance(self.sock, ssl.SSLSocket) else 0
+            if not pending and not select.select([self.sock], [], [], SP_TIMEOUT)[0]:
+                raise TimeoutError
+            with self.io_lock:
+                # 待たずに読む (届いたのが TLS の制御用のレコードや、レコードの途中までなら、また select で待つ)
+                self.sock.setblocking(False)
+                try:
+                    chunk = self.sock.recv(65536)
+                except (ssl.SSLWantReadError, BlockingIOError):
+                    continue
+                finally:
+                    self.sock.settimeout(SP_TIMEOUT)
+            if not chunk:
+                raise EOFError
+            self.inbuf += chunk
+        data = bytes(self.inbuf[:n])
+        del self.inbuf[:n]
+        return data
+
+    def ack(self, n):
+        with self.cond:
+            self.acked = max(self.acked, min(n, self.sent))
+            self.cond.notify_all()
+
+    def wait_closed(self, timeout):
+        with self.cond:
+            self.cond.wait_for(lambda: self.closed, timeout)
+        return self.closed
+
+    def close(self):
+        with self.cond:
+            if self.closed:
+                return
+            self.closed = True
+            self.cond.notify_all()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)  # 命令を待っているスレッドを起こす
+        except OSError:
+            pass
+
+
+class Spotify:
+    """go-librespot の操作と、その音を Pico に流すところ"""
+
+    def __init__(self, api, pipe, kbps):
+        import lameenc  # 使うときだけ要る
+        self.lameenc = lameenc
+        self.api_url = api.rstrip("/")
+        self.pipe = pipe
+        self.kbps = kbps
+        if not os.path.exists(pipe):
+            os.mkfifo(pipe)
+        elif not stat.S_ISFIFO(os.stat(pipe).st_mode):
+            sys.exit("SPOTIFY_PIPE (%s) が FIFO ではない" % pipe)
+
+        # FIFO から読んだ PCM。cond は buf とその下の状態を守る
+        self.cond = threading.Condition()
+        self.buf = bytearray()
+        self.feeding = False   # Pico がつながっていて、読んだ分を buf に溜める
+        self.draining = False  # go-librespot を操作している間。溜まり具合にかかわらず読む (_pump の説明)
+        self.switching = False # 選曲・曲送りで次の曲に移るのを待っている間。送るのを止めておく
+        self.discarding = False  # 選曲・曲送りの途中。FIFO に残った前の曲を、待たずに読んで捨てる
+        # 一時停止中は音を送らない。止まったあとに送るのを状態の知らせだけにして、知らせが音の後ろで待たないように
+        self.holding = False
+        self.held_at = 0.0     # Pico が最後に一時停止を頼んだ時刻
+        self.gen = 0           # 選曲・曲送りのたびに増やす。送る側はこれを見て、作りかけの MP3 を捨てて Z を送る
+
+        self.ops = concurrent.futures.ThreadPoolExecutor(1)  # go-librespot の操作は1つずつ
+        self.list_ops = concurrent.futures.ThreadPoolExecutor(1)  # 曲の一覧 (待つことがあるので操作とは別に)
+        self.tracks = {}  # プレイリストの URI -> (覚えた時刻, [(曲の URI, 曲名 or None)])
+        self.tracks_lock = threading.Lock()
+        self.lock = threading.Lock()
+        self.session = None
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    # --- go-librespot ---
+
+    def api(self, method, path, body=None):
+        """go-librespot の API を呼ぶ。応答の JSON (中身が無ければ None)。つながらなければ OSError"""
+        data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
+        req = urllib.request.Request(self.api_url + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            raw = r.read()
+        return json.loads(raw) if raw else None
+
+    # --- FIFO ---
+
+    def _pump(self):
+        """FIFO から go-librespot の音を読む。
+
+        Pico がつながっている間は、Pico に送るのが追いつく分だけ読む。go-librespot は FIFO に書けるまで
+        待つので、Pico が鳴らす速さで進む。ただし go-librespot は FIFO に書いている間ロックを持ったままで、
+        一時停止や曲送りはそのロックを待つ。読むのを止めたまま操作すると固まるので、操作の間 (draining) は
+        溜まり具合にかかわらず読む。
+        Pico がつながっていない間は読み捨てる。Pico が要らない分を読むときは、どちらも実時間の速さにする
+        (go-librespot を詰まらせず、早送りもさせない)"""
+        while True:
+            try:
+                fd = os.open(self.pipe, os.O_RDONLY)  # go-librespot が書く側を開くまで待つ
+            except OSError as e:
+                sys.stderr.write("spotify: %s\n" % e)
+                time.sleep(5)
+                continue
+            t0, paced = time.monotonic(), 0  # 実時間の速さで読んだ分を数える
+            try:
+                while True:
+                    with self.cond:
+                        self.cond.wait_for(lambda: not self.feeding or self.draining or self.discarding
+                                           or len(self.buf) < SP_READY)
+                        slow = not self.discarding and (not self.feeding or len(self.buf) >= SP_READY)
+                    data = os.read(fd, 8192)
+                    if not data:
+                        break  # go-librespot が閉じた。また開くのを待つ
+                    with self.cond:
+                        if self.discarding:
+                            continue
+                        if self.feeding:
+                            self.buf += data
+                            if len(self.buf) > SP_HOLD:
+                                del self.buf[:(len(self.buf) - SP_HOLD + 3) & ~3]
+                            self.cond.notify_all()
+                    if not slow:
+                        continue
+                    now = time.monotonic()
+                    if now - t0 > paced / SP_RATE + 1:
+                        t0, paced = now, 0  # 止まっていた後は数え直す
+                    paced += len(data)
+                    ahead = paced / SP_RATE - (now - t0)
+                    if ahead > 0:
+                        time.sleep(ahead)
+            finally:
+                os.close(fd)
+
+    def _set_feeding(self, on):
+        with self.cond:
+            self.feeding = on
+            self.buf.clear()
+            self.cond.notify_all()
+
+    # --- 操作 ---
+
+    def _control(self, s, method, path, body=None):
+        """go-librespot を操作する。その間は FIFO を読み続ける"""
+        with self.cond:
+            self.draining = True
+            self.cond.notify_all()
+        try:
+            self.api(method, path, body)
+        except OSError as e:
+            sys.stderr.write("spotify: %s %s: %s\n" % (method, path, e))
+            self._error(s, "librespot down")
+        finally:
+            with self.cond:
+                self.draining = False
+                self.cond.notify_all()
+
+    def _switch(self, s, path, body=None):
+        """選曲・曲送り。go-librespot を一時停止し、FIFO に残った前の曲を読み捨ててから切り替えて再開する。
+        go-librespot の FIFO 出力は、曲を変えても書いてしまった分を捨てない (Drop() が何もしない) ので、
+        そのまま切り替えると前の曲が 1 秒ほど続いた。最後に Z を送らせ、Pico にもそれより前の音を捨てさせる"""
+        t0 = time.monotonic()
+        with self.cond:
+            self.switching = self.discarding = True
+            self.cond.notify_all()
+        try:
+            try:
+                self.api("POST", "/player/pause")  # 止まっていれば何もしない
+            except OSError as e:
+                sys.stderr.write("spotify: pause: %s\n" % e)
+            time.sleep(SP_DISCARD_WAIT)
+            with self.cond:
+                self.discarding = False
+                self.buf.clear()
+                self.cond.notify_all()
+            self._control(s, "POST", path, body)
+            self._control(s, "POST", "/player/resume")  # 曲送りは止めたままのことがある。選曲 (play) ならもう鳴っている
+            sys.stderr.write("spotify: %s %.1fs\n" % (path, time.monotonic() - t0))
+        finally:
+            with self.cond:
+                self.gen += 1
+                self.switching = self.discarding = False
+                self.cond.notify_all()
+
+    def _shuffle(self, s):
+        try:
+            on = bool((self.api("GET", "/status") or {}).get("shuffle_context"))
+        except (OSError, ValueError):
+            return self._error(s, "librespot down")
+        self._control(s, "POST", "/player/shuffle_context", {"shuffle_context": not on})
+
+    def _hold(self, on, by_pico=False):
+        with self.cond:
+            if by_pico:
+                self.held_at = time.monotonic()
+            self.holding = on
+            self.cond.notify_all()
+
+    def _play(self, s, n, i):
+        """n 番目のプレイリストを、i 番目の曲から (i が -1 なら頭から) 再生する"""
+        body = {"uri": s.uris[n]}
+        if i >= 0:
+            try:
+                items = self._context_tracks(s.uris[n], i, i + 1)
+            except (OSError, ValueError):
+                items = None
+            if items and i < len(items):
+                body["skip_to_uri"] = items[i][0]
+        self._switch(s, "/player/play", body)
+        self.list_ops.submit(self._context_tracks, s.uris[n])  # 今の曲が何番目かを S で知らせられるように
+
+    def _shuffle_play(self, s, n):
+        """シャッフルにしてから再生する。go-librespot は、どの曲から鳴らすかもランダムに選ぶ"""
+        self._control(s, "POST", "/player/shuffle_context", {"shuffle_context": True})
+        self._switch(s, "/player/play", {"uri": s.uris[n]})
+        self.list_ops.submit(self._context_tracks, s.uris[n])
+
+    def _context_tracks(self, uri, lo=0, hi=0):
+        """プレイリストの曲 [(曲の URI, 曲名 or None, アーティスト)]。go-librespot は一覧と曲名を裏で集めるので、一覧ができて
+        lo〜hi 番目の曲名がそろうまで (最大 SP_TRACKS_WAIT 秒) 待つ。一覧ができなければ None"""
+        with self.tracks_lock:
+            hit = self.tracks.get(uri)
+        if hit and time.monotonic() - hit[0] < SP_TRACKS_TTL and all(t[1] for t in hit[1][lo:hi]):
+            return hit[1]
+        deadline = time.monotonic() + SP_TRACKS_WAIT
+        while True:
+            d = self.api("GET", "/context/tracks?uri=" + urllib.parse.quote(uri, safe=":")) or {}
+            items = [(t["uri"], (t.get("track") or {}).get("name"),
+                      ", ".join((t.get("track") or {}).get("artist_names") or [])) for t in d.get("tracks") or []]
+            if d.get("ready") and all(t[1] for t in items[lo:hi]) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        if not d.get("ready"):
+            return None
+        with self.tracks_lock:
+            self.tracks[uri] = (time.monotonic(), items)
+        return items
+
+    def _send_tracks(self, s, n, start):
+        """n 番目のプレイリストの、start 番目から SP_PAGE 曲の名前とアーティストを I で送る"""
+        try:
+            items = self._context_tracks(s.uris[n], start, start + SP_PAGE)
+        except (OSError, ValueError) as e:  # 404 は go-librespot の metadata.enabled が false
+            sys.stderr.write("spotify: tracks: %s\n" % e)
+            return self._error(s, "no track list")
+        if items is None:
+            return self._error(s, "no track list")
+        if not items:
+            return s.send(b"I", b"%d\t-1\t0\t" % n)
+        for i in range(start, min(start + SP_PAGE, len(items))):
+            _, name, artist = items[i]
+            s.send(b"I", b"%d\t%d\t%d\t" % (n, i, len(items)) + (to_lcd(name or "", SP_TRACK_MAX) or b"?")
+                   + b"\t" + to_lcd(artist, SP_ARTIST_MAX))
+
+    def _track_index(self, context, track):
+        """覚えている一覧の中で、track が何番目か。分からなければ -1"""
+        with self.tracks_lock:
+            hit = self.tracks.get(context)
+        for i, t in enumerate(hit[1] if hit else []):
+            if t[0] == track:
+                return i
+        return -1
+
+    def _error(self, s, text):
+        try:
+            s.send(b"E", text.encode())
+        except SessionClosed:
+            pass
+
+    def _command(self, s, data):
+        kind, arg = data[:1], data[1:].decode("ascii", "replace")
+        if kind == b"C":
+            if arg.isdigit():
+                s.ack(int(arg))
+            return
+        sys.stderr.write("spotify: %s\n" % data.decode("ascii", "replace"))
+        if kind in (b"K", b"R", b"P", b"U", b"N", b"B"):
+            s.cmds += 1
+            self._hold(kind == b"K", kind == b"K")  # 一時停止は今すぐ音を止める。再開・選曲・曲送りは鳴らす
+        n, _, i = arg.partition(":")
+        n = int(n) if n.isdigit() and int(n) < len(s.uris) else -1
+        i = int(i) if i.isdigit() else -1
+        if kind == b"P" and n >= 0:
+            self._submit(self._play, s, n, i)
+        elif kind == b"U" and n >= 0:
+            self._submit(self._shuffle_play, s, n)
+        elif kind == b"Q" and n >= 0 and i >= 0:
+            def send_tracks():
+                try:
+                    self._send_tracks(s, n, i)
+                except SessionClosed:
+                    pass
+            self.list_ops.submit(send_tracks)
+        elif kind == b"N":
+            self._submit(self._switch, s, "/player/next")
+        elif kind == b"B":
+            self._submit(self._switch, s, "/player/prev")
+        elif kind == b"K":
+            self._submit(self._control, s, "POST", "/player/pause")
+        elif kind == b"R":
+            self._submit(self._control, s, "POST", "/player/resume")
+        elif kind == b"F":
+            self._submit(self._shuffle, s)
+
+    def _submit(self, fn, *args):
+        """操作を順に1つずつする。失敗したらログに出す (投げっぱなしだと例外が消える)"""
+        def done(f):
+            if f.exception():
+                sys.stderr.write("spotify: %s: %r\n" % (fn.__name__, f.exception()))
+        self.ops.submit(fn, *args).add_done_callback(done)
+
+    # --- Pico へ送る ---
+
+    def _send_lists(self, s):
+        """プレイリストの一覧を送る。先頭はお気に入りの曲 (Liked Songs)。go-librespot の一覧には入っていないので、
+        ユーザー名から URI (spotify:user:<ユーザー名>:collection) を作って足す"""
+        try:
+            user = (self.api("GET", "/status") or {}).get("username")
+            items = (self.api("GET", "/library/playlists?limit=%d" % (SP_LISTS - 1)) or {}).get("items")
+        except (OSError, ValueError) as e:
+            sys.stderr.write("spotify: playlists: %s\n" % e)
+            return self._error(s, "librespot down")
+        if not user or items is None:
+            return self._error(s, "spotify login")  # 204: まだログインしていない
+        lists = [("spotify:user:%s:collection" % user, LIKED_NAME)] + [(p["uri"], p.get("name", "")) for p in items]
+        s.uris = [uri for uri, _ in lists]
+        for i, (_, name) in enumerate(lists):
+            s.send(b"L", b"%d\t%d\t" % (i, len(lists)) + (to_lcd(name, SP_NAME_MAX) or b"?"))
+
+    def _send_audio(self, s):
+        """FIFO から読んだ PCM を MP3 にして送る"""
+        def encoder():
+            e = self.lameenc.Encoder()
+            e.set_bit_rate(self.kbps)
+            e.set_in_sample_rate(44100)
+            e.set_channels(2)
+            e.set_quality(5)
+            return e
+
+        enc, out, gen = encoder(), bytearray(), self.gen
+        while not s.closed:
+            with self.cond:
+                # 切れ目 (Z) は一時停止中でも送る。音は一時停止中は送らない
+                self.cond.wait_for(lambda: s.closed or (not self.switching and (
+                                   self.gen != gen or (not self.holding and len(self.buf) >= SP_CHUNK))), 1)
+                if s.closed or self.switching:
+                    continue
+                if self.gen != gen:
+                    gen = self.gen
+                    pcm = None
+                elif not self.holding and len(self.buf) >= SP_CHUNK:
+                    pcm = bytes(self.buf[:SP_CHUNK])
+                    del self.buf[:SP_CHUNK]
+                    self.cond.notify_all()
+                else:
+                    continue
+            if pcm is None:
+                # 選曲・曲送り。前の曲の残りを捨て、ここから新しい曲だと知らせる
+                enc, out = encoder(), bytearray()
+                s.send(b"Z")
+                continue
+            out += enc.encode(pcm)
+            while len(out) >= SP_FRAME:
+                if not s.send(b"A", bytes(out[:SP_FRAME]), held=lambda: self.holding or self.switching):
+                    break  # 一時停止中。残りは再開したら送る
+                s.audio += SP_FRAME
+                del out[:SP_FRAME]
+
+    def _send_status(self, s):
+        """曲と状態が変わったら知らせる。何も送っていなければ HEARTBEAT 秒ごとに H を送る"""
+        last_track = last_state = None
+        down = False
+        while not s.wait_closed(SP_POLL):
+            try:
+                st = self.api("GET", "/status")
+                down = False
+            except (OSError, ValueError):
+                if not down:
+                    self._error(s, "librespot down")
+                down = True
+                st = None
+            if st:
+                # 曲が変わる間は一瞬 track が無くなる。そのときは何も知らせない
+                t = st.get("track") or {}
+                if t and t.get("uri") != last_track:
+                    last_track = t.get("uri")
+                    artists = ", ".join(t.get("artist_names") or [])
+                    s.send(b"T", to_lcd(t.get("name", ""), SP_TITLE_MAX) + b"\t" + to_lcd(artists, SP_TITLE_MAX))
+                context = st.get("context_uri")
+                state = ("stopped" if st.get("stopped") else "paused" if st.get("paused") else "playing",
+                         int(bool(st.get("shuffle_context"))),
+                         s.uris.index(context) if context in s.uris else -1,
+                         self._track_index(context, t.get("uri")) if t else -1)
+                # 選曲・曲送りの途中は、こちらで一時停止しているので状態を見ない (Pico が止まってしまう)
+                if self.switching:
+                    continue
+                # 一時停止したら音を止めてから知らせる (知らせのあとに音が続かないように)。Pico が止めた直後は、
+                # 止まる前の「再生中」が見えることがあるので、少し待ってから鳴らす
+                if state[0] == "paused":
+                    self._hold(True)
+                elif state[0] == "playing" and self.holding and time.monotonic() - self.held_at >= SP_HOLD_WAIT:
+                    self._hold(False)
+                if state != last_state:
+                    last_state = state
+                    s.send(b"S", ("%s\t%d\t%d\t%d\t%d" % (state[:3] + (s.cmds, state[3]))).encode())
+            if time.monotonic() - s.last_send >= HEARTBEAT:
+                s.send(b"H")
+
+    def serve(self, handler, win):
+        """Pico との WebSocket が開いてから閉じるまで"""
+        s = SpotifySession(handler.connection, win)
+        with self.lock:
+            old, self.session = self.session, s
+        if old:
+            old.close()
+        self._set_feeding(True)
+        sys.stderr.write("spotify: session start win=%d\n" % win)
+
+        def run(target):
+            def body():
+                try:
+                    target(s)
+                except SessionClosed:
+                    pass
+                except Exception as e:  # 送る側が死んだら全体を閉じる (Pico はつなぎ直してくる)
+                    sys.stderr.write("spotify: %s: %r\n" % (target.__name__, e))
+                    s.close()
+            threading.Thread(target=body, daemon=True).start()
+
+        handler.connection.settimeout(SP_TIMEOUT)
+        try:
+            self._send_lists(s)
+            run(self._send_audio)
+            run(self._send_status)
+            while not s.closed:
+                op, data = ws_read(s.read)
+                if op is None or op == 0x8:
+                    break
+                if op == 0x9:
+                    s.send(b"", data, 0xA)  # ping には pong を返す
+                elif op == 0x2 and data:
+                    self._command(s, data)
+        except (OSError, EOFError, SessionClosed) as e:
+            if not s.closed:
+                sys.stderr.write("spotify: %r\n" % e)
+        finally:
+            s.close()
+            with self.lock:
+                last = self.session is s
+                if last:
+                    self.session = None
+            if last:
+                # 聞く人がいなくなったので止める。読み捨てに切り替えてから止める (_pump の説明)
+                self._set_feeding(False)
+                self._submit(self._control, s, "POST", "/player/pause")
+            sys.stderr.write("spotify: session end (%d KB audio, unread max %d/%d)\n"
+                             % (s.audio // 1024, s.unread_max, win))
+
+
+SPOTIFY = None  # SPOTIFY_PIPE があれば main() が作る
+
+
 # ---------------- HTTP ----------------
 
 def stream_after(url):
@@ -253,12 +901,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
+        if url.path == "/spotify" and SPOTIFY:
+            if self._authorized():
+                self._spotify(url)
+            return
         if url.path != "/stream":
             return self._text("espoke discord relay\n" if url.path == "/" else "not found\n",
                               200 if url.path == "/" else 404)
         if not self._authorized():
             return
         self._stream(stream_after(url))
+
+    def _spotify(self, url):
+        """WebSocket に切り替えて、Spotify の音と操作をやりとりする"""
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+            return self._text("websocket only\n", 400)
+        win = urllib.parse.parse_qs(url.query).get("win", [""])[0]
+        win = min(max(int(win), SP_WIN_MIN), SP_WIN_MAX) if win.isdigit() else 3072
+        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        # HTTP/1.0 の応答では Funnel の手前のプロキシが切り替えてくれないので、ここだけ 1.1 で返す
+        self.wfile.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                          "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
+        self.close_connection = True
+        SPOTIFY.serve(self, win)
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
@@ -313,6 +979,50 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("  stream closed by client (%d sent)\n" % sent)
         except (TimeoutError, socket.timeout):
             sys.stderr.write("  client gone, %ds no progress (%d sent)\n" % (STREAM_TIMEOUT, sent))
+
+
+class TLSHTTPServer(ThreadingHTTPServer):
+    """TLS を自分で受ける HTTP サーバー。Funnel の TCP 転送 (SPOTIFY_FUNNEL_PORT) の先に置く。
+    証明書のファイルが新しくなったら、次の接続から読み直す"""
+
+    def __init__(self, addr, handler, cert, key):
+        super().__init__(addr, handler)
+        self.cert, self.key = cert, key
+        self._ctx, self._mtime = None, 0
+
+    def _context(self):
+        mtime = os.stat(self.cert).st_mtime
+        if self._ctx is None or mtime != self._mtime:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(self.cert, self.key)
+            self._ctx, self._mtime = ctx, mtime
+        return self._ctx
+
+    def finish_request(self, request, client_address):
+        # 握手は接続ごとのスレッドでする (Pico は 5〜9 秒かかる)
+        request.settimeout(STREAM_TIMEOUT)
+        try:
+            tls = self._context().wrap_socket(request, server_side=True)
+        except (OSError, ValueError) as e:
+            sys.stderr.write("tls: %s %r\n" % (client_address[0], e))
+            return
+        try:
+            self.RequestHandlerClass(tls, client_address, self)
+        finally:
+            tls.close()
+
+
+def keep_cert(host, cert, key):
+    """tailscale cert で Funnel と同じ証明書を取り出し、1日ごとに取り直す (期限が近ければ tailscaled が更新する)"""
+    while True:
+        try:
+            r = subprocess.run(["tailscale", "cert", "--cert-file", cert, "--key-file", key, host],
+                               capture_output=True, text=True, timeout=300)
+            if r.returncode:
+                sys.stderr.write("tailscale cert: %s\n" % (r.stderr.strip() or r.stdout.strip()))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            sys.stderr.write("tailscale cert: %r\n" % e)
+        time.sleep(CERT_CHECK)
 
 
 # ---------------- Discord ----------------
@@ -426,10 +1136,10 @@ def funnel_host():
 
 
 def main():
-    global KEY
+    global KEY, SPOTIFY
 
     ap = argparse.ArgumentParser(
-        description="espoke 用: Discord の発言を LCD 用の半角カナにして Pico WH へ流す")
+        description="espoke 用: Discord の発言を LCD 用の半角カナにして Pico WH へ流す。Spotify の音も流す")
     ap.add_argument("--port", type=int, default=8001)
     ap.add_argument("--env", default="~/espoke/relay.env",
                     help="DISCORD_TOKEN などを書いたファイル (無ければ環境変数だけを見る)")
@@ -462,12 +1172,30 @@ def main():
 
     _reading("")  # 辞書の読み込みに数秒かかるので、つながれる前に済ませておく
 
+    pipe = os.path.expanduser(os.environ.get("SPOTIFY_PIPE", ""))
+    if pipe:
+        try:
+            SPOTIFY = Spotify(os.environ.get("SPOTIFY_API", "http://127.0.0.1:3678"), pipe,
+                              int(os.environ.get("SPOTIFY_KBPS", "128")))
+        except ImportError:
+            sys.exit("Spotify には lameenc が要る (~/espoke/venv/bin/pip install lameenc)")
+        print("spotify: %s から %s kbps の MP3 にして流す" % (pipe, SPOTIFY.kbps))
+
     # Funnel が 127.0.0.1 へ中継してくるので、外には直接開けない
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     host = funnel_host() or "<マシン名>.<tailnet>.ts.net"
     print("  http://127.0.0.1:%d/" % args.port)
     print()
     print("公開していなければ:  tailscale funnel --bg --https=%d %d" % (FUNNEL_PORT, args.port))
+    if SPOTIFY:
+        # Spotify は TLS をここで受ける。証明書は tailscale cert で Funnel と同じものを取り出す
+        tls_port = int(os.environ.get("SPOTIFY_TLS_PORT", SPOTIFY_TLS_PORT))
+        cert, key = (os.path.join(os.path.dirname(env), name) for name in ("tls.crt", "tls.key"))
+        if funnel_host():
+            threading.Thread(target=keep_cert, args=(host, cert, key), daemon=True).start()
+        tls_server = TLSHTTPServer(("127.0.0.1", tls_port), Handler, cert, key)
+        threading.Thread(target=tls_server.serve_forever, daemon=True).start()
+        print("Spotify も:          tailscale funnel --bg --tcp=%d tcp://127.0.0.1:%d" % (SPOTIFY_FUNNEL_PORT, tls_port))
     print()
     print("espoke/arduino_secrets.h に書く:")
     print('  #define RELAY_HOST "%s"' % host)

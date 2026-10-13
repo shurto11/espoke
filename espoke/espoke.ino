@@ -11,7 +11,7 @@
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
  *      BOOTSEL を押しても再生を始める
  *   4. LCD1602A の画面はホームから選ぶ。ホームの1行目は月日と時刻 (NTP で合わせた日本時間)、2行目で
- *      SW2 / SW3 で Music / Discord / System を選び、SW4 で開く。
+ *      SW2 / SW3 で Music / Spotify / Discord / System を選び、SW4 で開く (Spotify は Wi-Fi につながっているときだけ出る)。
  *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
  *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
@@ -24,6 +24,14 @@
  *   6. RELAY_HOST の中継 (tools/discord_relay.py) に HTTPS でつなぎ、Discord のメッセージを受け取る。
  *      届いたら Receive の画面に切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
  *      変換して送ってくるので、そのまま LCD に書ける。Send の画面で打った文は、同じ中継を通して Discord に送る
+ *   7. ホームで Spotify を開くと Spotify モードになる。中継が、同じ PC で動かす go-librespot の音を MP3 にして
+ *      WebSocket で流してくるので、SD の曲と同じく libmad でデコードしてイヤホンで鳴らす。モードの間は
+ *      Spotify の画面だけを使い、Discord は受け取らない (届いた発言は、モードを抜けてつなぎ直すと届く)
+ *        一覧: SW2 / SW3 でプレイリスト (先頭は Liked Songs) を選び、SW4 で曲選択へ。SW1 でモードを抜けてホームへ
+ *        曲選択: 1行目に曲名 (鳴っている曲なら左端に ▶)、2行目にアーティストと番号。SW2 / SW3 で曲を選び、
+ *                SW4 でその曲から再生する。SW4 長押しで、選んだ曲に関係なくシャッフルで再生する。SW1 で一覧へ
+ *        一覧と曲選択の SW3 長押しで、再生中の画面へ
+ *        再生中: SW1 長押し 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 / SW4 シャッフル / SW1 曲選択へ
  *
  * 音声フォーマット:
  *   MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
@@ -59,6 +67,9 @@
 #endif
 #ifndef RELAY_PORT
 #define RELAY_PORT 8443  // tailscale funnel が使えるのは 443 / 8443 / 10000
+#endif
+#ifndef SPOTIFY_PORT
+#define SPOTIFY_PORT 10000  // Spotify は中継が TLS を受ける (Funnel の TCP 転送)。tools/discord_relay.py の「Spotify」の節
 #endif
 
 // --- 設定 ---
@@ -113,6 +124,28 @@ static const int     SD_MAX_DEPTH  = 5;    // フォルダを潜る深さ
 static const size_t        MSG_MAX         = 8;    // 覚えておく数。中継は起動直後に直近のこの数だけ送ってくる
 static const unsigned long MSG_SCROLL_MS   = 300;  // 16 文字に収まらない本文を1文字ずつ流す間隔
 static const int           MSG_SCROLL_HOLD = 5;    // 本文の頭と末尾で止める長さ (MSG_SCROLL_MS 何回分か)
+
+// Spotify。中継 (tools/discord_relay.py) が go-librespot の音を MP3 にして、WebSocket で流してくる
+// MP3 の受信リング。SP_SEG ずつ、SP_SEGS_MAX 個まで取る (128kbps の 1 秒は 16KB)。ヒープは空きが 30KB あっても
+// 細切れで、12KB を1つに取れなかった (実機)。小分けにすれば取れる。取るのは /spotify につないだ後にして、
+// TLS が先に取れるようにする
+static const size_t        SP_SEG        = 4096;
+static const size_t        SP_SEGS_MAX   = 6;
+static const uint32_t      SP_HEAP_SPARE = 8 * 1024;  // リングを取ったあとに残しておく空きヒープ (プレイリストの名前などに)
+// 中継に伝える「まだ読んでいなくてよい量」(win)。Funnel の入口から dynabook までは往復 1 秒ほどかかる (実測) ので、
+// 1 秒に win しか届かない。128kbps (16KB/秒) の 3 倍にしておく。曲送りのときに捨てる前の曲の量の上限でもある。
+// TLS は中継が受けて 1KB ずつのレコードで送ってくるので、受信バッファ (RELAY_TLS_RX) より大きくてよい
+static const int           SP_WIN        = 49152;
+static const size_t        SP_DECODE_MIN = 2048;    // リングにこれだけあればデコードする (MP3 の1フレームは 128kbps で 418 バイト)
+static const size_t        SP_CREDIT_STEP = 1024;   // これだけ読むたびに、読んだ量を中継に知らせる
+// pollSpotify() で一度に読む上限。曲送りで前の曲 (win まで) を読み捨てるとき、全部読み終えるまで戻らないと
+// イヤホンへ何も書けず、A2DP のバッファが空になってピーと鳴った (feedSilence() の説明)
+static const size_t        SP_POLL_MAX   = 2048;
+static const unsigned long SP_KEEPALIVE_MS = 30000; // 読んでいなくても、この間隔で知らせる (中継は 90 秒何も来なければ切る)
+static const size_t        SP_LISTS_MAX  = 50;      // 覚えておくプレイリストの数
+static const size_t        SP_TEXT_MAX   = 200;     // 音以外のフレームの中身の上限
+// WebSocket の Sec-WebSocket-Key。中継も Funnel も値を確かめないので固定 ("espoke-spotify!!" の base64)
+static const char *const   WS_KEY = "ZXNwb2tlLXNwb3RpZnkhIQ==";
 // ------------
 
 // .ino はビルド時に関数プロトタイプが先頭へ自動生成されるので、
@@ -135,6 +168,17 @@ struct Mp3Decoder {
   struct mad_synth  synth;
   uint8_t           in[MP3_IN_SIZE + MAD_BUFFER_GUARD];
   bool              eof;  // ファイルを読み終え、末尾に MAD_BUFFER_GUARD 分の 0 を足した
+  File             *file; // 読む SD のファイル。nullptr なら Spotify の受信リングから読む
+};
+
+// 中継とつなぐ TLS のクライアント。BearSSL::WiFiClientSecure の中身 (Ctx) をそのまま使い、write() のたびに
+// 相手の受け取り (TCP の ACK) を最大 300ms 待つのだけをやめる。Spotify では読んだ量を 1KB ごとに知らせるので、
+// そのたびに往復の時間 (Funnel 越しで数十 ms) 止まると音が途切れる。データは lwIP に渡すところまでは書く
+class RelayClient : public BearSSL::WiFiClientSecureCtx {
+public:
+  void flush() override {
+    (void)BearSSL::WiFiClientSecureCtx::flush(1);
+  }
 };
 
 // Discord のメッセージ1件。名前と本文は LCD の文字コード (英数字と半角カナ) のバイト列
@@ -145,10 +189,18 @@ struct Msg {
   String text;    // 200 バイトまで
 };
 
+// 収まらない文字を左へ流して出す位置。MSG_SCROLL_MS ごとに1文字ずつ進め、頭と末尾で少し止める (marqStep())
+struct Marquee {
+  size_t pos;   // 何文字流したか
+  int    hold;  // 端で止まっている残り回数
+};
+
 A2DPSource a2dp;
 LiquidCrystal_I2C *lcd = nullptr;
 static uint8_t lcdAddr = LCD_ADDR_DEFAULT;  // 棒を描くときは LiquidCrystal_I2C を通さず直接送る
 static bool    lcdResyncOn = true;           // "lcd resync off" で、描き直すときの区切りの合わせ直しを止める (調べるとき用)
+static const uint8_t LCD_PLAY_MARK = 6;      // 曲選択の画面で再生中の印 (▶) に使う自作文字。ほかの画面では棒の 7 段
+static bool    lcdPlayMarkLoaded = false;    // 今 LCD_PLAY_MARK が ▶ になっているか
 
 // 帯域の棒。writePcm() で鳴らす音をモノラルにして溜め、BAR_HOP ごとに FFT して段の高さを記録しておく。
 // A2DP のバッファには 370ms 分ほど先の音まで入っているので、描くときは今イヤホンへ送り出している
@@ -228,10 +280,10 @@ static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
-// LCD の画面。ホームで Music / Discord / System を選んで開き、Discord ではさらに Receive (受信) か Send (送信) を選ぶ。
+// LCD の画面。ホームで Music / Spotify / Discord / System を選んで開き、Discord ではさらに Receive (受信) か Send (送信) を選ぶ。
 // SW1 (か GP15) で前の画面に戻る
-enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM };
-static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system"};  // シリアルに出す名前
+enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY };
+static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify"};  // シリアルに出す名前
 static int    page = PAGE_MUSIC;           // 起動中は Music の画面に状態を出し、setup() の最後でホームにする
 static int    pageBeforeMsg = -1;          // 着信で Receive の画面に切り替える前の画面。戻るときはここへ
 static String mainLines[2];                // Music の画面の内容。他の画面を見ている間も更新しておく
@@ -245,7 +297,8 @@ struct MenuItem {
   const char *title;
   int         page;
 };
-static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Discord", PAGE_DISCORD}, {"System", PAGE_SYSTEM}};
+static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Spotify", PAGE_SPOTIFY}, {"Discord", PAGE_DISCORD},
+                                     {"System", PAGE_SYSTEM}};
 static const MenuItem DISCORD_MENU[] = {{"Receive", PAGE_MSG}, {"Send", PAGE_INPUT}};
 static const int HOME_COUNT = sizeof(HOME_MENU) / sizeof(HOME_MENU[0]);
 static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
@@ -267,17 +320,17 @@ struct KeyState {
   bool          raw;
   bool          stable;
   unsigned long changedAt;
-  bool          longDone;  // KEY_HOLD を長押しした。離したときの役目はしない
+  bool          holdable;  // 押したときに長押しのある役目だった。短く押したときの役目は離したときにする
+  bool          longDone;  // 長押しした。離したときの役目はしない
 };
 enum { KEY_BACK, KEY_DOT, KEY_DASH, KEY_ENTER, KEY_COUNT };
-// 長押しのあるスイッチ。基板のスイッチは SW1〜SW4 の4つだけなので、長押しで役目を足す。
-// 短く押したときの役目は、長押しと区別するため離したときにする (トン・ツーの SW2・SW3 はすぐ反応させたいので付けない)
-static const int KEY_HOLD = KEY_BACK;
+// 基板のスイッチは SW1〜SW4 の4つだけなので、長押しで役目を足す (keyHasHold())。長押しのあるときは、
+// 短く押したときの役目を、長押しと区別するため離したときにする (トン・ツーの SW2・SW3 はすぐ反応させたいので付けない)
 static KeyState keys[KEY_COUNT] = {
-  {PIN_BACK,  HIGH, HIGH, 0, false},
-  {PIN_DOT,   HIGH, HIGH, 0, false},
-  {PIN_DASH,  HIGH, HIGH, 0, false},
-  {PIN_ENTER, HIGH, HIGH, 0, false},
+  {PIN_BACK,  HIGH, HIGH, 0, false, false},
+  {PIN_DOT,   HIGH, HIGH, 0, false, false},
+  {PIN_DASH,  HIGH, HIGH, 0, false, false},
+  {PIN_ENTER, HIGH, HIGH, 0, false, false},
 };
 // Music の画面で SW1〜SW4 を押したときに出すコマンド (SW1 は長押し)。シリアルから打ったのと同じに扱う
 static const char *const PLAY_KEY_COMMANDS[KEY_COUNT] = {"pause", "prev", "next", "shuffle"};
@@ -304,7 +357,7 @@ static String morseText = "";              // 確定した文章
 static String morseNote = "";              // 送った結果。Send の画面の2行目に、符号を打ち始めるまで出す
 
 // Discord の中継 (tools/discord_relay.py) から受け取ったメッセージ
-static BearSSL::WiFiClientSecure *relay = nullptr;  // 最初につなぐときに作る (TLS のスタック 6.4KB を起動時から取らない)
+static RelayClient *relay = nullptr;       // 最初につなぐときに作る (TLS のスタック 6.4KB を起動時から取らない)
 static BearSSL::X509List *relayCA = nullptr;
 static bool   relayOpen = false;           // メッセージの流れを受け取っている最中か
 static bool   relayQuiet = false;          // 起動して最初の同期中。前からあった分なので着信として知らせない
@@ -319,9 +372,61 @@ static String relayOutbox = "";            // Discord に送る文。次に中�
 static Msg    msgs[MSG_MAX];               // 古い順に msgCount 件
 static size_t msgCount = 0;
 static int    msgView = 0;                 // Receive の画面で見ているもの。0 が最新、1 がその1つ前
-static size_t msgScroll = 0;               // 本文を何文字流したか
-static int    msgHold = 0;                 // 本文の端で止まっている残り回数
+static Marquee msgMarq = {0, 0};          // 本文を流している位置
 static unsigned long lastMsgScroll = 0;
+
+// Spotify モード。その間は Spotify の画面だけを出し、中継には /spotify の WebSocket でつなぐ (Discord は受け取らない)
+static bool   spMode = false;
+static bool   spWs = false;                 // 中継との今の接続が /spotify の WebSocket か
+// Spotify の画面の見え方。プレイリストの一覧 → 曲選択 → 再生中 の順に進み、SW1 で戻る
+enum SpView { SP_LISTS, SP_TRACKS, SP_NOW };
+static int    spView = SP_LISTS;
+static std::vector<String> spLists;         // プレイリストの名前 (LCD の文字コード)。中継が L で送ってきた順
+static int    spSel = 0;                    // 一覧で選んでいる番号
+static int    spPlaying = -1;               // 再生中のプレイリストの番号。分からなければ -1
+static int    spPlayingTrack = -1;          // 再生中の曲が、そのプレイリストの何番目か。分からなければ -1
+// 曲選択の画面。曲名は中継に SP_PAGE 曲ずつ頼み (Q)、SP_NAMES 曲分だけ覚えておく (番号 % SP_NAMES の所に)
+static const int SP_PAGE = 16;
+static const int SP_NAMES = 32;
+static int    spTrackList = -1;             // 曲選択の画面で見ているプレイリストの番号
+static int    spTrackSel = 0;               // 選んでいる曲の番号 (0 から)
+static int    spTrackTotal = -1;            // 曲の数。中継から届くまでは -1
+static String spTrackNames[SP_NAMES];       // 曲名 (LCD の文字コード)
+static String spTrackArtists[SP_NAMES];     // アーティスト (LCD の文字コード)
+static int    spTrackNameAt[SP_NAMES];      // spTrackNames[k] が何番目の曲の名前か。-1 なら空
+static Marquee spMarq[2] = {{0, 0}, {0, 0}};  // 曲選択の画面で、収まらない曲名 (1行目) とアーティスト (2行目) を流す位置
+static Marquee spNowMarq = {0, 0};          // 再生中の画面で、収まらない曲名を流す位置
+static unsigned long lastSpScroll = 0;
+static int    spAskedPage[2] = {-1, -1};    // 最近頼んだ回の頭の番号。返事を待つ間に同じものを頼み直さない
+static unsigned long spAskedAt[2] = {0, 0};
+static String spTitle = "";                 // 今の曲名とアーティスト (LCD の文字コード)
+static String spArtist = "";
+static String spState = "";                 // 中継が知らせてきた go-librespot の状態 ("playing" / "paused" / "stopped")
+static bool   spShuffle = false;
+static bool   spPaused = false;             // 一時停止中。リングを読み進めずに無音を流す
+static bool   spActive = false;             // 再生を頼んでいる。つなぎ直したら R で再開を頼む
+static uint32_t spCmds = 0;                 // 中継へ送った操作 (P N B K R) の数。中継は S にそれまでに受け取った数を付けてくる
+static bool   spWaitZ = false;              // 選曲・曲送りを頼んだ。Z が来るまでの音は前の曲なので捨てる
+static bool   spReset = false;              // デコーダを初めからやり直す (リングを捨てたとき)
+static bool   spBuffering = true;           // リングに溜まるのを待っている
+static String spNote = "";                  // 中継が知らせてきたエラー。Spotify の画面の2行目に出す
+static bool   sdStale = false;              // Spotify モードで曲の一覧と SD を手放した。SD から流す前に読み直す
+static uint8_t *spSegs[SP_SEGS_MAX];        // MP3 の受信リング (SP_SEG ずつ)。/spotify につないだときに取り、モードを抜けたら返す
+static size_t spRingSize = 0;               // 取れた大きさ (SP_SEG の倍数)。0 ならまだ取っていない
+static size_t spRingHead = 0;               // 一番古いバイトの位置
+static size_t spRingLen = 0;
+static uint32_t spRead = 0;                 // 中継から読んだバイト数の累計 (中継に C で知らせる)
+static uint32_t spReported = 0;             // 最後に知らせた spRead
+static unsigned long spLastReport = 0;
+// WebSocket のフレームを解く途中の状態
+static uint8_t  wsHead[10];
+static size_t   wsHeadLen = 0;
+static bool     wsInFrame = false;          // 頭を読み終えて、中身を読んでいる
+static uint8_t  wsOp = 0;
+static uint32_t wsLeft = 0;                 // 中身の残りのバイト数
+static char     wsKind = 0;                 // バイナリフレームの1バイト目 (種類)。0 ならまだ読んでいない
+static String   wsText = "";                // 音以外のフレームの中身
+static bool     wifiFast = false;           // "wifi fast" で、Spotify の間 Wi-Fi を常時受信にする (既定は省電力)
 
 // ---------------- LCD ----------------
 
@@ -345,12 +450,17 @@ static void printLine(uint8_t row, const String &text) {
   if (page == PAGE_MUSIC && !(row == 1 && barsOn())) drawRow(row, row == 0 ? musicTop() : text);
 }
 
-// Music の画面の1行目。シャッフル中は右端に印 (自作文字 7。⇄ の形) を出す
-static String musicTop() {
-  if (!shuffle) return mainLines[0];
-  String s = mainLines[0].substring(0, LCD_COLS - 1);
+// 1行目の右端にシャッフルの印 (自作文字 7。⇄ の形) を付ける
+static String withShuffleMark(const String &text, bool on) {
+  if (!on) return text;
+  String s = text.substring(0, LCD_COLS - 1);
   while (s.length() < LCD_COLS - 1) s += ' ';
   return s + '\x07';
+}
+
+// Music の画面の1行目。シャッフル中は右端に印を出す
+static String musicTop() {
+  return withShuffleMark(mainLines[0], shuffle);
 }
 
 static void status(const String &a, const String &b) {
@@ -390,17 +500,30 @@ static void setupLCD() {
 }
 
 // 自作文字を LCD に作る。棒の 1〜7 段を自作文字 0〜6 (下から h 行を塗る)、シャッフルの印 (⇄) を 7 にする。
-// 8 段は LCD に元からある全面黒 (0xFF)。lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず
+// 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない Spotify の曲選択の画面では、
+// 6 を再生中の印 (▶) にする (lcdPlayMark())。lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず
 // 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
 static void createLcdChars() {
   static const uint8_t SHUFFLE_MARK[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
+  static const uint8_t PLAY_MARK[8] = {0x10, 0x18, 0x1C, 0x1E, 0x1C, 0x18, 0x10, 0x00};
   if (!lcd) return;
+  lcdPlayMarkLoaded = lcdPlayMark();
   for (uint8_t c = 0; c < 8; c++) {
     Wire.beginTransmission(lcdAddr);
     lcdSendRaw(0x40 | (c << 3), false);  // CGRAM の c 文字目へ
-    for (uint8_t r = 0; r < 8; r++) lcdSendRaw(c == 7 ? SHUFFLE_MARK[r] : (r >= 7 - c ? 0x1F : 0x00), true);
+    for (uint8_t r = 0; r < 8; r++) {
+      uint8_t bits = (r >= 7 - c) ? 0x1F : 0x00;
+      if (c == 7) bits = SHUFFLE_MARK[r];
+      if (c == LCD_PLAY_MARK && lcdPlayMarkLoaded) bits = PLAY_MARK[r];
+      lcdSendRaw(bits, true);
+    }
     Wire.endTransmission();
   }
+}
+
+// 自作文字 LCD_PLAY_MARK を、棒の 7 段ではなく再生中の印 (▶) にしておく画面か
+static bool lcdPlayMark() {
+  return page == PAGE_SPOTIFY && spView == SP_TRACKS;
 }
 
 // ---------------- 帯域の棒 ----------------
@@ -629,7 +752,7 @@ static void lcdResync() {
 // 3 回するので 16 文字で 20ms ほど止まる。変わった所だけを1回の通信にまとめて送る (100kHz で最大 8ms 程度)
 static void drawBars() {
   lastBarDraw = millis();
-  if (!lcd || page != PAGE_MUSIC) return;
+  if (!lcd || !(page == PAGE_MUSIC || (page == PAGE_SPOTIFY && spView == SP_NOW))) return;
 
   // A2DP のバッファと pcmChunk に残っている分だけ、今鳴っているのは書いた所より前
   const uint32_t queued = (A2DP_BUFFER - 1) - a2dp.availableForWrite() / 2 + pcmChunkLen;
@@ -675,30 +798,47 @@ static const Msg &viewedMsg() {
   return msgs[msgCount - 1 - msgView];
 }
 
+// 頭から出し直す。頭で少し止めてから流し始める
+static void marqReset(Marquee &m) {
+  m.pos = 0;
+  m.hold = MSG_SCROLL_HOLD;
+}
+
+// len 文字を width 文字の幅に出すとき、1文字流す。末尾まで来たら少し止めて、頭に戻ってまた止める。
+// 収まるときと止めているときは動かさない。動かしたら true
+static bool marqStep(Marquee &m, size_t len, size_t width) {
+  if (len <= width) return false;
+  if (m.hold > 0) {
+    m.hold--;
+    return false;
+  }
+  m.pos = (m.pos + width >= len) ? 0 : m.pos + 1;
+  if (m.pos == 0 || m.pos + width >= len) m.hold = MSG_SCROLL_HOLD;
+  return true;
+}
+
+// text を流した位置から width 文字分。足りなければ空白で埋める
+static String marqText(const Marquee &m, const String &text, size_t width) {
+  String s = text.length() > width ? text.substring(m.pos, m.pos + width) : text;
+  while (s.length() < width) s += ' ';
+  return s;
+}
+
 // Receive の画面の2行目に、本文を流した位置から書く
 static void drawMsgText() {
-  drawRow(1, viewedMsg().text.substring(msgScroll));
+  drawRow(1, viewedMsg().text.substring(msgMarq.pos));
 }
 
-// 本文を頭から出し直す。頭で少し止めてから流し始める
+// 本文を頭から出し直す
 static void resetMsgScroll() {
-  msgScroll = 0;
-  msgHold = MSG_SCROLL_HOLD;
+  marqReset(msgMarq);
   lastMsgScroll = millis();
 }
 
-// 16 文字に収まらない本文を1文字ずつ流す。末尾まで来たら少し止めて、頭に戻ってまた止める
+// 16 文字に収まらない本文を1文字ずつ流す
 static void scrollMsg() {
   lastMsgScroll = millis();
-  const String &text = viewedMsg().text;
-  if (text.length() <= LCD_COLS) return;
-  if (msgHold > 0) {
-    msgHold--;
-    return;
-  }
-  msgScroll = (msgScroll + LCD_COLS >= text.length()) ? 0 : msgScroll + 1;
-  if (msgScroll == 0 || msgScroll + LCD_COLS >= text.length()) msgHold = MSG_SCROLL_HOLD;
-  drawMsgText();  // 2行目だけ書き直す (16 文字で 20ms ほど)
+  if (marqStep(msgMarq, viewedMsg().text.length(), LCD_COLS)) drawMsgText();  // 2行目だけ書き直す (16 文字で 20ms ほど)
 }
 
 // 選んでいる項目の名前を、左右の矢印で挟んで真ん中に出す。A00 の ROM では 0x7F が ←、0x7E が →
@@ -718,6 +858,106 @@ static String clockLine() {
   char s[LCD_COLS + 1];
   snprintf(s, sizeof(s), "%02d/%02d      %02d:%02d", t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
   return s;
+}
+
+// ホームに出す項目か。Spotify は Wi-Fi につながっていて、中継があるときだけ
+static bool homeItemShown(int i) {
+  return HOME_MENU[i].page != PAGE_SPOTIFY || (RELAY_HOST[0] && WiFi.status() == WL_CONNECTED);
+}
+
+// Spotify の画面の2行目。一覧では選んでいる番号か、つながり具合やエラー
+static String spListLine() {
+  if (!relayOpen) return relayStatus;
+  if (spNote.length()) return spNote;
+  if (spLists.empty()) return "loading";
+  String s = String(spSel + 1) + "/" + String(spLists.size());
+  if (spSel == spPlaying) s += spPaused ? "  pause" : "  playing";
+  return s;
+}
+
+// 曲選択で選んでいる曲が、鳴っている (か一時停止している) 曲か
+static bool spSelIsPlaying() {
+  return spTrackList == spPlaying && spTrackSel == spPlayingTrack && spState != "stopped";
+}
+
+// 曲選択の画面の1行目。鳴っている曲なら左端に印 (自作文字の ▶)、曲名 (収まらなければ流す)、
+// シャッフル中は右端に印
+static size_t spTopWidth() {
+  return LCD_COLS - (spShuffle ? 1 : 0) - (spSelIsPlaying() ? 1 : 0);
+}
+
+static String spTrackTop() {
+  const String *name = spTrackName(spTrackSel);
+  String text = name ? *name : spTrackTotal == 0 ? String("(no tracks)") : String("loading...");
+  String top = spSelIsPlaying() ? String((char)LCD_PLAY_MARK) : String();
+  return withShuffleMark(top + marqText(spMarq[0], text, spTopWidth()), spShuffle);
+}
+
+// 再生中の画面の1行目。曲名 (収まらなければ流す)、シャッフル中は右端に印
+static size_t spNowWidth() {
+  return spShuffle ? LCD_COLS - 1 : LCD_COLS;
+}
+
+static String spNowTop() {
+  return withShuffleMark(marqText(spNowMarq, spTitle.length() ? spTitle : String("Spotify"), spNowWidth()), spShuffle);
+}
+
+// 再生中の画面で、収まらない曲名を1文字ずつ流す (2行目の棒はそのまま)
+static void scrollSpNow() {
+  lastSpScroll = millis();
+  if (marqStep(spNowMarq, spTitle.length(), spNowWidth())) drawRow(0, spNowTop());
+}
+
+// 再生中の画面に移る。曲名は頭から出す
+static void spShowNow() {
+  spView = SP_NOW;
+  marqReset(spNowMarq);
+  lastSpScroll = millis();
+}
+
+// 曲選択の画面の2行目。左にアーティスト (収まらなければ流す)、右に 番号/曲の数
+static String spTrackNumber() {
+  return String(spTrackSel + 1) + "/" + (spTrackTotal >= 0 ? String(spTrackTotal) : String("?"));
+}
+
+static size_t spArtistWidth() {
+  return LCD_COLS - spTrackNumber().length() - 1;
+}
+
+static String spTrackLine() {
+  if (!relayOpen) return relayStatus;
+  if (spNote.length()) return spNote;
+  const String *artist = spTrackArtist(spTrackSel);
+  return marqText(spMarq[1], artist ? *artist : String(), spArtistWidth()) + " " + spTrackNumber();
+}
+
+// 曲名とアーティストを頭から出し直す (選ぶ曲が変わったときと、名前が届いたとき)
+static void spResetTrackScroll() {
+  marqReset(spMarq[0]);
+  marqReset(spMarq[1]);
+  lastSpScroll = millis();
+}
+
+// 曲選択の画面で、収まらない曲名とアーティストを1文字ずつ流す。動いた行だけ書き直す
+static void scrollSpTrack() {
+  lastSpScroll = millis();
+  const String *name = spTrackName(spTrackSel);
+  const String *artist = spTrackArtist(spTrackSel);
+  if (name && marqStep(spMarq[0], name->length(), spTopWidth())) drawRow(0, spTrackTop());
+  if (artist && relayOpen && !spNote.length() && marqStep(spMarq[1], artist->length(), spArtistWidth())) {
+    drawRow(1, spTrackLine());
+  }
+}
+
+// Spotify の画面の2行目。今の曲を見ているとき、棒を出していない間の様子
+static String spNowLine() {
+  if (!a2dp.connected()) return "no earphone";
+  if (!relayOpen) return relayStatus;
+  if (spNote.length()) return spNote;
+  if (spPaused) return "pause " + spArtist;
+  if (spState == "stopped" && !spWaitZ) return "stopped";
+  if (spWaitZ || spBuffering) return "buffering...";
+  return spArtist;
 }
 
 // Discord の画面の2行目に、選んでいる項目の今の様子を出す
@@ -740,10 +980,29 @@ static String pageSummary(int p) {
 static void drawPage() {
   lastPageDraw = millis();
   lcdResync();
+  if (lcdPlayMark() != lcdPlayMarkLoaded) createLcdChars();  // "lcd resync off" で作り直していないとき
   switch (page) {
     case PAGE_HOME:
+      if (!homeItemShown(homeSel)) homeSel = 0;  // Wi-Fi が切れて Spotify が消えた
       drawRow(0, clockLine());
       drawRow(1, menuTitle(HOME_MENU[homeSel].title));
+      break;
+    case PAGE_SPOTIFY:
+      if (spView == SP_NOW) {
+        drawRow(0, spNowTop());
+        if (barsOn()) {
+          invalidateBars();
+          drawBars();
+        } else {
+          drawRow(1, spNowLine());
+        }
+      } else if (spView == SP_TRACKS) {
+        drawRow(0, spTrackTop());
+        drawRow(1, spTrackLine());
+      } else {
+        drawRow(0, spLists.empty() ? String("Spotify") : menuTitle(spLists[spSel].c_str()));
+        drawRow(1, spListLine());
+      }
       break;
     case PAGE_DISCORD:
       drawRow(0, menuTitle(DISCORD_MENU[discordSel].title));
@@ -856,7 +1115,8 @@ static void openPage(int p) {
 
 // 前 (1つ上) の画面に戻る (SW1 か GP15)。着信で切り替わった Receive の画面からは、元の画面に戻る
 static void goBack() {
-  if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
+  if (page == PAGE_SPOTIFY) onSpotifyKey(KEY_BACK);
+  else if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
   else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
   else if (page != PAGE_HOME) openPage(PAGE_HOME);
 }
@@ -869,6 +1129,10 @@ static int stepSel(int sel, int n, int id) {
 static void onKey(int id) {
   if (page == PAGE_INPUT) {
     onMorseKey(id);
+    return;
+  }
+  if (page == PAGE_SPOTIFY) {
+    onSpotifyKey(id);
     return;
   }
   // SW1 はどの画面でも前の画面に戻る (Send だけは backspace で、戻るのは長押し)
@@ -884,11 +1148,17 @@ static void onKey(int id) {
       bool home = page == PAGE_HOME;
       int &sel = home ? homeSel : discordSel;
       if (id == KEY_DOT || id == KEY_DASH) {
-        sel = stepSel(sel, home ? HOME_COUNT : DISCORD_COUNT, id);
+        // ホームでは出していない項目 (Wi-Fi が無いときの Spotify) を飛ばす。Music は必ず出ている
+        do sel = stepSel(sel, home ? HOME_COUNT : DISCORD_COUNT, id);
+        while (home && !homeItemShown(sel));
         drawPage();
         return;
       }
-      if (id == KEY_ENTER) openPage(home ? HOME_MENU[sel].page : DISCORD_MENU[sel].page);
+      if (id == KEY_ENTER) {
+        int p = home ? HOME_MENU[sel].page : DISCORD_MENU[sel].page;
+        if (p == PAGE_SPOTIFY) spotifyOn();
+        else openPage(p);
+      }
       break;
     }
     case PAGE_MUSIC:
@@ -919,9 +1189,98 @@ static void onKey(int id) {
   }
 }
 
-// SW1 の長押し。Music では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る
-static void onHold() {
-  if (page == PAGE_MUSIC) {
+// Spotify の画面のスイッチ。一覧でプレイリストを、曲選択で曲を選んで再生し、再生中は曲を送る (Music と同じ並び)。
+// SW1 で1つ前の見え方に戻り、一覧からはモードを抜ける。曲選択の SW4 長押しは onHold()
+static void onSpotifyKey(int id) {
+  if (spView == SP_NOW) {
+    switch (id) {
+      case KEY_BACK:  // 鳴っているプレイリストの曲選択へ (鳴らし続ける)
+        if (spPlaying >= 0 && spPlaying < (int)spLists.size()) spOpenTracks(spPlaying, std::max(spPlayingTrack, 0));
+        else spView = SP_LISTS;
+        drawPage();
+        break;
+      case KEY_DOT:
+        spSkip(false);
+        break;
+      case KEY_DASH:
+        spSkip(true);
+        break;
+      case KEY_ENTER:
+        spSend("F");
+        break;
+    }
+    return;
+  }
+  if (spView == SP_TRACKS) {
+    switch (id) {
+      case KEY_BACK:
+        spView = SP_LISTS;
+        drawPage();
+        break;
+      case KEY_DOT:
+      case KEY_DASH:
+        if (spTrackTotal > 0) {
+          spTrackSel = stepSel(spTrackSel, spTrackTotal, id);
+          spResetTrackScroll();
+          spAskNames();
+          drawPage();
+        }
+        break;
+      case KEY_ENTER:  // 選んでいる曲から鳴らす
+        if (spTrackTotal > 0) spPlayTrack(spTrackList, spTrackSel);
+        break;
+    }
+    return;
+  }
+  switch (id) {
+    case KEY_BACK:
+      spotifyOff();
+      break;
+    case KEY_DOT:
+    case KEY_DASH:
+      if (!spLists.empty()) {
+        spSel = stepSel(spSel, spLists.size(), id);
+        drawPage();
+      }
+      break;
+    case KEY_ENTER:  // 曲選択へ。鳴っているプレイリストなら、鳴っている曲を選んでおく
+      if (!spLists.empty()) {
+        spOpenTracks(spSel, spSel == spPlaying ? std::max(spPlayingTrack, 0) : 0);
+        drawPage();
+      }
+      break;
+  }
+}
+
+// 長押しのある役目か。SW1 はどの画面でも。Spotify では、曲選択の SW4 (ランダムに鳴らす) と、
+// 一覧と曲選択の SW3 (再生中の画面へ)
+static bool keyHasHold(int id) {
+  if (id == KEY_BACK) return true;
+  if (page != PAGE_SPOTIFY) return false;
+  return (id == KEY_ENTER && spView == SP_TRACKS) || (id == KEY_DASH && spView != SP_NOW);
+}
+
+// 長押し。SW1 は、Music と Spotify では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る。
+// SW4 は Spotify の曲選択の画面で、選んでいる曲に関係なくシャッフルで鳴らす。
+// SW3 は Spotify の一覧と曲選択の画面で、再生中の画面へ移る
+static void onHold(int id) {
+  if (id == KEY_ENTER) {
+    if (page == PAGE_SPOTIFY && spView == SP_TRACKS) spShufflePlay(spTrackList);
+    return;
+  }
+  if (id == KEY_DASH) {
+    // 一覧と曲選択から、再生中の画面へ。何も鳴らしていなければ何もしない
+    if (page == PAGE_SPOTIFY && spView != SP_NOW && (spActive || spState == "playing" || spState == "paused")) {
+      spShowNow();
+      drawPage();
+    }
+    return;
+  }
+  if (page == PAGE_SPOTIFY) {
+    // まだ何も鳴らしていなければ、一覧で選んでいるものを鳴らす
+    if (!spActive && !spPaused && spState != "paused") spPlay(spSel);
+    else spTogglePause();
+  } else if (page == PAGE_MUSIC) {
     keyCommand = PLAY_KEY_COMMANDS[KEY_BACK];
     Serial.printf("key: %s\n", keyCommand.c_str());
   } else {
@@ -972,18 +1331,19 @@ static void pollButton() {
       k.changedAt = millis();
     } else if (raw != k.stable && millis() - k.changedAt >= DEBOUNCE_MS) {
       k.stable = raw;
-      if (i == KEY_HOLD) {
-        // 長押しと区別するため、短く押したときの役目は離したときにする
-        if (raw == LOW) k.longDone = false;
-        else if (!k.longDone) onKey(i);
-      } else if (raw == LOW) {
+      if (raw == LOW) {
+        // 長押しのある役目なら、長押しと区別するため、短く押したときの役目は離したときにする
+        k.holdable = keyHasHold(i);
+        k.longDone = false;
+        if (!k.holdable) onKey(i);
+      } else if (k.holdable && !k.longDone) {
         onKey(i);
       }
     }
     // 長押しは離すのを待たずに動く。押している間に切り替わるので、手応えがある
-    if (i == KEY_HOLD && k.stable == LOW && !k.longDone && millis() - k.changedAt >= LONG_PRESS_MS) {
+    if (k.holdable && k.stable == LOW && !k.longDone && millis() - k.changedAt >= LONG_PRESS_MS) {
       k.longDone = true;
-      onHold();
+      onHold(i);
     }
   }
 
@@ -997,8 +1357,10 @@ static void pollButton() {
   }
 
   if (page == PAGE_MSG && msgCount && millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
-  // Music (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文は、描き直す間隔を空ける
-  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && !(page == PAGE_MSG && msgCount);
+  if (page == PAGE_SPOTIFY && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
+  if (page == PAGE_SPOTIFY && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
+  // Music と Spotify (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文は、描き直す間隔を空ける
+  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && page != PAGE_SPOTIFY && !(page == PAGE_MSG && msgCount);
   if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
 }
 
@@ -1206,9 +1568,18 @@ static void finishPlayback(PlayResult result, const String &summary, const char 
 
 // "wifi off" で切断し、つなぎ直しもやめる。"wifi on" で loop() からのつなぎ直しを再開する
 // (SD から流している間は、止めるまでつながない)。WiFi.disconnect() は Wi-Fi の接続を切るだけで、
-// 無線チップは止めないので Bluetooth はそのまま使える
+// 無線チップは止めないので Bluetooth はそのまま使える。
+// "wifi fast" / "wifi save" で、Spotify の間の Wi-Fi を常時受信 / 省電力にする (既定は省電力)。
+// 常時受信は速いが Bluetooth と無線を取り合う (SD から流すときは、いつも省電力にする)
 static void setWiFi(const String &cmd) {
-  if (cmd == "wifi off") {
+  if (cmd == "wifi fast" || cmd == "wifi save") {
+    wifiFast = cmd == "wifi fast";
+    if (spMode && WiFi.status() == WL_CONNECTED) {
+      if (wifiFast) WiFi.noLowPowerMode();
+      else WiFi.defaultLowPowerMode();
+    }
+    Serial.printf("WiFi: %s during spotify\n", wifiFast ? "always on" : "power save");
+  } else if (cmd == "wifi off") {
     wifiEnabled = false;
     relayClose("wifi off");
     WiFi.disconnect();
@@ -1218,7 +1589,8 @@ static void setWiFi(const String &cmd) {
     lastWiFiTry = millis() - WIFI_RETRY_MS;  // 次の loop() ですぐつなぎにいく
     Serial.println("WiFi: reconnect when not playing");
   } else {
-    Serial.printf("wifi=%s connected=%d\n", wifiEnabled ? "on" : "off", WiFi.status() == WL_CONNECTED);
+    Serial.printf("wifi=%s connected=%d spotify=%s\n", wifiEnabled ? "on" : "off", WiFi.status() == WL_CONNECTED,
+                  wifiFast ? "fast" : "save");
   }
 }
 
@@ -1264,6 +1636,7 @@ static void togglePause() {
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
+  if (spMode) return PLAY_STOP;  // ホームで Spotify を開いた
   pollRelay();
   // enter で送ると決めた文は、曲の途中でも待たずに送る。TLS の握手の間 (4〜8 秒) は無音になり、その後は続きから鳴る
   if (relayOutbox.length() && WiFi.status() == WL_CONNECTED) {
@@ -1342,6 +1715,7 @@ static void scanSdDir(const String &dir, int depth) {
 
 // カードを (挿し直されていても) 初期化し直し、MP3 の一覧を作り直す
 static bool setupSD() {
+  sdStale = false;
   SD.end();
   SPI.setRX(PIN_SD_MISO);
   SPI.setSCK(PIN_SD_SCK);
@@ -1404,16 +1778,38 @@ static void skipId3(File &f) {
   }
 }
 
-// 未使用の入力を前に詰め、空いたところをファイルから埋める。ファイルを読み終えたら
-// MAD_BUFFER_GUARD 分の 0 を足して最後のフレームまで出させる。もう足すものがなければ false
-static bool mp3Refill(Mp3Decoder *m, File &f) {
+// デコーダを初期化する。file が nullptr なら Spotify の受信リングから読む
+static void mp3Start(Mp3Decoder *m, File *file) {
+  mad_stream_init(&m->stream);
+  mad_frame_init(&m->frame);
+  mad_synth_init(&m->synth);
+  m->eof = false;
+  m->file = file;
+}
+
+static void mp3End(Mp3Decoder *m) {
+  mad_synth_finish(&m->synth);
+  mad_frame_finish(&m->frame);
+  mad_stream_finish(&m->stream);
+  m->file = nullptr;
+}
+
+// 未使用の入力を前に詰め、空いたところを SD のファイルか Spotify の受信リングから埋める。ファイルを読み終えたら
+// MAD_BUFFER_GUARD 分の 0 を足して最後のフレームまで出させる。もう足すものがなければ false。
+// リングが空なのは曲の終わりではない (届くのを待つ) ので、eof にせず stream.error を BUFLEN のままにして false を返す
+static bool mp3Refill(Mp3Decoder *m) {
   if (m->eof) return false;
   size_t keep = 0;
   if (m->stream.next_frame) {
     keep = m->stream.bufend - m->stream.next_frame;
     memmove(m->in, m->stream.next_frame, keep);
   }
-  int n = f.read(m->in + keep, MP3_IN_SIZE - keep);
+  int n = m->file ? m->file->read(m->in + keep, MP3_IN_SIZE - keep) : (int)ringGet(m->in + keep, MP3_IN_SIZE - keep);
+  if (n <= 0 && !m->file) {
+    mad_stream_buffer(&m->stream, m->in, keep);
+    m->stream.error = MAD_ERROR_BUFLEN;
+    return false;
+  }
   if (n <= 0) {
     memset(m->in + keep, 0, MAD_BUFFER_GUARD);
     n = MAD_BUFFER_GUARD;
@@ -1425,10 +1821,11 @@ static bool mp3Refill(Mp3Decoder *m, File &f) {
 }
 
 // 1フレーム分デコードして m->synth.pcm に出す。曲の終わりか、続けられないエラーなら false
-static bool mp3Decode(Mp3Decoder *m, File &f) {
+// (Spotify では、リングが空になったときも false。そのときは stream.error が MAD_ERROR_BUFLEN)
+static bool mp3Decode(Mp3Decoder *m) {
   while (true) {
     if (m->stream.buffer == nullptr || m->stream.error == MAD_ERROR_BUFLEN) {
-      if (!mp3Refill(m, f)) return false;
+      if (!mp3Refill(m)) return false;
     }
     if (mad_frame_decode(&m->frame, &m->stream) == 0) break;
     if (MAD_RECOVERABLE(m->stream.error)) continue;  // 壊れたフレームやタグの残りは飛ばして同期を取り直す
@@ -1459,10 +1856,7 @@ static PlayResult playSd(int index) {
   if (WiFi.status() == WL_CONNECTED) WiFi.defaultLowPowerMode();
 
   Mp3Decoder *m = &mp3;
-  mad_stream_init(&m->stream);
-  mad_frame_init(&m->frame);
-  mad_synth_init(&m->synth);
-  m->eof = false;
+  mp3Start(m, &f);
   skipId3(f);
 
   Serial.printf("playing %s (%d/%u) — %lu bytes\n", path.c_str(), index + 1,
@@ -1509,7 +1903,7 @@ static PlayResult playSd(int index) {
     }
 
     uint32_t t0 = micros();
-    if (!mp3Decode(m, f)) {
+    if (!mp3Decode(m)) {
       if (!m->eof) result = PLAY_ERROR;
       break;
     }
@@ -1546,10 +1940,8 @@ static PlayResult playSd(int index) {
   }
 
   uint32_t pos = f.position();
+  mp3End(m);
   f.close();
-  mad_synth_finish(&m->synth);
-  mad_frame_finish(&m->frame);
-  mad_stream_finish(&m->stream);
 
   // 1フレームは 1152 サンプル = 約 26ms。デコードにその何割を使ったかで CPU の余裕が分かる
   if (frames) {
@@ -1589,6 +1981,7 @@ static size_t tlsStackUsed() {
 static void relayClose(const String &why) {
   if (relayOpen) Serial.printf("relay: closed (%s)\n", why.c_str());
   relayOpen = false;
+  spWs = false;
   relayStatus = why;
   if (relay) relay->stop();  // TLS の受信バッファなどを返す
 }
@@ -1602,12 +1995,14 @@ static void relayFailed() {
 
 // 中継につなぎ、メッセージの流れを受け取り始める。TLS の握手に 4〜8 秒かかり (P-384 の証明書を確かめるのが重い)、
 // A2DP のバッファ (370ms) では持たないので、再生ループの中 (pollAbort) からは送る文があるときしか呼ばない。
-// loop() が、止まっている間か曲の合間に呼ぶ。送る文 (relayOutbox) があれば、POST で一緒に送る
+// loop() が、止まっている間か曲の合間に呼ぶ。送る文 (relayOutbox) があれば、POST で一緒に送る。
+// Spotify モードでは /spotify に WebSocket でつなぐ
 static void relayConnect() {
   lastRelayTry = millis();
+  if (spMode) spotifyPrepare();
   if (!relay) {
     relayCA = new BearSSL::X509List(RELAY_CA);
-    relay = new BearSSL::WiFiClientSecure();  // ここで BearSSL のスタックが確保される
+    relay = new RelayClient();  // ここで BearSSL のスタックが確保される
     relay->setTrustAnchors(relayCA);
     relay->setBufferSizes(RELAY_TLS_RX, 512);
     relay->setTimeout(HTTP_TIMEOUT_MS);  // 送るときは、中継が Discord に送り終えるまで返事が来ない
@@ -1632,7 +2027,7 @@ static void relayConnect() {
   // TLS は受信バッファ (RELAY_TLS_RX)、BearSSL のスタック (RELAY_TLS_STACK)、コンテキストなどを使う。足りているかをログで見る
   uint32_t heap = rp2040.getFreeHeap();
   unsigned long t0 = millis();
-  if (!relay->connect(RELAY_HOST, RELAY_PORT)) {
+  if (!relay->connect(RELAY_HOST, spMode ? SPOTIFY_PORT : RELAY_PORT)) {
     char err[64] = "";
     int code = relay->getLastSSLError(err, sizeof(err));
     Serial.printf("relay: connect failed (ssl %d %s), heap %luKB\n", code, err, (unsigned long)(heap / 1024));
@@ -1646,8 +2041,13 @@ static void relayConnect() {
                 (unsigned)tlsStackUsed(), (unsigned)RELAY_TLS_STACK);
 
   // HTTP/1.0 で頼む。Funnel の手前の Go のプロキシが chunked にせず、届いた分をそのまま流してくる。
-  // 送る文があれば POST の本文にする。中継は Discord に送ってから、GET と同じく流し始める
-  if (relayOutbox.length()) {
+  // 送る文があれば POST の本文にする。中継は Discord に送ってから、GET と同じく流し始める。
+  // Spotify は WebSocket に切り替えてもらう (切り替えは HTTP/1.1 にしかない)
+  if (spMode) {
+    relay->printf("GET /spotify?win=%d HTTP/1.1\r\nHost: %s\r\nX-Key: %s\r\nUpgrade: websocket\r\n"
+                  "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
+                  SP_WIN, RELAY_HOST, RELAY_KEY, WS_KEY);
+  } else if (relayOutbox.length()) {
     relay->printf("POST /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n"
                   "Content-Type: text/plain\r\nContent-Length: %u\r\n\r\n%s",
                   relayLastId.c_str(), RELAY_HOST, RELAY_KEY, relayOutbox.length(), relayOutbox.c_str());
@@ -1655,9 +2055,9 @@ static void relayConnect() {
     relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n\r\n",
                   relayLastId.c_str(), RELAY_HOST, RELAY_KEY);
   }
-  String head = relay->readStringUntil('\n');  // "HTTP/1.0 200 OK"
+  String head = relay->readStringUntil('\n');  // "HTTP/1.0 200 OK" (Spotify は "HTTP/1.1 101 Switching Protocols")
   head.trim();
-  if (head.substring(9, 12) != "200") {
+  if (head.substring(9, 12) != (spMode ? "101" : "200")) {
     Serial.printf("relay: \"%s\"\n", head.c_str());
     relayClose(head.length() ? "relay " + head.substring(9, 12) : String("relay no reply"));
     relayFailed();
@@ -1678,9 +2078,13 @@ static void relayConnect() {
   relayOpen = true;
   relayFailures = 0;
   relayRetryMs = RELAY_RETRY_MS;  // 切れたら、つないでから RELAY_RETRY_MS たっていればすぐつなぎ直す
+  lastRelayData = millis();
+  if (spMode) {
+    spotifyConnected();
+    return;
+  }
   relayQuiet = relayLastId.length() == 0;
   relayLine = "";
-  lastRelayData = millis();
   relayStatus = "no message";
   Serial.printf("relay: connected (after=%s)\n", relayLastId.c_str());
   sendDone(sent);
@@ -1734,6 +2138,10 @@ static void onRelayLine(const String &line) {
 
 // 届いた分だけ読んで1行ずつ処理する。待たないので、再生中も pollAbort() から呼べる
 static void pollRelay() {
+  if (spWs) {
+    pollSpotify();
+    return;
+  }
   if (!relayOpen || !relay) return;
   uint8_t buf[64];
   int n;
@@ -1755,6 +2163,609 @@ static void pollRelay() {
   }
 }
 
+// ---------------- Spotify ----------------
+//
+// 中継 (tools/discord_relay.py) と WebSocket で1本つなぎ、go-librespot の音を MP3 で受け取って鳴らす。
+// フレームはすべてバイナリで、先頭1バイトが種類 (中身は LCD の文字コード):
+//   中継から A MP3 / L 番号 TAB 総数 TAB プレイリスト名 / T 曲名 TAB アーティスト /
+//            S 状態 TAB シャッフル 0/1 TAB 再生中のプレイリストの番号 TAB 中継が受け取った操作の数 /
+//            Z 選曲・曲送りの切れ目 / H 生存確認 / E エラー
+//   中継へ   C 読んだ量の累計 / P 番号 / N 次 / B 前 / K 一時停止 / R 再開 / F シャッフル
+// 中継は、Pico がまだ読んでいない量を win 以下に抑えて送ってくる。Pico はリングに空きがあるだけしか読まないので、
+// 流れてくる速さは Pico が鳴らす速さになる
+
+static size_t ringFree() {
+  return spRingSize - spRingLen;
+}
+
+
+// 受信リングに足す。呼ぶ側が空きを確かめてから読んでいるので、あふれることは無い
+static void ringPut(const uint8_t *p, size_t n) {
+  n = std::min(n, ringFree());
+  size_t pos = (spRingHead + spRingLen) % spRingSize;
+  spRingLen += n;
+  while (n) {
+    size_t off = pos % SP_SEG;
+    size_t k = std::min(n, SP_SEG - off);
+    memcpy(spSegs[pos / SP_SEG] + off, p, k);
+    p += k;
+    n -= k;
+    pos = (pos + k) % spRingSize;
+  }
+}
+
+static size_t ringGet(uint8_t *p, size_t n) {
+  n = std::min(n, spRingLen);
+  size_t pos = spRingHead;
+  for (size_t left = n; left;) {
+    size_t off = pos % SP_SEG;
+    size_t k = std::min(left, SP_SEG - off);
+    memcpy(p, spSegs[pos / SP_SEG] + off, k);
+    p += k;
+    left -= k;
+    pos = (pos + k) % spRingSize;
+  }
+  spRingHead = pos;
+  spRingLen -= n;
+  return n;
+}
+
+static void spDraw() {
+  if (page == PAGE_SPOTIFY) drawPage();
+}
+
+// 中継へ1つ送る。WebSocket の決まりで、クライアントから送るフレームはマスクする
+static void spSend(const String &cmd) {
+  if (!relayOpen || !spWs || cmd.length() > 125) return;
+  if (strchr("PUNBKR", cmd[0])) spCmds++;  // 状態を変える操作は数えておく (S の説明)
+  uint8_t f[6 + 125];
+  uint32_t mask = rp2040.hwrand32();
+  f[0] = 0x82;  // FIN + バイナリ
+  f[1] = 0x80 | cmd.length();
+  memcpy(f + 2, &mask, 4);
+  for (size_t i = 0; i < cmd.length(); i++) f[6 + i] = cmd[i] ^ f[2 + (i & 3)];
+  relay->write(f, 6 + cmd.length());
+}
+
+// 読んだ量を中継に知らせる。中継はこれを見て、続きを送ってよいかを決める
+static void spReportRead() {
+  spReported = spRead;
+  spLastReport = millis();
+  spSend("C" + String(spRead));
+}
+
+// 選曲・曲送りを頼んだ。リングに残っている前の曲を捨て、Z が来るまで届く分も捨てる
+static void spFlush() {
+  spRingHead = spRingLen = 0;
+  spWaitZ = true;
+  spReset = true;
+  spBuffering = true;
+  spPaused = false;
+}
+
+// 鳴らし始めるのを頼み、再生中の見え方に移る。title は曲名 (T) が届くまで出しておく名前
+static void spStart(const String &cmd, const String &title) {
+  if (!a2dp.connected()) {
+    spNote = "no earphone";
+    spDraw();
+    return;
+  }
+  spSend(cmd);
+  spFlush();
+  spActive = true;
+  spNote = "";
+  spTitle = title;
+  spArtist = "";
+  spShowNow();
+  drawPage();
+}
+
+// n 番目のプレイリストを頭から鳴らす
+static void spPlay(int n) {
+  if (n < 0 || n >= (int)spLists.size()) return;
+  spSel = n;
+  spStart("P" + String(n), spLists[n]);
+}
+
+// n 番目のプレイリストを i 番目の曲から鳴らす (そのあとはシャッフルの入り切りのとおり)
+static void spPlayTrack(int n, int i) {
+  if (n < 0 || n >= (int)spLists.size()) return;
+  const String *name = spTrackName(i);
+  spStart("P" + String(n) + ":" + String(i), name ? *name : spLists[n]);
+}
+
+// n 番目のプレイリストをシャッフルで鳴らす。どの曲から鳴らすかもランダム (中継がシャッフルを入れてから鳴らす)
+static void spShufflePlay(int n) {
+  if (n < 0 || n >= (int)spLists.size()) return;
+  spShuffle = true;
+  spStart("U" + String(n), spLists[n]);
+}
+
+// i 番目の曲の名前。覚えていなければ nullptr
+static const String *spTrackName(int i) {
+  if (i < 0) return nullptr;
+  int k = i % SP_NAMES;
+  return spTrackNameAt[k] == i ? &spTrackNames[k] : nullptr;
+}
+
+// i 番目の曲のアーティスト。覚えていなければ nullptr
+static const String *spTrackArtist(int i) {
+  if (i < 0) return nullptr;
+  int k = i % SP_NAMES;
+  return spTrackNameAt[k] == i ? &spTrackArtists[k] : nullptr;
+}
+
+// 覚えている曲名を捨てる (別のプレイリストを開いたときと、モードを抜けたとき)
+static void spForgetTracks() {
+  for (int k = 0; k < SP_NAMES; k++) {
+    spTrackNames[k] = String();
+    spTrackArtists[k] = String();
+    spTrackNameAt[k] = -1;
+  }
+  spTrackTotal = -1;
+  spAskedPage[0] = spAskedPage[1] = -1;
+}
+
+// start 番目から SP_PAGE 曲の名前を中継に頼む。覚えているか、頼んで 5 秒たっていなければ頼まない
+static void spAskPage(int start) {
+  if (start < 0 || (spTrackTotal >= 0 && start >= spTrackTotal)) return;
+  int last = spTrackTotal >= 0 ? std::min(start + SP_PAGE, spTrackTotal) - 1 : start;
+  if (spTrackName(start) && spTrackName(last)) return;
+  int slot = 0;
+  for (int r = 0; r < 2; r++) {
+    if (spAskedPage[r] == start && millis() - spAskedAt[r] < 5000) return;
+    if (spAskedAt[r] < spAskedAt[slot]) slot = r;
+  }
+  spAskedPage[slot] = start;
+  spAskedAt[slot] = millis();
+  spSend("Q" + String(spTrackList) + ":" + String(start));
+}
+
+// 選んでいる曲の名前を頼む。回の端の近くなら、進んでいる向きの次の回も先に頼んでおく
+// (音を流している間は、返事が届くまで音の後ろで数秒待つので)
+static void spAskNames() {
+  int start = spTrackSel / SP_PAGE * SP_PAGE;
+  spAskPage(start);
+  int offset = spTrackSel - start;
+  if (offset >= SP_PAGE - 4) spAskPage(start + SP_PAGE);
+  if (offset < 4) spAskPage(start > 0 ? start - SP_PAGE : (spTrackTotal - 1) / SP_PAGE * SP_PAGE);
+}
+
+// n 番目のプレイリストの曲選択を開く。cursor の曲を選んでおく
+static void spOpenTracks(int n, int cursor) {
+  if (n != spTrackList) {
+    spForgetTracks();
+    spTrackList = n;
+  }
+  spTrackSel = (spTrackTotal > 0 && cursor >= spTrackTotal) ? 0 : cursor;
+  spView = SP_TRACKS;
+  spResetTrackScroll();
+  spAskNames();
+}
+
+static void spSkip(bool next) {
+  spSend(next ? "N" : "B");
+  spFlush();
+  spDraw();
+}
+
+static void spTogglePause() {
+  spPaused = !spPaused;
+  if (!spPaused) spActive = true;
+  spSend(spPaused ? "K" : "R");
+  Serial.println(spPaused ? "spotify: paused" : "spotify: resumed");
+  spDraw();
+}
+
+// Spotify モードに入る。SD の再生は止める (再生ループの中なら pollAbort() が抜ける)。
+// Discord の流れを切り、loop() が /spotify につなぎ直す。Wi-Fi につながっていなければ入らない
+static void spotifyOn() {
+  if (spMode) {
+    openPage(PAGE_SPOTIFY);
+    return;
+  }
+  if (!RELAY_HOST[0] || WiFi.status() != WL_CONNECTED) {
+    Serial.println("spotify: no wifi");
+    return;
+  }
+  spMode = true;
+  autoPlay = false;
+  paused = false;
+  spLists.clear();
+  spSel = 0;
+  spPlaying = spPlayingTrack = spTrackList = -1;
+  spForgetTracks();
+  spView = SP_LISTS;
+  spTitle = spArtist = spState = spNote = "";
+  spShuffle = spPaused = spActive = spWaitZ = false;
+  relayClose("spotify");
+  relayStatus = "connecting...";
+  relayFailures = 0;
+  relayRetryMs = 0;
+  Serial.println("spotify: on");
+  openPage(PAGE_SPOTIFY);
+}
+
+// Spotify モードを抜けてホームへ戻る。後片付け (接続を切る、リングを返す) は loop() の spotifyCleanup() がする
+// (再生ループの中から呼ばれても、使っているリングを消さないように)
+static void spotifyOff() {
+  if (!spMode) return;
+  spMode = false;
+  Serial.println("spotify: off");
+  openPage(PAGE_HOME);
+}
+
+// /spotify につなぐ前に、SD の曲の一覧と SD のライブラリを手放してヒープを空ける (SD から流す前に読み直す)
+static void spotifyPrepare() {
+  if (sdStale) return;
+  sdTracks.clear();
+  sdTracks.shrink_to_fit();
+  SD.end();
+  sdStale = true;
+}
+
+// /spotify につないだあとで受信リングを取る。空きヒープを SP_HEAP_SPARE 残せる分だけ
+static bool spotifyAllocRing() {
+  size_t count = spRingSize / SP_SEG;
+  while (count < SP_SEGS_MAX && rp2040.getFreeHeap() >= SP_SEG + SP_HEAP_SPARE) {
+    uint8_t *seg = (uint8_t *)malloc(SP_SEG);
+    if (!seg) break;
+    spSegs[count++] = seg;
+  }
+  spRingSize = count * SP_SEG;
+  Serial.printf("spotify: ring %u bytes, heap %luKB\n", (unsigned)spRingSize, (unsigned long)(rp2040.getFreeHeap() / 1024));
+  return spRingSize >= 2 * SP_SEG;  // 8KB はほしい
+}
+
+// Spotify モードを抜けたあとの後片付け。中継は切られると go-librespot を止める。Discord にはすぐつなぎ直す
+static void spotifyCleanup() {
+  if (relayOpen && spWs) {
+    static const uint8_t CLOSE[6] = {0x88, 0x80, 0, 0, 0, 0};  // close フレーム (中身なし、マスク 0)
+    relay->write(CLOSE, sizeof(CLOSE));
+  }
+  relayClose("spotify off");
+  for (size_t i = 0; i < spRingSize / SP_SEG; i++) free(spSegs[i]);
+  spRingSize = spRingHead = spRingLen = 0;
+  spLists.clear();
+  spLists.shrink_to_fit();
+  spForgetTracks();
+  playing = false;
+  relayFailures = 0;
+  relayRetryMs = 0;
+}
+
+// /spotify の WebSocket につながった。中継はすぐにプレイリストの一覧を送ってくる
+static void spotifyConnected() {
+  if (!spotifyAllocRing()) {
+    relayClose("no memory");
+    relayFailed();
+    return;
+  }
+  spWs = true;
+  wsHeadLen = 0;
+  wsInFrame = false;
+  spRead = spReported = 0;
+  spCmds = 0;  // 中継は接続ごとに数え直す
+  spAskedPage[0] = spAskedPage[1] = -1;  // 頼んでいた曲名の返事は来ない
+  spLastReport = millis();
+  spRingHead = spRingLen = 0;
+  spWaitZ = false;
+  spReset = true;
+  spBuffering = true;
+  spNote = "";
+  relayStatus = "connected";
+  // 切れる前に鳴らしていたら、続きを頼む (中継は切れたときに go-librespot を止めている)
+  if (spActive && !spPaused) spSend("R");
+  Serial.printf("spotify: connected (win %d, ring %u)\n", SP_WIN, (unsigned)spRingSize);
+  spDraw();
+}
+
+// 音以外のフレームを1つ処理する
+static void onSpFrame(char kind, const String &text) {
+  int a = text.indexOf('\t');
+  int b = a < 0 ? -1 : text.indexOf('\t', a + 1);
+  switch (kind) {
+    case 'Z':
+      spWaitZ = false;
+      break;
+    case 'L': {  // 番号 TAB 総数 TAB 名前。0 番から順に全部来る
+      if (b < 0) break;
+      int i = text.substring(0, a).toInt();
+      int total = text.substring(a + 1, b).toInt();
+      if (i == 0) spLists.clear();
+      if (spLists.size() < SP_LISTS_MAX) spLists.push_back(text.substring(b + 1));
+      if (i + 1 >= total || spLists.size() >= SP_LISTS_MAX) {
+        if (spSel >= (int)spLists.size()) spSel = 0;
+        Serial.printf("spotify: %u playlists\n", (unsigned)spLists.size());
+        spDraw();  // 全部届いてから1回だけ描く
+      }
+      break;
+    }
+    case 'T':  // 曲名 TAB アーティスト
+      spTitle = a < 0 ? text : text.substring(0, a);
+      spArtist = a < 0 ? String() : text.substring(a + 1);
+      marqReset(spNowMarq);  // 新しい曲名は頭から流す
+      lastSpScroll = millis();
+      spNote = "";
+      Serial.println("spotify: new track");
+      spDraw();
+      break;
+    case 'S': {  // 状態 TAB シャッフル TAB プレイリストの番号 TAB 中継が受け取った操作の数 TAB 曲の番号
+      if (b < 0) break;
+      int c = text.indexOf('\t', b + 1);
+      int d = c < 0 ? -1 : text.indexOf('\t', c + 1);
+      spState = text.substring(0, a);
+      spShuffle = text.substring(a + 1, b).toInt() != 0;
+      spPlaying = text.substring(b + 1, c < 0 ? text.length() : c).toInt();
+      spPlayingTrack = d < 0 ? -1 : text.substring(d + 1).toInt();
+      // 音の後ろで待っていた古い知らせ (こちらが送った操作をまだ受け取っていない中継が送ったもの) では、
+      // 一時停止を上書きしない。新しい知らせ (スマホの Spotify で止めたときなど) には合わせる
+      if (c >= 0 && (uint32_t)text.substring(c + 1).toInt() >= spCmds) {
+        if (spState == "paused") spPaused = true;
+        if (spState == "playing") spPaused = false;
+        if (spState == "playing") spActive = true;
+        if (spState == "stopped") spActive = false;
+      }
+      spNote = "";
+      Serial.printf("spotify: %s shuffle=%d list=%d track=%d\n", spState.c_str(), spShuffle, spPlaying, spPlayingTrack);
+      spDraw();
+      break;
+    }
+    case 'I': {  // プレイリストの番号 TAB 曲の番号 TAB 曲の数 TAB 曲名 TAB アーティスト (Q の返事)
+      int c = b < 0 ? -1 : text.indexOf('\t', b + 1);
+      if (c < 0 || text.substring(0, a).toInt() != spTrackList) break;  // 別のプレイリストを開いた
+      int d = text.indexOf('\t', c + 1);
+      int i = text.substring(a + 1, b).toInt();
+      spTrackTotal = text.substring(b + 1, c).toInt();
+      if (i >= 0) {
+        spTrackNames[i % SP_NAMES] = text.substring(c + 1, d < 0 ? text.length() : d);
+        spTrackArtists[i % SP_NAMES] = d < 0 ? String() : text.substring(d + 1);
+        spTrackNameAt[i % SP_NAMES] = i;
+      }
+      // 描き直すのは選んでいる曲の名前が届いたとき (と空のプレイリスト) だけ。1回に 16 曲届く
+      if (spView == SP_TRACKS && (i == spTrackSel || i < 0)) {
+        spResetTrackScroll();
+        spDraw();
+      }
+      break;
+    }
+    case 'E':
+      spNote = text;
+      Serial.printf("spotify: error \"%s\"\n", text.c_str());
+      spDraw();
+      break;
+  }
+}
+
+// 届いたバイト列を WebSocket のフレームに解く。中継から来るフレームはマスクされていない
+static void wsFeed(const uint8_t *p, size_t n) {
+  while (n) {
+    if (!wsInFrame) {
+      wsHead[wsHeadLen++] = *p++;
+      n--;
+      if (wsHeadLen < 2) continue;
+      uint8_t len7 = wsHead[1] & 0x7F;
+      size_t need = 2 + (len7 == 126 ? 2 : len7 == 127 ? 8 : 0);
+      if (wsHeadLen < need) continue;
+      wsOp = wsHead[0] & 0x0F;
+      wsLeft = len7;
+      if (len7 == 126) wsLeft = (wsHead[2] << 8) | wsHead[3];
+      if (len7 == 127) wsLeft = (wsHead[6] << 24) | (wsHead[7] << 16) | (wsHead[8] << 8) | wsHead[9];
+      wsHeadLen = 0;
+      if (wsLeft == 0) {  // 中身の無いフレーム (種類のバイトも無い)
+        if (wsOp == 0x8) {
+          relayClose("spotify closed");
+          return;
+        }
+        continue;
+      }
+      wsInFrame = true;
+      wsKind = 0;
+      wsText = "";
+    } else if (wsOp == 0x2 && wsKind == 0) {
+      wsKind = (char)*p++;
+      n--;
+      wsLeft--;
+    } else {
+      size_t m = std::min((size_t)wsLeft, n);
+      if (wsOp == 0x2 && wsKind == 'A') {
+        if (!spWaitZ) ringPut(p, m);  // Z を待っている間は前の曲なので捨てる
+      } else {
+        for (size_t i = 0; i < m && wsText.length() < SP_TEXT_MAX; i++) wsText += (char)p[i];
+      }
+      p += m;
+      n -= m;
+      wsLeft -= m;
+    }
+    if (wsInFrame && wsLeft == 0 && (wsOp != 0x2 || wsKind)) {
+      wsInFrame = false;
+      if (wsOp == 0x8) {
+        relayClose("spotify closed");
+        return;
+      }
+      if (wsOp == 0x2 && wsKind != 'A') onSpFrame(wsKind, wsText);
+    }
+  }
+}
+
+// 中継から届いた分を、リングの空きの範囲で読む。空きが無ければ読まないので、中継はそこで止まる
+// (TCP の受信窓が閉じ、中継が送れるのも win まで)。そのときは状態の知らせも音の後ろで待つ
+static void pollSpotify() {
+  if (!relayOpen || !relay) return;
+  uint8_t buf[256];
+  bool full = false;
+  int n = 0;
+  for (size_t total = 0; total < SP_POLL_MAX; total += n) {
+    size_t want = spWaitZ ? sizeof(buf) : std::min(sizeof(buf), ringFree());
+    // 一時停止中は、リングが一杯でも音以外のフレームは1バイトずつ読み進める。中継は一時停止中は音を送らないので、
+    // スマホの Spotify で再開されたのに気づける (音のフレームに当たったら、そこで止める)
+    if (!want && spPaused && !(wsInFrame && wsKind == 'A')) want = 1;
+    if (want == 0) {
+      full = true;
+      break;
+    }
+    n = relay->read(buf, want);
+    if (n <= 0) break;
+    spRead += n;
+    lastRelayData = millis();
+    wsFeed(buf, n);
+    if (!relayOpen) return;  // close フレームが来た
+  }
+  if (full) lastRelayData = millis();  // 届かないのではなく読んでいないだけ (一時停止中など)
+  if (spRead - spReported >= SP_CREDIT_STEP || millis() - spLastReport >= SP_KEEPALIVE_MS) spReportRead();
+  if (n < 0 || !relay->connected()) {
+    relayClose("relay lost");
+  } else if (millis() - lastRelayData >= RELAY_IDLE_MS) {
+    relayClose("relay silent");
+  }
+}
+
+// 鳴らせる MP3 の量。リングと、デコーダの入力に移してまだデコードしていない分 (mp3Refill() は一度に 4KB まで移す)
+static size_t spQueued(const Mp3Decoder *m) {
+  size_t inDecoder = m->stream.buffer ? (size_t)(m->stream.bufend - m->stream.next_frame) : 0;
+  return spRingLen + inDecoder;
+}
+
+// Spotify モードで中継とつながっている間、ここで回る。スイッチと中継を見ながら、受信リングの MP3 をデコードして鳴らす。
+// 一時停止中や、溜まるのを待つ間は無音を流す (feedSilence() の説明を参照)。モードを抜けるか、接続が切れたら返す
+static void playSpotify() {
+  // 省電力にしないと Bluetooth と無線を取り合って途切れる (SD と同じ)。"wifi fast" で常時受信にもできる
+  if (wifiFast) WiFi.noLowPowerMode();
+  else WiFi.defaultLowPowerMode();
+
+  Mp3Decoder *m = &mp3;
+  mp3Start(m, nullptr);
+  spReset = false;
+  uint32_t rateMul = 1;
+  uint32_t frames = 0;
+  uint32_t underflows = 0;
+  uint32_t starved = 0;     // リングが空になって、溜まるのを待った回数
+  unsigned long started = millis();
+  unsigned long lastCheck = 0;
+  playing = false;
+  a2dp.getUnderflow();
+
+  while (spMode && relayOpen && spWs) {
+    if (WiFi.status() != WL_CONNECTED) {
+      relayClose("no wifi");
+      break;
+    }
+    pollButton();
+    pollSpotify();
+    handleCommand(nextCommand());
+    if (!spMode || !relayOpen || !spWs) break;
+
+    if (spReset) {
+      mp3End(m);
+      mp3Start(m, nullptr);
+      spReset = false;
+    }
+
+    // リングが半分たまったら鳴らし始める
+    bool want = !spPaused && !spWaitZ && a2dp.connected();
+    if (want && spBuffering && spQueued(m) >= spRingSize / 2) {
+      spBuffering = false;
+      startBars();
+      spDraw();
+    }
+    if (!want || spBuffering) {
+      if (playing) {
+        playing = false;  // 2行目を棒から文字に戻す
+        spDraw();
+      }
+      feedSilence();
+      delay(1);
+      continue;
+    }
+    if (spQueued(m) < SP_DECODE_MIN) {
+      // 届くのが追いつかなかった。溜まるまで無音で待つ
+      spBuffering = true;
+      starved++;
+      Serial.printf("spotify: buffering at %lus\n", (millis() - started) / 1000);
+      continue;
+    }
+
+    // MP3 の1フレームを書く空きと、pcmChunk の端数を書き出す空きがあるまで待つ (playSd() と同じ)
+    if ((size_t)a2dp.availableForWrite() < 1152 * 4 * rateMul + sizeof(pcmChunk)) {
+      delay(1);
+      continue;
+    }
+    if (!mp3Decode(m)) {
+      // リングが空になっただけなら次に届いた分で続ける。それ以外のエラーならやり直す
+      if (m->stream.error != MAD_ERROR_BUFLEN) spReset = true;
+      continue;
+    }
+    frames++;
+
+    struct mad_pcm &pcm = m->synth.pcm;
+    rateMul = pcm.samplerate ? (uint32_t)A2DP_RATE / pcm.samplerate : 0;
+    if (rateMul == 0 || rateMul > 4 || rateMul * pcm.samplerate != (uint32_t)A2DP_RATE) {
+      Serial.printf("spotify: unsupported %uHz\n", pcm.samplerate);
+      rateMul = 1;
+      continue;
+    }
+    if (pcm.channels == 1) {
+      for (size_t i = 0; i < pcm.length; i++) pcm.samplesX[i][1] = pcm.samplesX[i][0];
+    }
+    writePcm(&pcm.samplesX[0][0], pcm.length, 2, rateMul);
+
+    if (millis() - lastBarDraw >= BAR_MS) drawBars();
+    if (millis() - lastCheck >= 500) {
+      lastCheck = millis();
+      if (a2dp.getUnderflow() && millis() - started >= 1000) {
+        underflows++;
+        Serial.printf("underflow at %lus (ring %u/%u)\n", (millis() - started) / 1000,
+                      (unsigned)spRingLen, (unsigned)spRingSize);
+      }
+    }
+  }
+
+  mp3End(m);
+  playing = false;
+  Serial.printf("spotify: %lu frames, buffering %lu times, underflow %lu times\n",
+                (unsigned long)frames, (unsigned long)starved, (unsigned long)underflows);
+  spDraw();
+}
+
+// "spotify" でモードに入る (入っていれば一覧と様子を出す)。"spotify 3" で 3 番目を鳴らす。"spotify off" で抜ける
+static void spotifySerial(const String &cmd) {
+  String arg = cmd.substring(7);
+  arg.trim();
+  if (arg == "off") {
+    spotifyOff();
+    return;
+  }
+  if (!spMode) {
+    spotifyOn();
+    if (spMode && arg.length()) Serial.println("spotify: 一覧が届いてから番号を打つ");
+    return;
+  }
+  if (arg.length()) {
+    spPlay(arg.toInt() - 1);
+    return;
+  }
+  // 名前は半角カナのバイト列なので、シリアルでは化ける
+  for (size_t i = 0; i < spLists.size(); i++) {
+    Serial.printf("%c%3u %s\n", (int)i == spPlaying ? '>' : ' ', (unsigned)(i + 1), spLists[i].c_str());
+  }
+  Serial.printf("spotify: ws=%d state=%s paused=%d wait=%d buffering=%d ring=%u/%u win=%d read=%lu note=\"%s\"\n",
+                spWs, spState.c_str(), spPaused, spWaitZ, spBuffering, (unsigned)spRingLen, (unsigned)spRingSize,
+                SP_WIN, (unsigned long)spRead, spNote.c_str());
+}
+
+// Spotify モードの間のコマンド。スイッチで出す pause / next / prev / shuffle は Spotify の操作にする
+static void spotifyCommand(const String &cmd) {
+  if (cmd == "pause") spTogglePause();
+  else if (cmd == "next") spSkip(true);
+  else if (cmd == "prev") spSkip(false);
+  else if (cmd == "shuffle") spSend("F");
+  else if (cmd.startsWith("vol")) setVolume(cmd);
+  else if (cmd.startsWith("wifi")) setWiFi(cmd);
+  else if (cmd.startsWith("lcd")) lcdCommand(cmd);
+  else if (cmd == "status") printStatus();
+  else Serial.println("Spotify モード中に使えるのは spotify [番号|off] / pause / next / prev / shuffle / vol / wifi / lcd / status");
+}
+
 // ---------------- コマンド ----------------
 
 static void startAutoPlay(Step step) {
@@ -1765,6 +2776,7 @@ static void startAutoPlay(Step step) {
 }
 
 static void printSdTracks() {
+  if (sdStale) setupSD();
   if (sdTracks.empty()) {
     Serial.println(sdReady ? "SD: no mp3" : "SD: no card");
     return;
@@ -1775,11 +2787,28 @@ static void printSdTracks() {
 }
 
 static const char *HELP =
-    "commands: sd / pause / next / prev / rand / stop /"
-    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / bt / scan / relay / status / lcd [chars|resync on|off]";
+    "commands: sd / pause / next / prev / rand / stop / list / now / shuffle / vol [0-100|+|-] /"
+    " wifi on|off|fast|save / bt / scan / relay / spotify [n|off] / status / lcd [chars|resync on|off]";
+
+static void printStatus() {
+  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u spotify=%d\n",
+                WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
+                a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
+                (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
+                digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
+                morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount, spMode);
+}
 
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
+  if (cmd.startsWith("spotify")) {
+    spotifySerial(cmd);
+    return;
+  }
+  if (spMode) {
+    spotifyCommand(cmd);
+    return;
+  }
 
   if (cmd == "sd") {
     // カードを挿し直したときのために、毎回読み直す
@@ -1807,8 +2836,12 @@ static void handleCommand(String cmd) {
   } else if (cmd == "list") {
     printSdTracks();
   } else if (cmd == "now") {
-    if (sdIndex >= 0) Serial.printf("%d/%u %s\n", sdIndex + 1, (unsigned)sdTracks.size(), sdTracks[sdIndex].c_str());
-    else Serial.println("SD: not started");
+    // Spotify モードで一覧を手放した後は、sdIndex が一覧の外を指していることがある
+    if (sdIndex >= 0 && sdIndex < (int)sdTracks.size()) {
+      Serial.printf("%d/%u %s\n", sdIndex + 1, (unsigned)sdTracks.size(), sdTracks[sdIndex].c_str());
+    } else {
+      Serial.println("SD: not started");
+    }
   } else if (cmd == "shuffle") {
     toggleShuffle();
   } else if (cmd.startsWith("wifi")) {
@@ -1830,12 +2863,7 @@ static void handleCommand(String cmd) {
     relayFailures = 0;
     relayRetryMs = 0;
   } else if (cmd == "status") {
-    Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u\n",
-                  WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
-                  a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
-                  (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
-                  digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
-                  morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount);
+    printStatus();
   } else {
     Serial.println(HELP);
   }
@@ -1857,6 +2885,9 @@ void setup() {
   Serial.begin(115200);
 
   setenv("TZ", CLOCK_TZ, 1);  // localtime_r() を日本時間にする。time() (UTC) と証明書の期限の確認は変わらない
+  // TCP の Nagle を切る (TCP を使うのは中継だけ)。Spotify では読んだ量を 1KB ごとに小さく知らせるが、Nagle だと
+  // 前の分の ACK が返るまで次を出さないので、知らせが遅れて中継が送るのを待つことになる
+  WiFiClient::setDefaultNoDelay(true);
   tzset();
   applyVolume(VOLUME_DEFAULT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
@@ -1904,6 +2935,9 @@ void loop() {
   wifiUp = up;
   if (wifiEnabled && !autoPlay && !up && millis() - lastWiFiTry >= WIFI_RETRY_MS) startWiFi();
 
+  // Spotify モードを抜けた。/spotify との接続を切り、受信リングを返す (Discord には下でつなぎ直す)
+  if (!spMode && (spRingSize || spWs)) spotifyCleanup();
+
   // イヤホンには頼まれたときだけつなぎにいく (btConnecting の説明を参照)。失敗の理由は status() が
   // Music の1行目に出したもの ("BT timeout" など) をそのまま System にも出す
   if (btConnecting) {
@@ -1912,9 +2946,9 @@ void loop() {
     if (page == PAGE_SYSTEM) drawPage();
   }
 
-  // Discord の中継につなぐ。TLS の握手で 4〜8 秒止まるので、再生ループの外 (止まっている間か曲の合間) でだけ。
-  // 止まる前にバッファを無音で埋めておく。待つ間隔 (relayRetryMs) は前回の結果で決まる (起動直後は 0)。
-  // 送る文があれば、つながっていても待たずにつなぎ直す
+  // Discord の中継につなぐ (Spotify モードでは /spotify に)。TLS の握手で 4〜8 秒止まるので、再生ループの外
+  // (止まっている間か曲の合間) でだけ。止まる前にバッファを無音で埋めておく。待つ間隔 (relayRetryMs) は
+  // 前回の結果で決まる (起動直後は 0)。送る文があれば、つながっていても待たずにつなぎ直す
   if (RELAY_HOST[0] && WiFi.status() == WL_CONNECTED &&
       (relayOutbox.length() || (!relayOpen && millis() - lastRelayTry >= relayRetryMs))) {
     fillSilence();
@@ -1924,6 +2958,14 @@ void loop() {
 
   pollButton();
   handleCommand(nextCommand());
+
+  // Spotify モードでは、つながっている間は playSpotify() の中で回る。つなぎ直すのを待つ間は無音を流す。
+  // BOOTSEL は効かない
+  if (spMode) {
+    if (relayOpen && spWs) playSpotify();
+    else feedSilence();
+    return;
+  }
 
   // 止まっているときの BOOTSEL は連続再生の開始。再生中は pollAbort() が
   // 次の曲へ送るので、ここでは autoPlay を見て二重に反応しないようにする
@@ -1950,6 +2992,7 @@ void loop() {
     return;
   }
 
+  if (sdStale) setupSD();  // Spotify モードで手放した曲の一覧を読み直す
   if (sdTracks.empty()) {
     autoPlay = false;
     status("sd", sdReady ? "no mp3" : "no card");

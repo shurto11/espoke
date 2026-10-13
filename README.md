@@ -11,6 +11,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 - **Bluetooth イヤホン（A2DP）で音を鳴らす**
 - **microSD に入れた MP3 を、ネットのない外でも聞く**
 - **Discord のメッセージを受け取って LCD に出す**（漢字は読みに直して半角カナで出す）。モールスで打った文を Discord に送る
+- **Wi-Fi につながっているときは、Spotify のプレイリストを選んでイヤホンで聞く**（PC で動かす go-librespot の音を、中継が MP3 にして流す）
 
 ## 構成
 
@@ -19,10 +20,10 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `lcd1602_hello/` | LCD1602A（I2C）の表示サンプル |
 | `morse_input/` | 4つのスイッチ（GP10〜13）でモールス信号を打ち、アルファベットを LCD に入力するサンプル |
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
-| `espoke/` | 本体。microSD の MP3 を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージを受け取って出し、モールスで打った文を送る |
+| `espoke/` | 本体。microSD の MP3 を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージを受け取って出し、モールスで打った文を送る。Wi-Fi につながっているときは Spotify も鳴らす |
 | `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
 | `docs/` | 部品の取り付け手順など |
-| `tools/` | Discord の中継（PC 側で動かす）と、基板の配置図を作るスクリプト |
+| `tools/` | Discord と Spotify の中継（PC 側で動かす）、その Spotify の部分を Pico の代わりに試すスクリプト、基板の配置図を作るスクリプト |
 
 ビルド実測値（`rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble`）:
 
@@ -30,7 +31,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 |---|---|---|
 | `lcd1602_hello` | 319KB / 2093KB (15%) | 69KB / 256KB (26%) |
 | `bt_earphone` | 514KB (24%) | 96KB (36%) |
-| `espoke` | 786KB (37%) | 145KB (55%) |
+| `espoke` | 793KB (37%) | 145KB (55%) |
 
 ---
 
@@ -427,7 +428,7 @@ $EDITOR espoke/arduino_secrets.h
 #define RELAY_KEY  "your-relay-key"
 ```
 
-`RELAY_HOST` を書かなければ Discord は使わない。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
+`RELAY_HOST` を書かなければ Discord も Spotify も使わない。Spotify は同じ `RELAY_HOST` の 10000 番につなぐ（変えるなら `#define SPOTIFY_PORT`。7.7 節）。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
 
 ### 7.2 音声フォーマットの制約
 
@@ -461,6 +462,10 @@ $EDITOR espoke/arduino_secrets.h
 | `vol +` / `vol -` | 音量を 5 目盛り（3dB）ずつ上げる / 下げる |
 | `wifi off` | Wi-Fi を切り、つなぎ直しもやめる（外で使うとき）。Bluetooth はそのまま |
 | `wifi on` | Wi-Fi のつなぎ直しを再開する（連続再生している間は、止めてからつなぐ） |
+| `wifi fast` / `wifi save` | Spotify の間の Wi-Fi を常時受信 / 省電力にする（既定は省電力。7.7 節） |
+| `spotify` | Spotify モードに入る（ホームで Spotify を開くのと同じ）。入っていれば、プレイリストの一覧と様子を出す |
+| `spotify <番号>` | Spotify モードで、その番号（1 から）のプレイリストを鳴らす |
+| `spotify off` | Spotify モードを抜ける |
 | `bt` | イヤホンに1回つなぎにいく（System の Bluetooth で SW4 を押したのと同じ。7.5 節） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
 | `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（8.6 節） |
@@ -471,6 +476,7 @@ $EDITOR espoke/arduino_secrets.h
 
 **再生中に受け付けるのは `pause` / `stop` / `next` / `prev` / `rand` / `shuffle` / `vol` / `wifi on` / `wifi off` / `lcd` だけ。**
 他のコマンドは曲が終わるまで処理されない。
+**Spotify モードの間は `spotify` / `pause` / `next` / `prev` / `shuffle` / `vol` / `wifi` / `lcd` / `status` だけ**を受け付ける（`pause` などは Spotify の操作になる）。
 
 BOOTSEL ボタンは状況で意味が変わる。
 
@@ -504,13 +510,18 @@ BOOTSEL ボタンは状況で意味が変わる。
 | `MSG_SCROLL_MS` | 300 | 16 文字を超える本文を1文字ずつ流す間隔 |
 | `RELAY_RETRY_MS` | 30000 | 中継へのつなぎ直しを試みる間隔。失敗が続くと倍ずつ延ばす（最大 8 分） |
 | `RELAY_IDLE_MS` | 90000 | これだけ何も届かなければ中継との接続が切れたとみなす |
+| `SPOTIFY_PORT` | 10000 | Spotify でつなぐ Funnel のポート（中継が TLS を受ける。`arduino_secrets.h` で変えられる） |
+| `SP_SEG` / `SP_SEGS_MAX` | 4096 / 6 | Spotify の MP3 を溜める受信リング。4KB ずつ、24KB まで、空きヒープを `SP_HEAP_SPARE`（8KB）残して取る（7.7 節） |
+| `SP_WIN` | 49152 | 中継に伝える「まだ読んでいなくてよい量」。Funnel の往復が 1 秒ほどなので、1 秒に届くのはこの量まで（7.7 節） |
 
 ### 7.5 画面とスイッチ（ホームと SW1〜SW4）
 
-LCD の画面は**ホーム**から選んで開く。ホームにあるのは Music・Discord・System の3つ。
+LCD の画面は**ホーム**から選んで開く。ホームにあるのは Music・Spotify・Discord・System の4つ。
+**Spotify は Wi-Fi につながっているときだけ出る**（つながっていなければ飛ばす）。
 
 ```
 ホーム ─┬─ Music      曲名と再生の様子
+        ├─ Spotify ── 一覧 ── 曲選択 ── 再生中   プレイリスト → 曲を選び、曲名と再生の様子を見る（7.7 節）
         ├─ Discord ─┬─ Receive   受け取ったメッセージを見る
         │           └─ Send      モールスで打って送る
         └─ System     Wi-Fi / Bluetooth（イヤホンにつなぐ）/ 稼働時間と空きヒープ
@@ -525,12 +536,12 @@ LCD の画面は**ホーム**から選んで開く。ホームにあるのは Mu
 - **電源を入れると、1 秒ほどでホームが出る**（LCD のライブラリの初期化が 1 秒待つ）。Bluetooth・SD・Wi-Fi の準備はそのあとで、様子は Music の画面に出る。
   Wi-Fi はつながるのを待たずにつなぎ始め、つながると `WiFi ok` と出る。シリアルがつながるのも待たないので、PC でログを見るときは、つながる前の分は出ない
 
-長押しがあるのは SW1 だけ:
+長押しがあるのは SW1 と、Spotify の一覧・曲選択の画面の SW3（再生中の画面へ）、曲選択の画面の SW4（シャッフルで鳴らす）:
 
 - 長押しは離すのを待たずに、0.6 秒たったところで動く。このときは短く押したときの役目（戻る / backspace）はしない
-- SW1 を短く押したときの役目は、長押しと区別するため**離したときに**動く
-- 長押しで何かするのは Music（再生 / 一時停止）と Send（戻る）。ほかの画面では長押しも短く押したのと同じく戻る
-- SW2〜SW4 には長押しが無く、押したときにすぐ動く（トン・ツーはすぐ反応しないと打ちにくい）
+- 長押しのあるスイッチを短く押したときの役目は、長押しと区別するため**離したときに**動く
+- SW1 の長押しで何かするのは Music と Spotify（再生 / 一時停止）と Send（戻る）。ほかの画面では長押しも短く押したのと同じく戻る
+- それ以外（SW2 と、Spotify の一覧・曲選択以外の SW3・SW4）には長押しが無く、押したときにすぐ動く（トン・ツーはすぐ反応しないと打ちにくい）
 
 GP15 にタクトスイッチを足すと、押すたびに前の画面に戻る（SW1 と同じ。Send でも戻る）。つないでいなければ何もしない。
 
@@ -548,6 +559,9 @@ GP15 にタクトスイッチを足すと、押すたびに前の画面に戻る
 | ホーム | 月日と時刻（`MM/DD`・`HH:MM`） | `←` 選んでいる項目 `→` |
 | Discord | `←` 選んでいる項目 `→` | 選んでいる項目の今の様子 |
 | Music | 曲名 / 状態。シャッフル中は右端に `⇄` の印 | 再生中は帯域ごとの音の大きさの棒（下の説明）。一時停止中や止まっているときは進み具合や状態（一時停止中は後ろに `pause`） |
+| Spotify（一覧） | `←` プレイリスト名 `→` | 番号 / 総数（鳴らしているものは後ろに `playing` か `pause`）。つないでいる間やエラーはその様子 |
+| Spotify（曲選択） | 鳴っている曲なら左端に `▶`、曲名（届くまでは `loading...`）。シャッフル中は右端に `⇄` の印 | 左にアーティスト、右に 番号 / 曲の数。曲名もアーティストも、収まらなければ左へ流す |
+| Spotify（再生中） | 曲名（収まらなければ左へ流す）。シャッフル中は右端に `⇄` の印 | 鳴っている間は帯域の棒。止まっているときは `pause アーティスト` / `buffering...` / `stopped` / `no earphone` |
 | Receive | Discord の発言者の名前と時刻（`HH:MM`） | 本文。16 文字を超えると流れる（8.6 節）。まだ無ければ中継とのつながり具合 |
 | Send | モールスで入力した文章 | 入力中の符号と、確定したときの文字。送ったあとは送った結果 |
 | System（Wi-Fi） | 電波強度（dBm） | IP アドレス |
@@ -562,6 +576,7 @@ A2DP のバッファにはおよそ 370ms 先の音まで入っているので�
 Music 以外の画面を見ている間も曲名や状態は裏で更新しているので、開いたときには最新の内容が出る。
 ホーム・Discord・Receive（メッセージが無いとき）・System は1秒ごと、それ以外の画面も5秒ごとに描き直す。
 描き直すたびに LCD の 4bit の区切りを合わせ直すので、I2C の通信が化けて画面全体がでたらめになっても、長くて5秒で（スイッチで画面を変えればすぐに）戻る。
+自作文字は 8 つ（棒の 1〜7 段と `⇄`）で埋まっているので、棒を出さない Spotify の曲選択の画面では、棒の 7 段（6 番）を再生中の印 `▶` に作り替えている。
 手元の LCD は、この合わせ直しで自作文字が壊れる（偶数番の文字に、隣の奇数番の中身が写る。棒の7段目が `⇄` になる）。`lcd` で中身を読み出して確かめた。
 そのため、合わせ直すたびに自作文字を作り直している（約 30ms）。
 Discord のメッセージが届くと、どの画面を見ていても Receive の画面に切り替わる。
@@ -575,6 +590,10 @@ SW1〜SW4（GP10〜13）の役目は、開いている画面で変わる。
 | ホーム | （何もしない） | （何もしない） | ← | → | 開く |
 | Discord | 戻る | 戻る | ← | → | 開く |
 | Music | 戻る | 再生 / 一時停止 | 前の曲 | 次の曲（シャッフル中はランダム） | シャッフルの入り切り |
+| Spotify（一覧） | モードを抜けてホームへ | 再生 / 一時停止 | ← | →（**長押しで再生中の画面へ**） | 曲選択へ |
+| Spotify（曲選択） | 一覧へ | 再生 / 一時停止 | 前の曲 | 次の曲（**長押しで再生中の画面へ**） | 選んだ曲から鳴らす（**長押しで、選んだ曲に関係なくシャッフルで鳴らす**） |
+| Spotify（再生中） | 曲選択へ（鳴らし続ける） | 再生 / 一時停止 | 前の曲 | 次の曲 | シャッフルの入り切り |
+
 | Receive | 戻る | 戻る | 古いメッセージ | 新しいメッセージ | （何もしない） |
 | Send | backspace | 戻る | トン | ツー | enter |
 | System | 戻る | 戻る | ← | → | イヤホンにつなぐ（Bluetooth を見ているとき） |
@@ -663,10 +682,90 @@ MP3 の1フレーム（2304 サンプル）をそのまま書くとバッファ�
 （コードを読んで見つけた不具合。実機で最初に途切れたときは上の Wi-Fi の問題も重なっていたので、これだけでどう聞こえるかは確かめていない。）
 `A2DP_BUFFER` を変えるときは `A2DP_CHUNK` の倍数にすること（`static_assert` で確かめている）。
 
-## 8. tools/discord_relay.py — Discord とやりとりする
+### 7.7 Spotify を聞く
+
+Wi-Fi につながっているときは、Spotify のプレイリストを選んでイヤホンで聞ける。Spotify Premium が要る。
+
+Pico だけでは Spotify は鳴らせない。音は DRM で暗号化されていて、組み込み機器向けの公式 SDK は契約が要り、RAM も足りない。
+そこで dynabook で非公式の Spotify Connect クライアント **go-librespot** を動かし、その音を中継（`tools/discord_relay.py`）が
+MP3（128kbps）にして Pico へ流す。Pico は SD の曲と同じく libmad でデコードして鳴らす。
+中継側の準備は 8.7 節。go-librespot は Spotify の規約の上ではグレーなので、自分のアカウントで自分が聞く範囲にとどめる。
+
+```
+dynabook:  go-librespot ──PCM (FIFO)──> discord_relay.py ──MP3 (WebSocket, TLS も中継が受ける)──┐
+             ▲ 一覧・再生・曲送り (127.0.0.1:3678)        127.0.0.1:8010 ← Funnel 10000 番 (TCP のまま) │
+             └──────────────────────────┘                                                         ▼
+Pico:                                                 受信リング (8〜24KB) ──> libmad ──> A2DP ──> イヤホン
+```
+
+使い方:
+
+1. ホームで Spotify を開く（SW4）。**Spotify モード**になり、SD の再生は止まる。中継につなぎ直すので、一覧が出るまで 10 秒ほどかかる
+2. 一覧で SW2 / SW3 でプレイリストを選び、SW4 で**曲選択**の画面へ（SW1 長押しなら、そのプレイリストを頭から鳴らす）
+3. 曲選択では 1 行目に曲名（シャッフル中は右端に `⇄`）、2 行目の左にアーティスト、右に番号が出る。
+   収まらない曲名とアーティストは、Receive の本文と同じく左へ流れる（頭と末尾で少し止まる）。SW2 / SW3 で曲を選び、**SW4 でその曲から**鳴らす。
+   **SW4 を長押しすると、選んだ曲に関係なくシャッフルで**鳴らす（シャッフルが入り、最初の曲もランダム）。どちらも再生中の画面に移る。鳴り始めるまで 2〜3 秒
+4. 再生中の画面では SW2 前の曲 / SW3 次の曲 / SW4 シャッフル / SW1 長押し 一時停止。SW1 で曲選択に戻る（鳴らし続ける。鳴っている曲が選ばれていて、1 行目の左端に `▶` が付く）。
+   一覧や曲選択から再生中の画面へは、**SW3 の長押し**で戻れる
+5. 曲選択で SW1 を押すと一覧に、一覧で SW1 を押すとモードを抜けてホームに戻る。go-librespot は止まり、Discord の中継につなぎ直す
+
+- **モードの間は Spotify の画面しか使えない。** Discord は受け取らない（中継は直近 20 件を持っているので、モードを抜けてつなぎ直すと届く）。
+  Music・System も開けない。イヤホンにつなぐには、一度モードを抜けて System で SW4 を押す
+- 一覧の先頭は**お気に入りの曲**（`Liked Songs`）。そのあとにライブラリのプレイリストが先頭から 49 個まで並ぶ
+- 曲名は 16 曲ずつ中継に頼み、32 曲分だけ覚えておく。選んでいる曲が回の端に近づくと、次の回を先に頼む。
+  音を流している間は、返事が音の後ろに並ぶので届くまで数秒かかる（その間は `loading...`）。1 つのプレイリストで出せる曲は 800 曲まで（go-librespot の `metadata.max_tracks`）
+- スマホやPCの Spotify からも、デバイス `espoke` として見える。そちらで曲を選んだり止めたりしても Pico に反映されるが、
+  届いている音（最大 3 秒分）を鳴らし終えてからになる。Pico で一時停止したときは、スマホで再開しても Pico は止まったまま（Pico で再開する）
+- 曲名・アーティスト名・プレイリスト名は、Discord と同じく中継が半角カナにして送ってくる（漢字は読みに直る。ハングルは `?`）
+
+しくみ:
+
+- Discord の流れ（`/stream`）は閉じて、中継の **`/spotify` に WebSocket で1本だけ**つなぐ。音も操作もこの1本でやりとりする。
+  TLS をもう1本張るヒープは無く、曲送りのたびにつなぎ直すと握手（6〜9 秒）の間が無音になるため
+- つなぐ先は Funnel の **10000 番**（`SPOTIFY_PORT`）。Funnel はここを TCP のまま dynabook へ転送し、**TLS は中継（Python）が受ける**。
+  8443 番（Discord）のように tailscaled（Go）が TLS を受けると、送った量が 128KB を超えたところでレコードが最大 16KB になり、
+  Pico の受信バッファ（4KB）で受け取れない。中継が受ければ、1 フレーム（1KB）ずつ書くのでレコードも 1KB ほどで済む
+- **Funnel の入口から dynabook までは往復 1 秒ほどかかる**（実測。入口までは 7ms だが、TLS の握手に 2.5〜3 秒、要求から応答まで約 1 秒）。
+  中継は Pico がまだ読んでいない量を `win`（48KB）以下に抑えて送り、Pico は読んだ量を 1KB ごとに知らせるので、1 秒に届くのは `win` まで。
+  最初は 8443 番のまま `win` を 3KB（受信バッファ未満）にしてレコードを抑えたが、1 秒に 2〜3KB しか届かず、ほとんど鳴らなかった。
+  10000 番に替えて `win` を 48KB にすると、1 秒に 18KB 届く（実機。128kbps は 1 秒 16KB）
+- **流れてくる速さは Pico が決める。** Pico はリングに空きが無ければ読まないので、TCP の受信窓が閉じ、中継も go-librespot もそこで待つ
+- リングが半分たまったら鳴らし始め、リングとデコーダの入力（最大 4KB）を合わせて 2KB を切ったら `buffering...` にして、また半分たまるまで無音で待つ
+- 曲送りや選曲のときは、リングに残った前の曲を捨てる。中継は切れ目（`Z`）を送り、Pico はそれまでに届いた分（`win` まで）も捨てる。
+  捨てるのは 1 回に 2KB まで（`SP_POLL_MAX`）にして、合間にイヤホンへ無音を書く。全部読み捨てるまで戻らないと
+  A2DP のバッファが空になり、最後の 256 サンプルが繰り返されて 1 秒ほどピーと鳴った。
+  押した時点で A2DP のバッファに入っている前の曲（0.3 秒ほど）は、捨てる手段が無いのでそのまま鳴る
+- 状態の知らせ（`S`）は音の後ろに並ぶので、届くのが数秒遅れることがある。中継は `S` に「それまでに受け取った操作の数」を付け、
+  Pico は自分が送った操作より前の古い知らせでは、一時停止の状態を書き換えない（一時停止→再開の直後に、古い「一時停止」で止まらないように）
+- 中継は一時停止中は音を送らない。Pico は一時停止中、リングが一杯でも音以外のフレームは読み進めるので、
+  スマホで一時停止・再開したのに気づける（Pico で止めたときは、止める前に来ていた音が前にあって読めない）
+- 受信リングは 4KB ずつ（`SP_SEG`）、つないだあとに取る。Spotify モードに入ると空きヒープは 34KB ほどになるが細切れで、
+  16KB や 12KB を1つでは取れなかった（実機）。TLS を先に取らせ、残りから空きを 8KB 残して取る。実機では 12KB 取れた
+- Spotify モードに入ると、SD の曲の一覧と SD のライブラリを手放してヒープを空ける。SD から流すときに読み直す
+- arduino-pico の `WiFiClientSecure` は、書くたびに相手の受け取り（TCP の ACK）を最大 300ms 待つ。
+  読んだ量を知らせるたびに往復の時間だけ止まると音が途切れるので、中継とつなぐクライアント（`RelayClient`）ではこの待ちをやめている。
+  TCP の Nagle も切っている（`WiFiClient::setDefaultNoDelay(true)`）
+- Wi-Fi は SD と同じく、鳴らす間は省電力にする（常時受信だと Bluetooth と無線を取り合って途切れる）。
+  `wifi fast` で常時受信にもできる。書き込み直さずに試せる
+
+実機（2026-10-13、家の Wi-Fi、dynabook も家）のシリアル:
+
+```
+relay: tls 8658 ms, heap 33KB -> 24KB, bearssl stack 6184/8192 bytes
+spotify: ring 12288 bytes, heap 12KB
+spotify: connected (win 49152, ring 12288)
+spotify: 50 playlists
+underflow at 28s (ring 8192/12288)
+```
+
+鳴らしている間、リングはほぼ一杯のままで `buffering` は出なかった。A2DP の `underflow` は 1 分に 6 回ほど出たが、
+聞いていて途切れは分からなかった。リングが一杯のときにも出るので、届くのが遅れたのではなく、Pico の処理か Bluetooth の送り出しが一瞬詰まっている。
+
+## 8. tools/discord_relay.py — Discord と Spotify の中継
 
 Discord の決めたサーバー（か1つのチャンネル）の発言を、espoke の LCD に出す。
 逆に、espoke の Send の画面で打った文を Bot として Discord に送る。
+Spotify モードでは、go-librespot の音を MP3 にして流す（8.7 節）。
 
 ### 8.1 経路
 
@@ -818,9 +917,10 @@ journalctl --user -u espoke-relay -f      # 届いた発言は "msg ..." と出�
 | `GET /stream?after=<ID>` | `after` より新しい発言を送り、接続を閉じずに新着を流し続ける。`after` が無ければ直近 8 件から |
 | `POST /stream?after=<ID>` | 本文（UTF-8）を Discord に送ってから、`GET /stream` と同じく流す。送った結果は `X-Sent` ヘッダ（下の表） |
 | `POST /post` | 本文（UTF-8）を差出人 `test` の発言として流す。Discord を使わずに試すとき |
+| `GET /spotify?win=<n>` | WebSocket に切り替えて、Spotify の音と操作をやりとりする（8.7 節）。`SPOTIFY_PIPE` が無ければ 404 |
 | `GET /` | 動いているかの確認 |
 
-`/stream` と `/post` には `X-Key: <RELAY_KEY>` ヘッダが要る（無いか違えば 403）。
+`/stream` と `/post` と `/spotify` には `X-Key: <RELAY_KEY>` ヘッダが要る（無いか違えば 403）。
 
 `POST /stream` は espoke が文を送るときに使う。Pico はつなぐたびに TLS の握手（4〜8 秒）をするので、
 送る用の接続を別に張らず、**送るのと受け取り直すのを1回の接続で済ませる**。
@@ -909,6 +1009,132 @@ curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head 
 | `wifi off` | `wifi off` で切った |
 | `no RELAY_HOST` | `arduino_secrets.h` に `RELAY_HOST` が無い |
 
+### 8.7 Spotify の中継
+
+go-librespot（[devgianlu/go-librespot](https://github.com/devgianlu/go-librespot)）を dynabook で動かし、音を名前付きパイプ（FIFO）に書かせる。
+中継はそれを読んで MP3 にし、Pico の WebSocket に流す。プレイリストの一覧や曲送りは go-librespot の API を呼ぶので、
+Spotify の Web API や開発者アプリは使わない（2026 年 2 月から開発モードに制限が増えたが、関係ない）。Spotify Premium は要る。
+
+go-librespot を入れる（リリースのバイナリ。x86_64 なら `go-librespot_linux_x86_64.tar.gz`）。
+
+```bash
+ssh dynabook
+mkdir -p ~/espoke/bin ~/espoke/librespot
+cd /tmp && curl -LO https://github.com/devgianlu/go-librespot/releases/download/v0.10.3/go-librespot_linux_x86_64.tar.gz
+tar -xzf go-librespot_linux_x86_64.tar.gz -C ~/espoke/bin go-librespot
+~/espoke/venv/bin/pip install lameenc
+```
+
+設定は `~/espoke/librespot/config.yml`。
+
+```yaml
+device_name: espoke
+device_type: speaker
+zeroconf_enabled: false
+credentials:
+  type: device_auth                 # 初回はログに出るコードを spotify.com/pair で入れる
+audio_backend: pipe
+audio_output_pipe: /home/<ユーザー>/espoke/spotify.pcm
+audio_output_pipe_format: s16le
+audio_output_pipe_wait_for_reader: true
+bitrate: 160
+initial_volume: 100                 # 音量は Pico の vol で変える
+ignore_last_volume: true
+skip_debounce_ms: 0                 # 曲送りをすぐ効かせる
+metadata:
+  enabled: true                     # 曲選択の一覧 (/context/tracks) に要る
+prefer_firewall_friendly_ports: true  # 学校のネットワークでは 4070 番が通らないことがある
+server:
+  enabled: true
+  address: 127.0.0.1                # 外に開けない (POST /token で Spotify のトークンが取れる)
+  port: 3678
+```
+
+```ini
+# ~/.config/systemd/user/espoke-librespot.service
+[Unit]
+Description=espoke go-librespot
+After=network-online.target
+
+[Service]
+ExecStart=%h/espoke/bin/go-librespot --config_dir %h/espoke/librespot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now espoke-librespot
+journalctl --user -u espoke-librespot -f   # 初回は spotify.com/pair のコードが出る。入れるとログインが保存される
+```
+
+`relay.env` に FIFO のパスを足して、中継を再起動する。`SPOTIFY_PIPE` が無ければ Spotify は使わない（`/spotify` は 404）。
+
+```bash
+cat >> ~/espoke/relay.env <<'END'
+SPOTIFY_PIPE=/home/<ユーザー>/espoke/spotify.pcm
+# SPOTIFY_KBPS=96    # 途切れるなら下げる (既定 128)
+END
+systemctl --user restart espoke-relay
+```
+
+Spotify は Funnel の **10000 番を TCP のまま**転送させ、TLS は中継が受ける（理由は 7.7 節）。
+中継は `127.0.0.1:8010` で待ち、証明書は `tailscale cert` で 8443 番と同じものを `~/espoke/tls.crt` と `tls.key` に取り出す
+（起動時と 1 日ごと。期限が近ければ tailscaled が更新する）。`tailscale cert` と `tailscale funnel` を sudo なしで使えるよう、
+一度だけ operator にしておく。
+
+```bash
+sudo tailscale set --operator=$USER                       # 一度だけ
+tailscale funnel --bg --tcp=10000 tcp://127.0.0.1:8010
+tailscale funnel status                                    # 8443 (https) と 10000 (tcp) が Funnel on
+```
+
+Pico の代わりに試すには `tools/spotify_probe.py` を使う（標準ライブラリだけで動く）。
+Pico と同じく読んだ量を知らせながら受け取り、音を `mpv` に流す。標準入力で操作する（`p 0` で 0 番のプレイリスト、`n` 次、`b` 前、`k` 一時停止、`r` 再開、`f` シャッフル、`q` 終わる）。
+tailnet の中の PC では名前が tailnet のアドレス（`100.x.x.x`）になり、Funnel を通らない。Pico と同じ道を通すには `--connect` に公開のアドレスを書く。
+
+```bash
+IP=$(dig +short @1.1.1.1 dynabook.<tailnet>.ts.net | head -1)
+python3 tools/spotify_probe.py --key <RELAY_KEY> --connect $IP https://dynabook.<tailnet>.ts.net:10000
+python3 tools/spotify_probe.py --key <RELAY_KEY> --connect $IP --out song.mp3 --throttle 128 https://dynabook.<tailnet>.ts.net:10000  # Pico の速さで受けてファイルに書く
+# 標準入力: p 3 (3 番を頭から) / p 3 5 (3 番の 5 曲目から) / u 3 (シャッフル) / t 3 0 (3 番の 0 曲目から 16 曲の名前)
+```
+
+`/spotify` のフレームはすべてバイナリで、先頭1バイトが種類。文字は LCD の文字コード（cp932 の1バイト文字）。
+
+| 向き | 種類 | 中身 |
+|---|---|---|
+| 中継から | `A` | MP3 |
+| 中継から | `L` | `番号 TAB 総数 TAB プレイリスト名`。つないだ直後に全部（最大 50）。0 番はお気に入りの曲（`Liked Songs`。URI は `spotify:user:<ユーザー名>:collection`） |
+| 中継から | `T` | `曲名 TAB アーティスト` |
+| 中継から | `S` | `playing`・`paused`・`stopped` TAB シャッフル（0/1）TAB 鳴らしているプレイリストの番号（無ければ -1）TAB それまでに受け取った操作（`P` `U` `N` `B` `K` `R`）の数 TAB 鳴っている曲がプレイリストの何番目か（分からなければ -1） |
+| 中継から | `I` | `プレイリストの番号 TAB 曲の番号 TAB 曲の数 TAB 曲名 TAB アーティスト`。`Q` の返事（空のプレイリストは曲の番号が -1） |
+| 中継から | `Z` | 選曲・曲送りの切れ目。これより前の `A` は前の曲 |
+| 中継から | `H` / `E` | 生存確認（30 秒ごと）/ エラー（`librespot down`・`spotify login`） |
+| 中継へ | `C<n>` | 読んだバイト数の累計（1KB ごとと、30 秒ごと） |
+| 中継へ | `P<n>` / `P<n>:<i>` / `U<n>` | n 番のプレイリストを頭から / i 番目の曲から / シャッフルで（最初の曲もランダム）鳴らす |
+| 中継へ | `Q<n>:<i>` | n 番のプレイリストの i 番目から 16 曲の名前を `I` で送らせる |
+| 中継へ | `N` / `B` / `K` / `R` / `F` | 次 / 前 / 一時停止 / 再開 / シャッフルの入り切り |
+
+選曲・曲送りでは、go-librespot を先に一時停止し、FIFO に残った前の曲を 0.1 秒読み捨ててから切り替えて再開し、そのあとに `Z` を送る。
+go-librespot の FIFO 出力は、曲を変えても書いてしまった分を捨てない（`Drop()` が何もしない）ので、
+そのまま切り替えると、`Z` のあとに前の曲が 1 秒ほど続いた。切り替えの間は、こちらで止めているので状態（`S`）は知らせない。
+
+go-librespot の FIFO 出力は、書いている間ロックを持ったままで、一時停止や曲送りはそのロックを待つ。
+中継が読むのを止めたまま操作すると固まるので、操作の間は Pico が要るかにかかわらず読み続ける（ただし実時間の速さまで）。
+Pico がつながっていない間も、実時間の速さで読み捨てる（go-librespot を詰まらせず、早送りもさせない）。
+
+中継は、曲名や状態の知らせを音より先に送る（音を送り続けていると、知らせがなかなか割り込めない）。
+一時停止中（Pico が `K` を送ったときと、go-librespot が止まっているのを見たとき）は音を送らない。
+書く順番は送ると決めた順番にそろえ、一時停止の知らせのあとに音が続かないようにしている。
+
+TLS（`ssl.SSLSocket`）は、別のスレッドから同時に読み書きすると壊れる（全速で受け取らせると数秒で切れた）。
+中継は音と知らせを別のスレッドで書き、命令を受け取るスレッドで読むので、読み書きを1本のロックで順番にしている。
+読むのは `select` で届いたのを確かめてからにして、書く側を待たせない。
+
 ## 9. トラブルシューティング
 
 | 症状 | 原因と対処 |
@@ -953,3 +1179,9 @@ curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head 
 | espoke から送ると `send: discord 403` | Bot に「メッセージを送信」の権限が無い（8.3 節） |
 | espoke から送ると `send: relay 404` | dynabook の `discord_relay.py` が古い（`POST /stream` が無い）。8.4 節の `scp` で入れ直して再起動する |
 | PC の curl で、発言してもすぐに出ない | `--http1.0` か `-N` を付けていない。`iconv` を通していると、終わるまで溜め込まれる（8.5 節） |
+| ホームに Spotify が出ない | Wi-Fi につながっていない（System の Wi-Fi で確かめる）か、`RELAY_HOST` が無い |
+| Spotify の画面が `relay 404` のまま | dynabook の `discord_relay.py` が古いか、`relay.env` に `SPOTIFY_PIPE` が無い（8.7 節） |
+| Spotify の画面が `relay error` のまま | Funnel の 10000 番が無い（`tailscale funnel status`）か、中継が証明書を取り出せていない（`journalctl --user -u espoke-relay` に `tailscale cert:` や `tls:` が出る。8.7 節） |
+| Spotify の画面が `librespot down` / `spotify login` | go-librespot が動いていない / まだログインしていない。`journalctl --user -u espoke-librespot` を見る（8.7 節） |
+| Spotify が `buffering...` を繰り返す | 届くのが鳴らすのに追いついていない。`spotify` で `read=` を 10 秒あけて2回見て、1 秒に 16KB 届いているか確かめる。`wifi fast` で常時受信にする、`SPOTIFY_KBPS=96` にする、ルータに近づく（7.7 節） |
+| Spotify で `relay: connect failed (ssl ...)` が出る | ヒープ不足。`spotify: ring ... heap ...` の行を見る。リングが小さくなっても足りないなら、SD の曲数を減らす（7.7 節） |
