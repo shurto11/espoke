@@ -75,8 +75,8 @@ static const bool   BOOTSEL_SKIP  = true;      // 再生中の BOOTSEL で次の
 // 耳の感じ方に合わせて dB で刻む (振幅に比例させると、小さい音量のあたりで1目盛りの差が大きすぎた)
 static const int    VOLUME_TENTH_DB = 6;       // 1 目盛りの大きさ (0.1dB 単位)。1〜100 で -59.4〜0dB
 // 起動時の音量。イヤホン (a0:0c:e2:c6:1d:04) はつなぐたびに自分の音量を 80% に戻すので、
-// その状態で耳で合わせた値 (-39dB)。細かい調整はイヤホンのボタンでする
-static const int    VOLUME_DEFAULT = 35;
+// その状態で耳で合わせた値 (-30dB)。細かい調整はイヤホンのボタンでする
+static const int    VOLUME_DEFAULT = 50;
 static const int    VOLUME_STEP    = 5;        // "vol +" / "vol -" で変える目盛り (3dB)
 
 static const int     PIN_SDA   = 0;   // GP0 (物理1番ピン)
