@@ -147,6 +147,7 @@ struct Msg {
 A2DPSource a2dp;
 LiquidCrystal_I2C *lcd = nullptr;
 static uint8_t lcdAddr = LCD_ADDR_DEFAULT;  // 棒を描くときは LiquidCrystal_I2C を通さず直接送る
+static bool    lcdResyncOn = true;           // "lcd resync off" で、描き直すときの区切りの合わせ直しを止める (調べるとき用)
 
 // 帯域の棒。writePcm() で鳴らす音をモノラルにして溜め、BAR_HOP ごとに FFT して段の高さを記録しておく。
 // A2DP のバッファには 370ms 分ほど先の音まで入っているので、描くときは今イヤホンへ送り出している
@@ -382,16 +383,21 @@ static void setupLCD() {
   lcd = new LiquidCrystal_I2C(addr, LCD_COLS, LCD_ROWS);
   lcd->init();
   lcd->backlight();
+  createLcdChars();
+}
 
-  // 棒の 1〜7 段を自作文字 0〜6 にする (下から h 行を塗る)。8 段は LCD に元からある全面黒 (0xFF)
-  for (uint8_t h = 1; h <= 7; h++) {
-    uint8_t rows[8];
-    for (uint8_t r = 0; r < 8; r++) rows[r] = (r >= 8 - h) ? 0x1F : 0x00;
-    lcd->createChar(h - 1, rows);
+// 自作文字を LCD に作る。棒の 1〜7 段を自作文字 0〜6 (下から h 行を塗る)、シャッフルの印 (⇄) を 7 にする。
+// 8 段は LCD に元からある全面黒 (0xFF)。lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず
+// 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
+static void createLcdChars() {
+  static const uint8_t SHUFFLE_MARK[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
+  if (!lcd) return;
+  for (uint8_t c = 0; c < 8; c++) {
+    Wire.beginTransmission(lcdAddr);
+    lcdSendRaw(0x40 | (c << 3), false);  // CGRAM の c 文字目へ
+    for (uint8_t r = 0; r < 8; r++) lcdSendRaw(c == 7 ? SHUFFLE_MARK[r] : (r >= 7 - c ? 0x1F : 0x00), true);
+    Wire.endTransmission();
   }
-  // シャッフルの印 (⇄)。自作文字 7
-  uint8_t mark[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
-  lcd->createChar(7, mark);
 }
 
 // ---------------- 帯域の棒 ----------------
@@ -523,12 +529,78 @@ static void lcdSendRaw(uint8_t b, bool data) {
   }
 }
 
+// LCD の今の番地から1バイト読む (読むと番地は1つ進む)。RW (P1) を上げて D4〜D7 (P4〜P7) に 1 を書くと、
+// PCF8574 の端子が手放されて LCD の出した値が読める。E を上げている間に上下 4bit を1回ずつ読む
+static uint8_t lcdReadRaw() {
+  const uint8_t base = 0xF0 | 0x08 | 0x02 | 0x01;  // D4〜D7 を手放す、バックライト、RW=読む、RS=データ
+  uint8_t b = 0;
+  for (int i = 0; i < 2; i++) {
+    Wire.beginTransmission(lcdAddr);
+    Wire.write(base);
+    Wire.write(base | 0x04);
+    Wire.endTransmission();
+    Wire.requestFrom(lcdAddr, (size_t)1);
+    b = (b << 4) | ((Wire.available() ? Wire.read() : 0) >> 4);
+    Wire.beginTransmission(lcdAddr);
+    Wire.write(base);
+    Wire.endTransmission();
+  }
+  return b;
+}
+
+// LCD の中身を読んでシリアルに出す ("lcd")。自作文字 0〜7 を絵で、2 行に書いてある文字コードを 16 進で
+static void dumpLcd() {
+  if (!lcd) return;
+  uint8_t cg[64], dd[LCD_ROWS][LCD_COLS];
+  Wire.beginTransmission(lcdAddr);
+  lcdSendRaw(0x40, false);  // CGRAM の 0 番地へ
+  Wire.endTransmission();
+  for (uint8_t &v : cg) v = lcdReadRaw();
+  for (uint8_t row = 0; row < LCD_ROWS; row++) {
+    Wire.beginTransmission(lcdAddr);
+    lcdSendRaw(0x80 | (row * 0x40), false);  // row 行目の頭へ
+    Wire.endTransmission();
+    for (uint8_t &v : dd[row]) v = lcdReadRaw();
+  }
+  Wire.beginTransmission(lcdAddr);
+  Wire.write(0x08);  // RW を書く側に戻す
+  Wire.endTransmission();
+
+  Serial.println("lcd: CGRAM 0     1     2     3     4     5     6     7");
+  for (int r = 0; r < 8; r++) {
+    String line = "           ";
+    for (int c = 0; c < 8; c++) {
+      for (int bit = 4; bit >= 0; bit--) line += ((cg[c * 8 + r] >> bit) & 1) ? '#' : '.';
+      line += ' ';
+    }
+    Serial.println(line);
+  }
+  for (uint8_t row = 0; row < LCD_ROWS; row++) {
+    Serial.printf("lcd: row%u", row);
+    for (uint8_t v : dd[row]) Serial.printf(" %02X", v);
+    Serial.println();
+  }
+}
+
+// "lcd" で中身を出し、"lcd chars" で自作文字を作り直す。"lcd resync off" / "on" で区切りの合わせ直しを止める / 戻す
+static void lcdCommand(const String &cmd) {
+  if (cmd == "lcd chars") {
+    createLcdChars();
+    Serial.println("lcd: chars rewritten");
+  } else if (cmd.startsWith("lcd resync")) {
+    lcdResyncOn = !cmd.endsWith("off");
+    Serial.printf("lcd: resync %s\n", lcdResyncOn ? "on" : "off");
+  } else {
+    dumpLcd();
+  }
+}
+
 // LCD の 4bit の区切りを合わせ直す。I2C の通信が1回化けると、LCD は 4bit の上下を取り違えたままになり、
 // 画面全体がでたらめになって戻らない。HD44780 の初期化と同じく 0x3 を3回、0x2 を1回送ると、8bit / 4bit の
 // どちらで、どこまで受け取っていても 4bit の頭に揃う。表示の中身は消えないので、このあと描き直す (5ms ほど)。
 // LiquidCrystal_I2C の init() は 1 秒待つので使わない
 static void lcdResync() {
-  if (!lcd) return;
+  if (!lcd || !lcdResyncOn) return;
   bool first = true;
   for (uint8_t nibble : {0x30, 0x30, 0x30, 0x20}) {
     Wire.beginTransmission(lcdAddr);
@@ -545,6 +617,9 @@ static void lcdResync() {
   lcdSendRaw(0x0C, false);  // 表示 ON、カーソルなし
   lcdSendRaw(0x06, false);  // 書くたびに右へ進む
   Wire.endTransmission();
+  // この LCD は、上の合わせ直しで自作文字が壊れる (偶数番の文字に、隣の奇数番の中身が写る。7 段の棒が ⇄ になる)。
+  // 合わせ直すたびに作り直す
+  createLcdChars();
 }
 
 // 今イヤホンへ送り出している所の棒を 2行目に描く。LiquidCrystal_I2C は 4bit ごとに I2C の通信を
@@ -1210,7 +1285,11 @@ static PlayResult pollAbort() {
       setVolume(cmd);
       return PLAY_NONE;
     }
-    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / shuffle / vol [0-100|+|-] / wifi on / wifi off");
+    if (cmd.startsWith("lcd")) {
+      lcdCommand(cmd);
+      return PLAY_NONE;
+    }
+    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / shuffle / vol [0-100|+|-] / wifi on / wifi off / lcd");
   }
 
   // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
@@ -1689,7 +1768,7 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / pause / next / prev / rand / stop /"
-    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / bt / scan / relay / status";
+    " list / now / shuffle / vol [0-100|+|-] / wifi on|off / bt / scan / relay / status / lcd [chars|resync on|off]";
 
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
@@ -1728,6 +1807,8 @@ static void handleCommand(String cmd) {
     setWiFi(cmd);
   } else if (cmd.startsWith("vol")) {
     setVolume(cmd);
+  } else if (cmd.startsWith("lcd")) {
+    lcdCommand(cmd);
   } else if (cmd == "scan") {
     autoPlay = false;
     a2dp.disconnect();
