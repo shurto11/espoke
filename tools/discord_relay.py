@@ -7,6 +7,8 @@ Discord の決めたサーバー (かチャンネル) に書き込まれた発�
 その並びは JIS X 0201 (cp932 の1バイト文字) と同じ。漢字は MeCab (fugashi + unidic-lite)
 で読みに直してから半角カナにする。辞書は数十 MB あって Pico には載らないので、ここでやる。
 逆向きに、Pico でモールス入力した文を Bot として Discord に送る。
+Bot を入れられないサーバーでは --notify にする。同じ PC で公式の Discord アプリを動かし、
+その出すデスクトップ通知を受け取る。送るのは webhook (下の「--notify」の節)。
 
 Spotify は、同じ PC で動かす go-librespot (非公式の Spotify Connect クライアント) の音を MP3 にして
 Pico へ流す。Pico は SD の曲と同じく libmad で鳴らす。プレイリストの一覧や曲送りは go-librespot の
@@ -28,6 +30,8 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     DISCORD_CHANNEL_ID  1チャンネルだけ受け取るときは、こちらにチャンネルの ID を書く (両方あればこちら)
     DISCORD_SEND_CHANNEL_ID  Pico からの文を送るチャンネルの ID。無ければ DISCORD_CHANNEL_ID、
                         それも無ければ最後に発言を受け取ったチャンネルに送る
+    DISCORD_NOTIFY_CHANNEL  --notify のとき、このチャンネル名 (# は無くてよい) の通知だけを使う
+    DISCORD_WEBHOOK_URL     --notify のとき、Pico からの文を送る webhook。無ければ受け取るだけ
     RELAY_KEY           Pico と決めておく合言葉。Funnel で誰でもつなげるので、これで弾く
     SPOTIFY_PIPE        go-librespot が音を書く FIFO のパス。無ければ Spotify は使わない (/spotify は 404)
     SPOTIFY_API         go-librespot の API。既定 http://127.0.0.1:3678
@@ -36,6 +40,7 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
 
 使い方:
     ~/espoke/venv/bin/python discord_relay.py                 # ~/espoke/relay.env を読んで動かす
+    ~/espoke/venv/bin/python discord_relay.py --notify        # Bot を使わず Discord アプリの通知から受け取る
     ~/espoke/venv/bin/python discord_relay.py --no-discord    # Discord につながず /post だけで試す
     ~/espoke/venv/bin/python discord_relay.py --convert "今日は雨"   # 変換結果だけ見る
 
@@ -53,6 +58,17 @@ ID は Discord のメッセージ ID (snowflake) で、時間とともに増え�
 空行は2つの意味で送る。つないだ直後は、溜まっていた分のあとに1つ送り、「つなぐ前から
 あった分はここまで」と知らせる (Pico は起動直後の古い発言で着信を知らせないようにする)。
 その後は何もない間 HEARTBEAT 秒ごとに送り、Pico が「つながっているが新着がない」と分かるようにする。
+
+--notify:
+    Bot を使えないときは、公式の Discord アプリを画面なし (Xvfb) で動かしておき、この中継が D-Bus の
+    通知サーバー (org.freedesktop.Notifications) になって、アプリの出す通知の題名と本文を受け取る。
+    題名は "名前 (#チャンネル, カテゴリ)" で、本文は発言そのもの。題名にサーバー名は無いので、サーバーでは絞れない。
+    アカウントは自分のものを使い、見たいサーバーかチャンネルの通知だけを「すべてのメッセージ」にしておく
+    (他のサーバーはメンションのみかミュート。他のサーバーでメンションされた発言も届く)。DM は捨てる。
+    アプリがそのチャンネルを開いていると通知が出ない。
+    Bot と違って履歴は読めないので、立ち上げ直すとそれまでの発言は消える。編集や削除も届かない。
+    自分の発言は通知されない。webhook で送った文は通知されて戻ってくるので、ECHO_WAIT 秒の間は捨てる。
+        ~/espoke/venv/bin/pip install jeepney
 
 Spotify:
     go-librespot (https://github.com/devgianlu/go-librespot) を同じ PC で動かし、音を FIFO に書かせる。
@@ -226,13 +242,17 @@ def to_lcd(text, limit):
     return text.encode("cp932")[:limit]
 
 
-def discord_text(message):
-    """Discord の発言から、表示する文を取り出す"""
-    text = message.clean_content  # メンションは @名前 になっている
+def tidy_text(text):
+    """Discord の書式を外して、LCD に出す文にする。Bot で受け取った発言にも、通知の本文にも使う"""
     text = re.sub(r"<a?:(\w+):\d+>", r":\1:", text)  # カスタム絵文字
     text = re.sub(r"https?://[^\s)>]+", "URL", text)  # (https://...) の閉じ括弧は残す
     text = re.sub(r"\*\*|__|~~|\|\||`", "", text)    # 太字・下線・打ち消し・伏せ字・コード
-    text = re.sub(r"^ *(#{1,3}|-#|>{1,3}) +", "", text, flags=re.M)  # 行頭の見出し・小さい字・引用
+    return re.sub(r"^ *(#{1,3}|-#|>{1,3}) +", "", text, flags=re.M)  # 行頭の見出し・小さい字・引用
+
+
+def discord_text(message):
+    """Discord の発言から、表示する文を取り出す"""
+    text = tidy_text(message.clean_content)  # メンションは @名前 になっている
     if message.attachments:
         text += " [添付]"
     if message.stickers:
@@ -1113,6 +1133,110 @@ def run_discord(token, guild_id, channel_id, send_id):
     client.run(token, log_handler=None)
 
 
+# ---------------- Discord アプリの通知から受け取る (--notify) ----------------
+
+NOTIFY_NAME = "org.freedesktop.Notifications"
+ECHO_WAIT = 60  # webhook で送った文が、通知になって戻ってくるのを待つ時間 (秒)。戻ってきたら捨てる
+
+
+def parse_title(title):
+    """Discord の通知の題名 "名前 (#チャンネル, カテゴリ)" を (名前, チャンネル) に分ける。
+    題名にサーバー名は無い。DM などチャンネルの無い通知は (題名, None)"""
+    # Discord は名前・チャンネル・カテゴリを、文字の向きの区切り (U+2068 … U+2069) で1つずつ囲んでくる
+    title = re.sub("[\u200e\u200f\u2066-\u2069]", "", title)
+    name, sep, rest = title.partition(" (#")
+    if not sep or not rest.endswith(")"):
+        return title, None
+    return name, rest[:-1].split(", ")[0]
+
+
+def run_notify(channel, webhook):
+    """Bot を入れられないサーバー向け。同じ PC で動かす公式の Discord アプリが出すデスクトップ通知を受け取る。
+    この中継が D-Bus の通知サーバー (org.freedesktop.Notifications) になり、通知の題名と本文を発言として流す。
+    通知の題名にサーバー名は無いので、どのサーバーの発言を受け取るかは Discord の通知の設定で決める。
+    channel があれば、そのチャンネルの通知だけを使う。DM は捨てる。
+    Pico からの文は webhook に送る。webhook が無ければ受け取るだけ"""
+    global SEND
+    from jeepney import HeaderFields, MessageType, new_error, new_method_return
+    from jeepney.bus_messages import message_bus
+    from jeepney.io.blocking import open_dbus_connection
+
+    sent = []  # webhook で送った (時刻, 文)。Discord はそれも通知してくるので、戻ってきたら捨てる
+    lock = threading.Lock()
+
+    def send(text):
+        data = json.dumps({"content": text, "allowed_mentions": {"parse": []}}).encode()
+        req = urllib.request.Request(webhook, data, {"Content-Type": "application/json",
+                                                     "User-Agent": "espoke-relay"})
+        with lock:
+            sent.append((time.monotonic(), text))
+        try:
+            urllib.request.urlopen(req, timeout=SEND_TIMEOUT).close()
+        except urllib.error.HTTPError as e:
+            return "discord %d" % e.code  # 404 なら webhook が消されている
+        except OSError:
+            return "network"
+        sys.stderr.write("sent by webhook\n")
+        return "ok"
+
+    def echoed(body):
+        now = time.monotonic()
+        with lock:
+            sent[:] = [(t, s) for t, s in sent if now - t < ECHO_WAIT]
+            for i, (_, s) in enumerate(sent):
+                if s.strip() == body.strip():
+                    del sent[i]
+                    return True
+        return False
+
+    def same(a, b):
+        """名前を比べる。全角と半角、大文字と小文字の違いは見ない (IT と it、ＩＴ も同じ)"""
+        return a is not None and (unicodedata.normalize("NFKC", a).casefold()
+                                  == unicodedata.normalize("NFKC", b).casefold())
+
+    def on_notify(app, title, body):
+        # 題名の形が Discord の更新で変わったら、ここに出る生の値を見て parse_title を直す
+        sys.stderr.write("notify %r %r %r\n" % (app, title, body))
+        if "discord" not in app.lower():
+            return
+        name, ch = parse_title(title)
+        if ch is None or (channel and not same(ch, channel)) or echoed(body):
+            return
+        add_message(STORE.next_id(), datetime.datetime.now(JST), name, tidy_text(body),
+                    None if channel else ch)
+
+    SEND = send if webhook else (lambda text: "no webhook")
+
+    conn = open_dbus_connection(bus="SESSION")
+    reply = conn.send_and_get_reply(message_bus.RequestName(NOTIFY_NAME, 4))  # 4: 空くのを待たない
+    if reply.body[0] != 1:
+        sys.exit("discord: %s を他のプログラム (デスクトップの通知) が持っている" % NOTIFY_NAME)
+    print("discord: Discord アプリの通知から %s を見ている。送るのは %s" % (
+        "#%s" % channel if channel else "チャンネルの発言すべて",
+        "webhook" if webhook else "無し (受け取るだけ)"))
+
+    count = 0
+    while True:
+        msg = conn.receive()
+        if msg.header.message_type != MessageType.method_call:
+            continue
+        member = msg.header.fields.get(HeaderFields.member)
+        if member == "Notify":
+            count += 1
+            conn.send(new_method_return(msg, "u", (count,)))
+            app, _, _, title, body = msg.body[:5]
+            on_notify(app, title, body)
+        elif member == "GetCapabilities":
+            # body-markup を言わなければ、本文は HTML に直されずにそのままの字で来る
+            conn.send(new_method_return(msg, "as", (["body"],)))
+        elif member == "GetServerInformation":
+            conn.send(new_method_return(msg, "ssss", ("espoke-relay", "espoke", "1", "1.2")))
+        elif member == "CloseNotification":
+            conn.send(new_method_return(msg))
+        else:
+            conn.send(new_error(msg, "org.freedesktop.DBus.Error.UnknownMethod"))
+
+
 # ---------------- 起動 ----------------
 
 def load_env(path):
@@ -1143,8 +1267,11 @@ def main():
     ap.add_argument("--port", type=int, default=8001)
     ap.add_argument("--env", default="~/espoke/relay.env",
                     help="DISCORD_TOKEN などを書いたファイル (無ければ環境変数だけを見る)")
-    ap.add_argument("--no-discord", action="store_true",
-                    help="Discord につながず、POST /post で入れた発言だけを流す")
+    how = ap.add_mutually_exclusive_group()
+    how.add_argument("--no-discord", action="store_true",
+                     help="Discord につながず、POST /post で入れた発言だけを流す")
+    how.add_argument("--notify", action="store_true",
+                     help="Bot を使わず、同じ PC で動かす Discord アプリの通知から受け取る")
     ap.add_argument("--convert", metavar="TEXT", help="TEXT を変換して表示し、終わる")
     args = ap.parse_args()
 
@@ -1161,7 +1288,14 @@ def main():
     KEY = os.environ.get("RELAY_KEY", "")
     if not KEY:
         sys.exit("RELAY_KEY が設定されていない (%s か環境変数に書く)" % env)
-    if not args.no_discord:
+    if args.notify:
+        try:
+            import jeepney  # noqa: F401
+        except ImportError:
+            sys.exit("--notify には jeepney が要る (~/espoke/venv/bin/pip install jeepney)")
+        notify_channel = os.environ.get("DISCORD_NOTIFY_CHANNEL", "").lstrip("#")
+        webhook = os.environ.get("DISCORD_WEBHOOK_URL", "")
+    elif not args.no_discord:
         token = os.environ.get("DISCORD_TOKEN", "")
         guild = os.environ.get("DISCORD_GUILD_ID", "")
         channel = os.environ.get("DISCORD_CHANNEL_ID", "")
@@ -1207,6 +1341,9 @@ def main():
 
     if args.no_discord:
         server.serve_forever()
+    elif args.notify:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        run_notify(notify_channel, webhook)
     else:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         run_discord(token, int(guild) if guild.isdigit() else None,

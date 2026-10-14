@@ -766,6 +766,7 @@ underflow at 28s (ring 8192/12288)
 Discord の決めたサーバー（か1つのチャンネル）の発言を、espoke の LCD に出す。
 逆に、espoke の Send の画面で打った文を Bot として Discord に送る。
 Spotify モードでは、go-librespot の音を MP3 にして流す（8.7 節）。
+Bot を入れられないサーバーでは、dynabook で動かす Discord アプリの通知から受け取る（8.8 節）。
 
 ### 8.1 経路
 
@@ -831,6 +832,8 @@ espoke から送った文は、Bot の発言としてチャンネルに出る。
 3. 最後に発言を受け取ったチャンネル（サーバー全体を受け取るとき。直前の会話に返事をする形になる）
 
 `@everyone` などのメンションは通知しない（合言葉を知っていれば誰でも送れるため）。Bot 自身の発言は受け取らないので、送った文は espoke には戻ってこない。
+
+Bot をサーバーに入れられないときは 8.8 節。
 
 ### 8.4 dynabook 側の準備
 
@@ -1134,6 +1137,106 @@ Pico がつながっていない間も、実時間の速さで読み捨てる（
 TLS（`ssl.SSLSocket`）は、別のスレッドから同時に読み書きすると壊れる（全速で受け取らせると数秒で切れた）。
 中継は音と知らせを別のスレッドで書き、命令を受け取るスレッドで読むので、読み書きを1本のロックで順番にしている。
 読むのは `select` で届いたのを確かめてからにして、書く側を待たせない。
+
+### 8.8 Bot を使えないとき — Discord アプリの通知から受け取る
+
+Bot を入れられないサーバーでも、dynabook で公式の Discord アプリを動かせば、その**デスクトップ通知**から発言を受け取れる。
+中継を `--notify` で動かすと、中継が D-Bus の通知サーバー（`org.freedesktop.Notifications`）になり、アプリが出す通知の題名と本文を受け取る。
+
+```
+Discord ── 公式の Discord アプリ（自分のアカウント。dynabook の画面なしの X、Xvfb :99）
+                 │ デスクトップ通知（D-Bus の Notify）
+                 ▼
+           discord_relay.py --notify ──（ここから先は 8.1 節と同じ）── Pico WH
+```
+
+- 通知の題名は `名前 (#チャンネル, カテゴリ)`、本文は発言そのもの。中継は Bot で受け取ったときと同じ形にして流す
+- **題名にサーバー名は無い**（カッコの2つ目はカテゴリ名）ので、中継ではサーバーで絞れない。どのサーバーを受け取るかは Discord の通知の設定で決める。DM は捨てる
+- アカウントを自動で操作するわけではない（読むのは OS に来た通知だけ）。自分のアカウントのトークンで読む self-bot は規約違反なので使わない
+- 送るのは webhook（`DISCORD_WEBHOOK_URL`）。無ければ受け取るだけになり、Send の画面には `send: no webhook` と出る
+
+Bot との違い:
+
+| | Bot（8.3 節） | `--notify` |
+|---|---|---|
+| 受け取る発言 | Bot が見られるチャンネル | 自分のアカウントに通知が来るチャンネルの発言（DM は捨てる） |
+| 自分の発言 | 届く | 届かない（自分の発言は通知されない） |
+| 中継を立ち上げ直したとき | 履歴から直近を読み直す | それまでの発言は消える |
+| espoke から送った文 | Bot の発言になる | webhook の発言になる（webhook が無ければ送れない） |
+
+準備（`sudo` が要るのは apt だけ）:
+
+```bash
+ssh dynabook
+curl -L -o ~/espoke/discord.deb 'https://discord.com/api/download?platform=linux&format=deb'
+sudo apt install -y xvfb ~/espoke/discord.deb
+~/espoke/venv/bin/pip install jeepney
+```
+
+画面なしの X と Discord アプリを systemd の user unit で動かす。
+
+```ini
+# ~/.config/systemd/user/espoke-xvfb.service
+[Unit]
+Description=Xvfb (X without a screen) for the Discord app that espoke-relay --notify reads
+
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x800x24 -nolisten tcp
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/espoke-discord.service
+[Unit]
+Description=Discord app whose notifications espoke-relay --notify reads
+Requires=espoke-xvfb.service
+After=espoke-xvfb.service espoke-relay.service
+
+[Service]
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/discord
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now espoke-xvfb espoke-discord
+```
+
+最初の1回だけログインする。画面を撮って手元で開き、ログイン画面の QR コードをスマホの Discord（設定 → QR コードをスキャン）で読む。
+
+```bash
+ssh dynabook ffmpeg -loglevel error -f x11grab -video_size 1280x800 -i :99 -frames:v 1 -y '~/espoke/screen.png'
+scp dynabook:~/espoke/screen.png .
+```
+
+Discord の設定（通知の設定はアカウントに付くので、スマホで変えてもよい）:
+
+- 見たいサーバー（かチャンネル）の通知だけを「すべてのメッセージ」にする。チャンネルごとに「@メンションのみ」などにしてあれば、そちらが効く
+- 他のサーバーは「@メンションのみ」かミュートにしておく。他のサーバーでメンションされた発言も espoke に届く
+- dynabook のアプリでは、そのチャンネルを開いたままにしない。開いているチャンネルは通知されないので、ホームを開いておく
+
+`espoke-relay.service` の `ExecStart` の末尾に `--notify` を付ける。`relay.env` には次を書ける（無くても動く）。
+
+```bash
+# DISCORD_NOTIFY_CHANNEL=チャンネル名  # このチャンネルの通知だけを使う (# は無くてよい。全角と半角、大文字と小文字は区別しない)
+# DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...   # espoke から送るとき
+RELAY_KEY=合言葉
+```
+
+- 起動すると `discord: Discord アプリの通知から #チャンネル名 を見ている。送るのは webhook` と出る
+- 届いた通知は、捨てたものも含めて `notify 'discord' '題名' '本文'` とログに出る。Discord の更新で題名の形が変わったら、これを見て `parse_title` を直す
+- `DISCORD_NOTIFY_CHANNEL` を書かなければ、サーバー全体を受け取るときと同じく本文の頭に `#チャンネル名` が付く
+- webhook で送った文は通知になって戻ってくるので、60 秒（`ECHO_WAIT`）の間は同じ本文の通知を1回捨てる
+- メインのアカウントを使うと、dynabook のアプリがずっとオンラインになる。サーバーを「すべてのメッセージ」にすると、スマホにも全部通知が来る（止めるならサーバーの通知設定の「モバイルプッシュ通知」を切る）
 
 ## 9. トラブルシューティング
 
