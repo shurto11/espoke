@@ -219,8 +219,101 @@ def _reading(text):
         return "".join(out)
 
 
+# ハングル → カタカナ。ROM にハングルは無く、自作の字 (CGRAM) も 8 字しか持てないので、発音をカタカナで書く。
+# 1 字は 初声 (19)・中声 (21)・終声 (28) の組み合わせで、字の番号から計算で分けられる。
+# 日本語で韓国語の読みを書くときの慣例に寄せる: 連音 (한국어 → ハングゴ)、鼻音化 (합니다 → ハムニダ)、
+# 口蓋音化 (같이 → カチ)、語中の ㄱㄷㅂㅈ の濁り (고기 → コギ)、
+# 母音のあとの濃音と、ㄱㄷㅂㅈ の仲間の前の終声 k t p の促音 (오빠 → オッパ、학교 → ハッキョ。믹스 は ミクス)
+_HG_INIT = "k k n t t r m p p s s - ch ch ch k t p h".split()  # ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ
+_HG_VOICED = {0: "g", 3: "d", 7: "b", 12: "j"}                  # 語中で濁る ㄱㄷㅂㅈ
+_HG_TENSE = {1, 4, 8, 10, 13}                                    # ㄲㄸㅃㅆㅉ。母音のあとでは前に ッ が入る
+_HG_STOP = {0, 1, 3, 4, 7, 8, 12, 13, 14, 15, 16, 17}            # ㄱㄲㄷㄸㅂㅃㅈㅉㅊㅋㅌㅍ。この前の終声 k t p は ッ
+_HG_VOWEL = "a e ya ye o e yo ye o wa we we yo u wo we wi yu u ui i".split()
+# 終声の音。ㄳ などの二重子音もここでは1つの音にする
+_HG_FINAL = "- k k k n n n t r k m r r r p r m p p t t ng t t k t p t".split()
+# 連音: 次の字の初声が ㅇ のとき、終声を次の字の初声に移す。終声の番号 → (残る終声, 移る初声)
+_HG_LINK = {1: (0, 0), 2: (0, 1), 3: (1, 9), 4: (0, 2), 5: (4, 12), 6: (0, 2), 7: (0, 3), 8: (0, 5),
+            9: (8, 0), 10: (8, 6), 11: (8, 7), 12: (8, 9), 13: (8, 16), 14: (8, 17), 15: (0, 5),
+            16: (0, 6), 17: (0, 7), 18: (17, 9), 19: (0, 9), 20: (0, 10), 22: (0, 12), 23: (0, 14),
+            24: (0, 15), 25: (0, 16), 26: (0, 17), 27: (0, None)}  # ㅎ は消える (좋아 → 조아)
+_HG_KANA = {row: kana.split() for row, kana in {
+    "": "ア イ ウ エ オ", "k": "カ キ ク ケ コ", "g": "ガ ギ グ ゲ ゴ", "n": "ナ ニ ヌ ネ ノ",
+    "t": "タ ティ トゥ テ ト", "d": "ダ ディ ドゥ デ ド", "r": "ラ リ ル レ ロ", "m": "マ ミ ム メ モ",
+    "p": "パ ピ プ ペ ポ", "b": "バ ビ ブ ベ ボ", "s": "サ シ ス セ ソ",
+    "ch": "チャ チ チュ チェ チョ", "j": "ジャ ジ ジュ ジェ ジョ", "h": "ハ ヒ フ ヘ ホ"}.items()}
+# 字になっていない字母 (ㅋㅋ など)。子音は「その音 + ウ段」、母音は中声と同じ読み
+_HG_JAMO = ("ク ク ク ヌ ヌ ヌ トゥ トゥ ル ル ル ル ル ル ル ル ム プ プ プ ス ス ン チュ チュ チュ ク トゥ プ フ "
+            "ア エ ヤ イェ オ エ ヨ イェ オ ワ ウェ ウェ ヨ ウ ウォ ウェ ウィ ユ ウ ウイ イ").split()
+assert len(_HG_INIT) == 19 and len(_HG_VOWEL) == 21 and len(_HG_FINAL) == 28 and len(_HG_JAMO) == 51
+
+
+def _hg_kana(row, vowel):
+    """初声の行と中声から、カタカナ1字分 (キャ などは2字) を作る"""
+    a, i, u, e, o = _HG_KANA[row]
+    base = {"a": a, "i": i, "u": u, "e": e, "o": o}
+    if vowel in base:
+        return base[vowel]
+    if vowel == "ui":
+        return i if row else "ウイ"  # 희 → ヒ
+    if vowel[0] == "y":
+        if not row:
+            return {"ya": "ヤ", "yu": "ユ", "yo": "ヨ", "ye": "イェ"}[vowel]
+        if row in ("ch", "j"):
+            return base[vowel[1]]  # 쳐 → チョ
+        return i + {"a": "ャ", "u": "ュ", "o": "ョ", "e": "ェ"}[vowel[1]]
+    if not row:
+        return {"wa": "ワ", "wi": "ウィ", "we": "ウェ", "wo": "ウォ"}[vowel]
+    return u + {"a": "ァ", "i": "ィ", "e": "ェ", "o": "ォ"}[vowel[1]]  # 과 → クァ
+
+
+def _hangul(text):
+    """ハングルを、読みのカタカナにする。ほかの字はそのまま"""
+    # 字は [初声, 中声, 終声]、それ以外の字はそのままの文字で並べる
+    items = []
+    for c in text:
+        n = ord(c) - 0xAC00
+        if 0 <= n < 11172:
+            items.append([n // 588, n % 588 // 28, n % 28])
+        elif "ㄱ" <= c <= "ㅣ":
+            items.append(_HG_JAMO[ord(c) - 0x3131])
+        else:
+            items.append(c)
+    syllable = [isinstance(x, list) for x in items]
+    for k in range(len(items) - 1):
+        if syllable[k] and syllable[k + 1] and items[k + 1][0] == 11 and items[k][2] in _HG_LINK:
+            items[k][2], moved = _HG_LINK[items[k][2]]
+            if moved in (3, 16) and items[k + 1][1] == 20:
+                moved = {3: 12, 16: 14}[moved]  # ㄷ ㅌ + 이 は 지 치 になる
+            if moved is not None:
+                items[k + 1][0] = moved
+    out = []
+    for k, x in enumerate(items):
+        if not syllable[k]:
+            out.append(x)
+            continue
+        first, vowel, last = x
+        before = _HG_FINAL[items[k - 1][2]] if k and syllable[k - 1] else None  # 語頭なら None
+        after = items[k + 1][0] if k + 1 < len(items) and syllable[k + 1] else None
+        if first in _HG_VOICED and before in ("-", "n", "r", "m", "ng"):
+            row = _HG_VOICED[first]
+        else:
+            row = _HG_INIT[first].strip("-")
+        if first in _HG_TENSE and before == "-":
+            out.append("ッ")  # 母音のあとだけ (오빠 → オッパ。날씨 は ナルシ)
+        out.append(_hg_kana(row, _HG_VOWEL[vowel]))
+        sound = _HG_FINAL[last]
+        if after in (2, 6):  # 次が ㄴ ㅁ なら鼻音になる
+            sound = {"k": "ng", "t": "n", "p": "m"}.get(sound, sound)
+        if sound in ("k", "t", "p"):
+            sound = "ッ" if after in _HG_STOP else {"k": "ク", "t": "ッ", "p": "プ"}[sound]
+        out.append({"-": "", "n": "ン", "ng": "ン", "m": "ム", "r": "ル"}.get(sound, sound))
+    return "".join(out)
+
+
 def to_lcd(text, limit):
     """LCD1602A (A00 ROM) にそのまま書ける cp932 のバイト列にする"""
+    # NFKC より先にハングルを読む (NFKC は ㅋ などの字母を、字の部品の別の文字に変えてしまう)
+    text = _hangul(unicodedata.normalize("NFC", text))
     text = unicodedata.normalize("NFKC", text)  # 全角英数は ASCII に、半角カナは全角に揃える
     text = _reading(text)
     out = []
@@ -236,7 +329,7 @@ def to_lcd(text, limit):
         if kept:
             out += kept
         elif unicodedata.category(c)[0] in "LN":
-            out.append("?")  # 読めなかった漢字や、ハングルなど ROM に無い文字
+            out.append("?")  # 読めなかった漢字や、ROM に無い文字 (ハングルは _hangul がカタカナにしている)
         # 絵文字や記号は捨てる
     text = re.sub(r" +", " ", "".join(out)).strip()
     return text.encode("cp932")[:limit]
