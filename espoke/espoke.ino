@@ -15,8 +15,15 @@
  *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
  *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
- *      Music: 再生の操作 (シリアルの pause / prev / next / shuffle と同じ)
- *        SW1 長押し 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 (シャッフル中はランダム) / SW4 シャッフルの入り切り
+ *      Music: Spotify と同じく アルバムの一覧 → 曲選択 → 再生中 の順に進む。アルバムは SD のフォルダで、一覧の先頭は全曲
+ *        一覧: SW2 / SW3 でアルバムを選び、SW4 で曲選択へ。SW1 でホームへ
+ *        曲選択: 1行目に曲名 (鳴っている曲なら左端に ▶)、2行目にフォルダ名と番号。SW2 / SW3 で曲を選び、
+ *                SW4 でその曲から再生する。SW4 長押しで、そのアルバムをシャッフルで再生する。SW1 で一覧へ
+ *        一覧と曲選択の SW3 長押しで、再生中の画面へ。止まっているときの SW1 長押しで、見ているアルバムを再生する
+ *        再生中: 再生の操作 (シリアルの pause / prev / next / shuffle と同じ)。曲送りは鳴らしているアルバムの中で
+ *          SW1 長押し 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 (シャッフル中はランダム) / SW4 シャッフルの入り切り /
+ *          SW1 曲選択へ
+ *        ホームから開くと、鳴らしていれば再生中の画面、止まっていれば一覧が出る
  *      Receive: SW2 古いメッセージ / SW3 新しいメッセージ
  *      Send: モールス信号を打ってアルファベットを入力する
  *        SW1 backspace (長押しで戻る) / SW2 トン / SW3 ツー / SW4 enter (符号を文字に確定。空なら空白、空白のあとなら送信)
@@ -159,7 +166,7 @@ enum PlayResult {
   PLAY_ERROR,  // SD の読み込みかデコードで失敗した
 };
 
-enum Step { STEP_NEXT, STEP_PREV, STEP_RAND };  // 次にどの曲へ進むか
+enum Step { STEP_NEXT, STEP_PREV, STEP_RAND, STEP_PICK };  // 次にどの曲へ進むか (STEP_PICK は曲選択で選んだ sdPick)
 
 // MP3 デコーダの作業領域 (約 29KB)
 static const size_t MP3_IN_SIZE = 4096;  // 192kbps なら1フレーム約 630 バイト、320kbps でも約 1KB
@@ -273,10 +280,12 @@ static bool   shuffle = false;             // シャッフル中か。「次の�
 static int    playErrors = 0;              // 連続で失敗した回数
 static unsigned long lastBootsel = 0;      // BOOTSEL を最後に見た時刻
 
-// microSD の曲一覧 (パス順)
+// microSD の曲一覧 (フォルダごとに、フォルダの中はファイル名の順)
 static bool                sdReady = false;
 static std::vector<String> sdTracks;
+static std::vector<uint16_t> sdAlbums;     // フォルダ (アルバム) ごとに、最初の曲の sdTracks での番号
 static int                 sdIndex = -1;   // 最後に選んだ曲。-1 なら次は先頭から
+static int                 sdPick = -1;    // 曲選択で選んだ曲。STEP_PICK で次にこれを鳴らす
 // 再生のたびに確保すると、ヒープが細切れになったときに確保できなくなるので、最初から持っておく
 static Mp3Decoder          mp3;
 
@@ -309,6 +318,17 @@ static int    discordSel = 0;              // Discord の画面で選んでい�
 // System の画面で見るもの。SW2 / SW3 で切り替える
 enum SysView { SYS_WIFI, SYS_BT, SYS_INFO, SYS_COUNT };
 static int    sysView = SYS_WIFI;
+// Music の画面の見え方。Spotify と同じく アルバムの一覧 → 曲選択 → 再生中 の順に進み、SW1 で戻る。
+// アルバムの番号は、0 が全曲 (All tracks)、i (1 から) がフォルダ sdAlbums[i - 1]
+enum MuView { MU_ALBUMS, MU_TRACKS, MU_NOW };
+static int    muView = MU_NOW;              // 起動中の状態 (status()) は再生中の見え方に出す
+static int    muSel = 0;                    // 一覧で選んでいるアルバム
+static int    muPlayAlbum = 0;              // 鳴らしているアルバム。曲送りとシャッフルはこの中で
+static int    muTrackAlbum = 0;             // 曲選択の画面で見ているアルバム
+static int    muTrackSel = 0;               // 曲選択で選んでいる曲 (アルバムの中で何番目か、0 から)
+static Marquee muMarq[2] = {{0, 0}, {0, 0}};  // 一覧と曲選択で、収まらない名前 (1行目と2行目) を流す位置
+static Marquee muNowMarq = {0, 0};          // 再生中の見え方で、収まらない曲名を流す位置
+static unsigned long lastMuScroll = 0;
 
 static const unsigned long DEBOUNCE_MS = 30;
 static const unsigned long LONG_PRESS_MS = 600;  // SW1 をこれだけ押し続けると長押し (Music で再生・一時停止、Send で戻る)
@@ -334,7 +354,7 @@ static KeyState keys[KEY_COUNT] = {
   {PIN_DASH,  HIGH, HIGH, 0, false, false},
   {PIN_ENTER, HIGH, HIGH, 0, false, false},
 };
-// Music の画面で SW1〜SW4 を押したときに出すコマンド (SW1 は長押し)。シリアルから打ったのと同じに扱う
+// Music の再生中の見え方で SW1〜SW4 を押したときに出すコマンド (SW1 は長押し)。シリアルから打ったのと同じに扱う
 static const char *const PLAY_KEY_COMMANDS[KEY_COUNT] = {"pause", "prev", "next", "shuffle"};
 static String keyCommand = "";             // スイッチで出して、まだ処理していないコマンド
 
@@ -445,11 +465,15 @@ static bool barsOn() {
   return playing && !paused;
 }
 
-// Music の画面の1行を書き換える。他の画面を表示中なら覚えておくだけ。
+// Music の再生中の見え方の1行を書き換える。他の画面 (か Music の一覧と曲選択) を表示中なら覚えておくだけ。
 // 2行目に棒を出している間は、文字は覚えておくだけにして、棒が消えたときに出す
 static void printLine(uint8_t row, const String &text) {
+  if (row == 0 && text != mainLines[0]) {
+    marqReset(muNowMarq);  // 新しい曲名は頭から流す
+    lastMuScroll = millis();
+  }
   mainLines[row] = text;
-  if (page == PAGE_MUSIC && !(row == 1 && barsOn())) drawRow(row, row == 0 ? musicTop() : text);
+  if (page == PAGE_MUSIC && muView == MU_NOW && !(row == 1 && barsOn())) drawRow(row, row == 0 ? musicTop() : text);
 }
 
 // 1行目の右端にシャッフルの印 (自作文字 7。⇄ の形) を付ける
@@ -460,9 +484,13 @@ static String withShuffleMark(const String &text, bool on) {
   return s + '\x07';
 }
 
-// Music の画面の1行目。シャッフル中は右端に印を出す
+// Music の再生中の見え方の1行目。曲名か状態 (収まらなければ流す)、シャッフル中は右端に印
+static size_t musicTopWidth() {
+  return shuffle ? LCD_COLS - 1 : LCD_COLS;
+}
+
 static String musicTop() {
-  return withShuffleMark(mainLines[0], shuffle);
+  return withShuffleMark(marqText(muNowMarq, mainLines[0], musicTopWidth()), shuffle);
 }
 
 static void status(const String &a, const String &b) {
@@ -502,7 +530,7 @@ static void setupLCD() {
 }
 
 // 自作文字を LCD に作る。棒の 1〜7 段を自作文字 0〜6 (下から h 行を塗る)、シャッフルの印 (⇄) を 7 にする。
-// 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない Spotify の曲選択の画面では、
+// 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない曲選択の画面 (Music と Spotify) では、
 // 6 を再生中の印 (▶) にする (lcdPlayMark())。lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず
 // 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
 static void createLcdChars() {
@@ -525,7 +553,7 @@ static void createLcdChars() {
 
 // 自作文字 LCD_PLAY_MARK を、棒の 7 段ではなく再生中の印 (▶) にしておく画面か
 static bool lcdPlayMark() {
-  return page == PAGE_SPOTIFY && spView == SP_TRACKS;
+  return (page == PAGE_SPOTIFY && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
 }
 
 // ---------------- 帯域の棒 ----------------
@@ -754,7 +782,7 @@ static void lcdResync() {
 // 3 回するので 16 文字で 20ms ほど止まる。変わった所だけを1回の通信にまとめて送る (100kHz で最大 8ms 程度)
 static void drawBars() {
   lastBarDraw = millis();
-  if (!lcd || !(page == PAGE_MUSIC || (page == PAGE_SPOTIFY && spView == SP_NOW))) return;
+  if (!lcd || !((page == PAGE_MUSIC && muView == MU_NOW) || (page == PAGE_SPOTIFY && spView == SP_NOW))) return;
 
   // A2DP のバッファと pcmChunk に残っている分だけ、今鳴っているのは書いた所より前
   const uint32_t queued = (A2DP_BUFFER - 1) - a2dp.availableForWrite() / 2 + pcmChunkLen;
@@ -882,17 +910,25 @@ static bool spSelIsPlaying() {
   return spTrackList == spPlaying && spTrackSel == spPlayingTrack && spState != "stopped";
 }
 
-// 曲選択の画面の1行目。鳴っている曲なら左端に印 (自作文字の ▶)、曲名 (収まらなければ流す)、
-// シャッフル中は右端に印
+// 曲選択の画面の1行目 (Music と Spotify で同じ)。選んでいる曲が鳴っている曲なら左端に印 (自作文字の ▶)、
+// 曲名 (収まらなければ流す)、シャッフル中は右端に印
+static size_t pickTopWidth(bool playingMark, bool shuffleMark) {
+  return LCD_COLS - (shuffleMark ? 1 : 0) - (playingMark ? 1 : 0);
+}
+
+static String pickTop(const Marquee &m, const String &text, bool playingMark, bool shuffleMark) {
+  String top = playingMark ? String((char)LCD_PLAY_MARK) : String();
+  return withShuffleMark(top + marqText(m, text, pickTopWidth(playingMark, shuffleMark)), shuffleMark);
+}
+
 static size_t spTopWidth() {
-  return LCD_COLS - (spShuffle ? 1 : 0) - (spSelIsPlaying() ? 1 : 0);
+  return pickTopWidth(spSelIsPlaying(), spShuffle);
 }
 
 static String spTrackTop() {
   const String *name = spTrackName(spTrackSel);
   String text = name ? *name : spTrackTotal == 0 ? String("(no tracks)") : String("loading...");
-  String top = spSelIsPlaying() ? String((char)LCD_PLAY_MARK) : String();
-  return withShuffleMark(top + marqText(spMarq[0], text, spTopWidth()), spShuffle);
+  return pickTop(spMarq[0], text, spSelIsPlaying(), spShuffle);
 }
 
 // 再生中の画面の1行目。曲名 (収まらなければ流す)、シャッフル中は右端に印
@@ -960,6 +996,88 @@ static String spNowLine() {
   if (spState == "stopped" && !spWaitZ) return "stopped";
   if (spWaitZ || spBuffering) return "buffering...";
   return spArtist;
+}
+
+// Music の一覧の1行目。選んでいるアルバムの名前を左右の矢印で挟む。収まらなければ矢印の間で流す
+static String muAlbumTop() {
+  String name = albumName(muSel);
+  if (name.length() <= LCD_COLS - 2) return menuTitle(name.c_str());
+  return "\x7f" + marqText(muMarq[0], name, LCD_COLS - 2) + "\x7e";
+}
+
+// Music の一覧の2行目。選んでいる番号 / アルバムの数。鳴らしているアルバムなら後ろに playing か pause
+static String muAlbumLine() {
+  String s = String(muSel + 1) + "/" + String(albumCount());
+  if (autoPlay && muSel == muPlayAlbum) s += paused ? "  pause" : "  playing";
+  return s;
+}
+
+// 曲選択で選んでいる曲の、sdTracks での番号
+static int muTrackIndex() {
+  return albumFirst(muTrackAlbum) + muTrackSel;
+}
+
+// 曲選択で選んでいる曲が、鳴らしている (か一時停止している) 曲か
+static bool muSelIsPlaying() {
+  return autoPlay && muTrackIndex() == sdIndex;
+}
+
+// Music の曲選択の1行目。曲名はファイル名 (Spotify の曲選択と同じ見た目)
+static String muTrackTop() {
+  return pickTop(muMarq[0], trackTitle(sdTracks[muTrackIndex()]), muSelIsPlaying(), shuffle);
+}
+
+// Music の曲選択の2行目。左にその曲のフォルダの名前 (収まらなければ流す)、右に アルバムの中の番号/曲の数
+static String muTrackNumber() {
+  return String(muTrackSel + 1) + "/" + String(albumSize(muTrackAlbum));
+}
+
+static size_t muFolderWidth() {
+  return LCD_COLS - muTrackNumber().length() - 1;
+}
+
+static String muTrackLine() {
+  return marqText(muMarq[1], folderName(sdTracks[muTrackIndex()]), muFolderWidth()) + " " + muTrackNumber();
+}
+
+// 一覧と曲選択の名前を頭から出し直す (選ぶものが変わったとき)
+static void muResetScroll() {
+  marqReset(muMarq[0]);
+  marqReset(muMarq[1]);
+  lastMuScroll = millis();
+}
+
+// 再生中の見え方に移る。曲名は頭から出す
+static void muShowNow() {
+  muView = MU_NOW;
+  marqReset(muNowMarq);
+  lastMuScroll = millis();
+}
+
+// Music の画面で、収まらない名前を1文字ずつ流す。動いた行だけ書き直す (再生中の見え方の2行目の棒はそのまま)
+static void scrollMusic() {
+  lastMuScroll = millis();
+  if (muView == MU_NOW) {
+    if (marqStep(muNowMarq, mainLines[0].length(), musicTopWidth())) drawRow(0, musicTop());
+    return;
+  }
+  if (!albumCount()) return;
+  if (muView == MU_ALBUMS) {
+    if (marqStep(muMarq[0], albumName(muSel).length(), LCD_COLS - 2)) drawRow(0, muAlbumTop());
+    return;
+  }
+  const String &path = sdTracks[muTrackIndex()];
+  if (marqStep(muMarq[0], trackTitle(path).length(), pickTopWidth(muSelIsPlaying(), shuffle))) {
+    drawRow(0, muTrackTop());
+  }
+  if (marqStep(muMarq[1], folderName(path).length(), muFolderWidth())) drawRow(1, muTrackLine());
+}
+
+// 鳴らしている曲や一時停止が変わったとき、Music の一覧と曲選択の印を書き直す (再生中の見え方は printLine() が書く)
+static void musicDraw() {
+  if (page != PAGE_MUSIC || muView == MU_NOW || !albumCount()) return;
+  if (muView == MU_ALBUMS) drawRow(1, muAlbumLine());
+  else drawRow(0, muTrackTop());
 }
 
 // Discord の画面の2行目に、選んでいる項目の今の様子を出す
@@ -1064,12 +1182,23 @@ static void drawPage() {
       }
       break;
     default:  // PAGE_MUSIC
-      drawRow(0, musicTop());
-      if (barsOn()) {
-        invalidateBars();
-        drawBars();
+      if (muView != MU_NOW && !albumCount()) {
+        drawRow(0, "Music");
+        drawRow(1, sdReady ? "no mp3" : "no card");
+      } else if (muView == MU_ALBUMS) {
+        drawRow(0, muAlbumTop());
+        drawRow(1, muAlbumLine());
+      } else if (muView == MU_TRACKS) {
+        drawRow(0, muTrackTop());
+        drawRow(1, muTrackLine());
       } else {
-        drawRow(1, mainLines[1]);
+        drawRow(0, musicTop());
+        if (barsOn()) {
+          invalidateBars();
+          drawBars();
+        } else {
+          drawRow(1, mainLines[1]);
+        }
       }
       break;
   }
@@ -1118,6 +1247,7 @@ static void openPage(int p) {
 // 前 (1つ上) の画面に戻る (SW1 か GP15)。着信で切り替わった Receive の画面からは、元の画面に戻る
 static void goBack() {
   if (page == PAGE_SPOTIFY) onSpotifyKey(KEY_BACK);
+  else if (page == PAGE_MUSIC) onMusicKey(KEY_BACK);
   else if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
   else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
   else if (page != PAGE_HOME) openPage(PAGE_HOME);
@@ -1135,6 +1265,10 @@ static void onKey(int id) {
   }
   if (page == PAGE_SPOTIFY) {
     onSpotifyKey(id);
+    return;
+  }
+  if (page == PAGE_MUSIC) {
+    onMusicKey(id);
     return;
   }
   // SW1 はどの画面でも前の画面に戻る (Send だけは backspace で、戻るのは長押し)
@@ -1159,15 +1293,11 @@ static void onKey(int id) {
       if (id == KEY_ENTER) {
         int p = home ? HOME_MENU[sel].page : DISCORD_MENU[sel].page;
         if (p == PAGE_SPOTIFY) spotifyOn();
+        else if (p == PAGE_MUSIC) musicOpen();
         else openPage(p);
       }
       break;
     }
-    case PAGE_MUSIC:
-      // SW2 前の曲 / SW3 次の曲 / SW4 シャッフルの入り切り
-      keyCommand = PLAY_KEY_COMMANDS[id];
-      Serial.printf("key: %s\n", keyCommand.c_str());
-      break;
     case PAGE_MSG:
       // 曲の 前 / 次 の代わりに、メッセージの 古い方 / 新しい方 を見る
       if (id == KEY_DOT || id == KEY_DASH) {
@@ -1254,20 +1384,110 @@ static void onSpotifyKey(int id) {
   }
 }
 
-// 長押しのある役目か。SW1 はどの画面でも。Spotify では、曲選択の SW4 (ランダムに鳴らす) と、
+// ホームから Music を開く。鳴らしていれば再生中の見え方、止まっていればアルバムの一覧から。
+// Spotify モードで手放した曲の一覧は、ここで読み直す
+static void musicOpen() {
+  if (sdStale) setupSD();
+  if (autoPlay) {
+    muShowNow();
+  } else {
+    muView = MU_ALBUMS;
+    muResetScroll();
+  }
+  openPage(PAGE_MUSIC);
+}
+
+// アルバム a の曲選択を開く。cursor の曲 (アルバムの中で何番目か) を選んでおく。範囲の外なら頭の曲。
+// 曲が無ければ一覧 (no card / no mp3 と出る) にする
+static void musicOpenTracks(int a, int cursor) {
+  muResetScroll();
+  if (a < 0 || a >= albumCount()) {
+    muView = MU_ALBUMS;
+    return;
+  }
+  muSel = muTrackAlbum = a;
+  muTrackSel = (cursor >= 0 && cursor < albumSize(a)) ? cursor : 0;
+  muView = MU_TRACKS;
+}
+
+// アルバム a を鳴らし、再生中の見え方に移る。cmd は鳴らし方で、"pick" なら曲選択で選んだ sdPick から、
+// "rand" ならランダムな曲から、"pause" (止まっているとき) なら前に鳴らした曲の次から (そのアルバムの曲でなければ頭から)。
+// スイッチで出したコマンドと同じく、loop() か再生ループの pollAbort() が受け取る
+static void musicPlay(int a, const char *cmd) {
+  muPlayAlbum = a;
+  keyCommand = cmd;
+  Serial.printf("key: %s (album %d)\n", cmd, a);
+  muShowNow();
+  drawPage();
+}
+
+// Music の画面のスイッチ。Spotify と同じ並びで、一覧でアルバムを、曲選択で曲を選んで鳴らし、再生中は曲を送る。
+// SW1 で1つ前の見え方に戻り、一覧からはホームへ。長押しは onHold()
+static void onMusicKey(int id) {
+  if (muView == MU_NOW) {
+    if (id == KEY_BACK) {
+      // 鳴らしているアルバムの曲選択へ (鳴らし続ける)。鳴らしている曲を選んでおく
+      musicOpenTracks(muPlayAlbum, sdIndex - albumFirst(muPlayAlbum));
+      drawPage();
+    } else {
+      // SW2 前の曲 / SW3 次の曲 / SW4 シャッフルの入り切り
+      keyCommand = PLAY_KEY_COMMANDS[id];
+      Serial.printf("key: %s\n", keyCommand.c_str());
+    }
+    return;
+  }
+  if (id == KEY_BACK) {
+    if (muView == MU_TRACKS) {
+      muView = MU_ALBUMS;
+      muResetScroll();
+      drawPage();
+    } else {
+      openPage(PAGE_HOME);
+    }
+    return;
+  }
+  if (!albumCount()) return;  // カードか MP3 が無い
+  if (muView == MU_TRACKS) {
+    if (id == KEY_ENTER) {  // 選んでいる曲から鳴らす
+      sdPick = muTrackIndex();
+      musicPlay(muTrackAlbum, "pick");
+    } else {
+      muTrackSel = stepSel(muTrackSel, albumSize(muTrackAlbum), id);
+      muResetScroll();
+      drawPage();
+    }
+    return;
+  }
+  if (id == KEY_ENTER) {
+    // 曲選択へ。鳴らした曲がこのアルバムにあれば、それを選んでおく
+    musicOpenTracks(muSel, sdIndex - albumFirst(muSel));
+  } else {
+    muSel = stepSel(muSel, albumCount(), id);
+    muResetScroll();
+  }
+  drawPage();
+}
+
+// 長押しのある役目か。SW1 はどの画面でも。Music と Spotify では、曲選択の SW4 (シャッフルで鳴らす) と、
 // 一覧と曲選択の SW3 (再生中の画面へ)
 static bool keyHasHold(int id) {
   if (id == KEY_BACK) return true;
-  if (page != PAGE_SPOTIFY) return false;
-  return (id == KEY_ENTER && spView == SP_TRACKS) || (id == KEY_DASH && spView != SP_NOW);
+  bool lists = (page == PAGE_SPOTIFY && spView != SP_NOW) || (page == PAGE_MUSIC && muView != MU_NOW);
+  bool tracks = (page == PAGE_SPOTIFY && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
+  return (id == KEY_ENTER && tracks) || (id == KEY_DASH && lists);
 }
 
 // 長押し。SW1 は、Music と Spotify では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る。
-// SW4 は Spotify の曲選択の画面で、選んでいる曲に関係なくシャッフルで鳴らす。
-// SW3 は Spotify の一覧と曲選択の画面で、再生中の画面へ移る
+// SW4 は曲選択の画面で、選んでいる曲に関係なくシャッフルで鳴らす。
+// SW3 は一覧と曲選択の画面で、再生中の画面へ移る
 static void onHold(int id) {
   if (id == KEY_ENTER) {
     if (page == PAGE_SPOTIFY && spView == SP_TRACKS) spShufflePlay(spTrackList);
+    if (page == PAGE_MUSIC && muView == MU_TRACKS && albumCount()) {
+      shuffle = true;  // 次の曲からもアルバムの中でランダムに
+      Serial.println("shuffle=on");
+      musicPlay(muTrackAlbum, "rand");
+    }
     return;
   }
   if (id == KEY_DASH) {
@@ -1276,12 +1496,19 @@ static void onHold(int id) {
       spShowNow();
       drawPage();
     }
+    if (page == PAGE_MUSIC && muView != MU_NOW && autoPlay) {
+      muShowNow();
+      drawPage();
+    }
     return;
   }
   if (page == PAGE_SPOTIFY) {
     // まだ何も鳴らしていなければ、一覧で選んでいるものを鳴らす
     if (!spActive && !spPaused && spState != "paused") spPlay(spSel);
     else spTogglePause();
+  } else if (page == PAGE_MUSIC && !autoPlay && muView != MU_NOW && albumCount()) {
+    // 止まっていれば、一覧か曲選択で見ているアルバムを鳴らし始める
+    musicPlay(muView == MU_TRACKS ? muTrackAlbum : muSel, "pause");
   } else if (page == PAGE_MUSIC) {
     keyCommand = PLAY_KEY_COMMANDS[KEY_BACK];
     Serial.printf("key: %s\n", keyCommand.c_str());
@@ -1361,6 +1588,7 @@ static void pollButton() {
   if (page == PAGE_MSG && msgCount && millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
   if (page == PAGE_SPOTIFY && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
   if (page == PAGE_SPOTIFY && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
+  if (page == PAGE_MUSIC && millis() - lastMuScroll >= MSG_SCROLL_MS) scrollMusic();
   // Music と Spotify (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文は、描き直す間隔を空ける
   bool live = page != PAGE_MUSIC && page != PAGE_INPUT && page != PAGE_SPOTIFY && !(page == PAGE_MSG && msgCount);
   if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
@@ -1620,11 +1848,12 @@ static void setVolume(const String &cmd) {
   }
 }
 
-// シャッフルを入り切りする。Music の画面の1行目の右端に印を出す。再生中でも次に選ぶ曲から効く
+// シャッフルを入り切りする。Music の再生中と曲選択の1行目の右端に印を出す。再生中でも次に選ぶ曲から効く
 static void toggleShuffle() {
   shuffle = !shuffle;
   Serial.printf("shuffle=%s\n", shuffle ? "on" : "off");
-  if (page == PAGE_MUSIC) drawRow(0, musicTop());
+  if (page == PAGE_MUSIC && muView == MU_NOW) drawRow(0, musicTop());
+  musicDraw();
 }
 
 // 一時停止と再開を切り替える。再生ループは、止めている間は曲を読み進めずに無音を流す
@@ -1633,6 +1862,7 @@ static void togglePause() {
   Serial.println(paused ? "paused" : "resumed");
   invalidateBars();  // 再開したら、一時停止中に出していた文字を棒で上書きする
   showProgress(progressText);
+  musicDraw();
 }
 
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
@@ -1656,6 +1886,7 @@ static PlayResult pollAbort() {
     if (cmd == "next") { nextStep = STEP_NEXT; return PLAY_SKIP; }
     if (cmd == "prev") { nextStep = STEP_PREV; return PLAY_SKIP; }
     if (cmd == "rand") { nextStep = STEP_RAND; return PLAY_SKIP; }
+    if (cmd == "pick") { nextStep = STEP_PICK; return PLAY_SKIP; }  // 曲選択の SW4
     if (cmd == "shuffle") {
       toggleShuffle();
       return PLAY_NONE;
@@ -1742,24 +1973,80 @@ static bool sdReopen(File &f, const String &path, const char *why) {
   return ok;
 }
 
-// カードを (挿し直されていても) 初期化し直し、MP3 の一覧を作り直す
+// パスを、入っているフォルダ、ファイル名の順に比べる (大文字小文字は区別しない)。同じフォルダの曲が続けて並ぶ。
+// パスのまま比べると、フォルダの曲の間にサブフォルダの曲が挟まることがある ("/A/a.mp3" "/A/B/1.mp3" "/A/c.mp3")
+static int comparePath(const String &a, const String &b) {
+  int sa = a.lastIndexOf('/'), sb = b.lastIndexOf('/');
+  int c = strncasecmp(a.c_str(), b.c_str(), std::min(sa, sb));
+  if (c != 0) return c;
+  if (sa != sb) return sa - sb;  // 片方のフォルダの名前が、もう片方の頭と同じ。短い方が先
+  return strcasecmp(a.c_str() + sa + 1, b.c_str() + sb + 1);
+}
+
+static bool sameFolder(const String &a, const String &b) {
+  int sa = a.lastIndexOf('/');
+  return sa == b.lastIndexOf('/') && strncasecmp(a.c_str(), b.c_str(), sa) == 0;
+}
+
+// カードを (挿し直されていても) 初期化し直し、MP3 の一覧とアルバム (フォルダ) の一覧を作り直す
 static bool setupSD() {
   sdStale = false;
   sdBegin();
   sdTracks.clear();
+  sdAlbums.clear();
+  if (sdReady) {
+    scanSdDir("/", 0);
+    // アルバムのフォルダごとに、曲番号順に並ぶよう、フォルダ・ファイル名の順に並べる
+    std::sort(sdTracks.begin(), sdTracks.end(), [](const String &a, const String &b) {
+      return comparePath(a, b) < 0;
+    });
+    for (size_t i = 0; i < sdTracks.size(); i++) {
+      if (i == 0 || !sameFolder(sdTracks[i - 1], sdTracks[i])) sdAlbums.push_back(i);
+    }
+  }
+  // カードが変わっているかもしれないので、選んでいるものを一覧の中に収める
+  if (sdIndex >= (int)sdTracks.size()) sdIndex = -1;
+  if (muSel >= albumCount()) muSel = 0;
+  if (muPlayAlbum >= albumCount()) muPlayAlbum = 0;
+  if (muTrackAlbum >= albumCount()) muTrackAlbum = 0;
+  if (muTrackSel >= albumSize(muTrackAlbum)) muTrackSel = 0;
   if (!sdReady) {
     Serial.println("SD: no card");
     return false;
   }
-  scanSdDir("/", 0);
-  // アルバムのフォルダ順・曲番号順に並ぶよう、大文字小文字を区別せずパスで並べる
-  std::sort(sdTracks.begin(), sdTracks.end(), [](const String &a, const String &b) {
-    return strcasecmp(a.c_str(), b.c_str()) < 0;
-  });
-  if (sdIndex >= (int)sdTracks.size()) sdIndex = -1;
-  Serial.printf("SD: %u tracks%s\n", (unsigned)sdTracks.size(),
+  Serial.printf("SD: %u tracks in %u folders%s\n", (unsigned)sdTracks.size(), (unsigned)sdAlbums.size(),
                 sdTracks.size() >= SD_MAX_TRACKS ? " (limit reached)" : "");
   return !sdTracks.empty();
+}
+
+// アルバムの数。先頭の全曲 (All tracks) と、曲の入っているフォルダの数。曲が無ければ 0
+static int albumCount() {
+  return sdTracks.empty() ? 0 : sdAlbums.size() + 1;
+}
+
+// アルバム a の曲は、sdTracks の albumFirst(a) から albumEnd(a) の手前まで
+static int albumFirst(int a) {
+  return (a >= 1 && a <= (int)sdAlbums.size()) ? sdAlbums[a - 1] : 0;
+}
+
+static int albumEnd(int a) {
+  return (a >= 1 && a < (int)sdAlbums.size()) ? sdAlbums[a] : sdTracks.size();
+}
+
+static int albumSize(int a) {
+  return albumEnd(a) - albumFirst(a);
+}
+
+// 曲の入っているフォルダの名前。カードの一番上なら "(root)"
+static String folderName(const String &path) {
+  int end = path.lastIndexOf('/');
+  int start = end > 0 ? path.lastIndexOf('/', end - 1) + 1 : 0;
+  String name = path.substring(start, end);
+  return name.length() ? name : String("(root)");
+}
+
+static String albumName(int a) {
+  return a == 0 ? String("All tracks") : folderName(sdTracks[albumFirst(a)]);
 }
 
 // 実際に進む先。シャッフル中は「次の曲」をランダムな曲にする。SW3 (next)・曲の終わり・BOOTSEL・再生の開始のどれでも
@@ -1767,19 +2054,24 @@ static Step stepToTake() {
   return (shuffle && nextStep == STEP_NEXT) ? STEP_RAND : nextStep;
 }
 
-// stepToTake() に従って次の曲を選ぶ
+// stepToTake() に従って、鳴らしているアルバム (muPlayAlbum) の中から次の曲を選ぶ。端まで行くと反対の端に回る。
+// 前に鳴らした曲がそのアルバムの外なら、次の曲は頭、前の曲は末尾から
 static int pickSdTrack() {
-  int n = sdTracks.size();
-  switch (stepToTake()) {
+  int first = albumFirst(muPlayAlbum), n = albumSize(muPlayAlbum);
+  int cur = sdIndex - first;  // アルバムの中で何番目か
+  bool in = cur >= 0 && cur < n;
+  Step step = stepToTake();
+  if (step == STEP_PICK && sdPick >= first && sdPick < first + n) return sdPick;
+  switch (step) {
     case STEP_PREV:
-      return sdIndex <= 0 ? n - 1 : sdIndex - 1;
+      return first + (in && cur > 0 ? cur - 1 : n - 1);
     case STEP_RAND: {
-      if (sdIndex < 0 || n == 1) return random(n);
+      if (!in || n == 1) return first + random(n);
       int r = random(n - 1);
-      return r >= sdIndex ? r + 1 : r;  // 今の曲以外から選ぶ
+      return first + (r >= cur ? r + 1 : r);  // 今の曲以外から選ぶ
     }
     default:
-      return (sdIndex + 1) % n;
+      return first + (in ? (cur + 1) % n : 0);
   }
 }
 
@@ -1891,6 +2183,7 @@ static PlayResult playSd(int index) {
   Serial.printf("playing %s (%d/%u) — %lu bytes\n", path.c_str(), index + 1,
                 (unsigned)sdTracks.size(), (unsigned long)f.size());
   printLine(0, title);
+  musicDraw();  // 曲選択の ▶ を今の曲へ移す
 
   PlayResult result = PLAY_DONE;
   uint32_t rateMul = 1;
@@ -2438,6 +2731,8 @@ static void spotifyPrepare() {
   if (sdStale) return;
   sdTracks.clear();
   sdTracks.shrink_to_fit();
+  sdAlbums.clear();
+  sdAlbums.shrink_to_fit();
   SD.end();
   sdStale = true;
 }
@@ -2849,9 +3144,10 @@ static void handleCommand(String cmd) {
   }
 
   if (cmd == "sd") {
-    // カードを挿し直したときのために、毎回読み直す
+    // カードを挿し直したときのために、毎回読み直す。全曲を流す
     autoPlay = false;
     if (setupSD()) {
+      muPlayAlbum = 0;
       startAutoPlay(STEP_NEXT);
     } else {
       status("sd", sdReady ? "no mp3" : "no card");
@@ -2867,10 +3163,13 @@ static void handleCommand(String cmd) {
     startAutoPlay(STEP_PREV);
   } else if (cmd == "rand") {
     startAutoPlay(STEP_RAND);
+  } else if (cmd == "pick") {
+    startAutoPlay(STEP_PICK);  // 曲選択の SW4
   } else if (cmd == "stop") {
     autoPlay = false;
     paused = false;
     status("espoke", "stopped");
+    musicDraw();
   } else if (cmd == "list") {
     printSdTracks();
   } else if (cmd == "now") {
@@ -3037,6 +3336,7 @@ void loop() {
     return;
   }
   sdIndex = pickSdTrack();
+  if (nextStep == STEP_PICK) nextStep = STEP_NEXT;  // 選んだ曲のあとは、そこから順に (失敗しても同じ曲に戻らない)
   PlayResult r = playSd(sdIndex);
 
   if (r == PLAY_STOP) {
@@ -3054,4 +3354,5 @@ void loop() {
     if (r == PLAY_DONE) nextStep = STEP_NEXT;
     // PLAY_SKIP のときは pollAbort() が nextStep を設定済み
   }
+  if (!autoPlay) musicDraw();  // 一覧と曲選択から、鳴らしている印を消す
 }
