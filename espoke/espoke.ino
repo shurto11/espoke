@@ -119,6 +119,7 @@ static const int     PIN_SD_MOSI = 19;  // GP19 (物理25番ピン) ③ CMD
 static const int     PIN_SD_CS   = 20;  // GP20 (物理26番ピン) ② DAT3/CS
 static const size_t  SD_MAX_TRACKS = 300;  // 曲のパスは RAM に持つので上限を設ける (1曲 70 バイト前後)
 static const int     SD_MAX_DEPTH  = 5;    // フォルダを潜る深さ
+static const int     SD_REOPEN_MAX = 3;    // 1曲の途中で読めなくなったとき、カードを初期化し直して続ける回数
 
 // Discord のメッセージ
 static const size_t        MSG_MAX         = 8;    // 覚えておく数。中継は起動直後に直近のこの数だけ送ってくる
@@ -168,6 +169,7 @@ struct Mp3Decoder {
   struct mad_synth  synth;
   uint8_t           in[MP3_IN_SIZE + MAD_BUFFER_GUARD];
   bool              eof;  // ファイルを読み終え、末尾に MAD_BUFFER_GUARD 分の 0 を足した
+  bool              readError;  // SD のファイルが末尾の手前で読めなくなった (カードが応答しない)
   File             *file; // 読む SD のファイル。nullptr なら Spotify の受信リングから読む
 };
 
@@ -1713,14 +1715,37 @@ static void scanSdDir(const String &dir, int depth) {
   d.close();
 }
 
-// カードを (挿し直されていても) 初期化し直し、MP3 の一覧を作り直す
-static bool setupSD() {
-  sdStale = false;
+// カードを初期化し直す。曲の一覧はそのまま
+static bool sdBegin() {
   SD.end();
   SPI.setRX(PIN_SD_MISO);
   SPI.setSCK(PIN_SD_SCK);
   SPI.setTX(PIN_SD_MOSI);
   sdReady = SD.begin(PIN_SD_CS);
+  return sdReady;
+}
+
+// カードが応答しなくなった (開けない・曲の途中で読めない) とき、初期化し直して path を開き直し、読めていたところへ進める。
+// 再生中に一度こうなると、カードは初期化し直すまで何も受け付けない (15 分ほど流すと起きた)。
+// 直ったかどうかをログに出す。直るなら一瞬のこと (電源の瞬断や接触)、直らないならカードが落ちたまま
+static bool sdReopen(File &f, const String &path, const char *why) {
+  uint32_t at = f ? f.position() : 0;
+  f.close();
+  unsigned long t0 = millis();
+  bool ok = sdBegin();
+  if (ok) {
+    f = SD.open(path, FILE_READ);
+    ok = f && f.seek(at);
+  }
+  Serial.printf("SD: %s at %luKB, uptime %lus -> reinit %s (%lu ms, heap %luKB)\n", why, (unsigned long)(at / 1024),
+                t0 / 1000, ok ? "ok" : "failed", millis() - t0, (unsigned long)(rp2040.getFreeHeap() / 1024));
+  return ok;
+}
+
+// カードを (挿し直されていても) 初期化し直し、MP3 の一覧を作り直す
+static bool setupSD() {
+  sdStale = false;
+  sdBegin();
   sdTracks.clear();
   if (!sdReady) {
     Serial.println("SD: no card");
@@ -1784,6 +1809,7 @@ static void mp3Start(Mp3Decoder *m, File *file) {
   mad_frame_init(&m->frame);
   mad_synth_init(&m->synth);
   m->eof = false;
+  m->readError = false;
   m->file = file;
 }
 
@@ -1796,7 +1822,8 @@ static void mp3End(Mp3Decoder *m) {
 
 // 未使用の入力を前に詰め、空いたところを SD のファイルか Spotify の受信リングから埋める。ファイルを読み終えたら
 // MAD_BUFFER_GUARD 分の 0 を足して最後のフレームまで出させる。もう足すものがなければ false。
-// リングが空なのは曲の終わりではない (届くのを待つ) ので、eof にせず stream.error を BUFLEN のままにして false を返す
+// リングが空なのは曲の終わりではない (届くのを待つ) ので、eof にせず stream.error を BUFLEN のままにして false を返す。
+// SD のファイルが末尾の手前で読めなくなったときも同じにして readError を立てる (playSd() が開き直して続きから読む)
 static bool mp3Refill(Mp3Decoder *m) {
   if (m->eof) return false;
   size_t keep = 0;
@@ -1805,9 +1832,10 @@ static bool mp3Refill(Mp3Decoder *m) {
     memmove(m->in, m->stream.next_frame, keep);
   }
   int n = m->file ? m->file->read(m->in + keep, MP3_IN_SIZE - keep) : (int)ringGet(m->in + keep, MP3_IN_SIZE - keep);
-  if (n <= 0 && !m->file) {
+  if (n <= 0 && (!m->file || m->file->position() < m->file->size())) {
     mad_stream_buffer(&m->stream, m->in, keep);
     m->stream.error = MAD_ERROR_BUFLEN;
+    m->readError = m->file != nullptr;
     return false;
   }
   if (n <= 0) {
@@ -1821,7 +1849,8 @@ static bool mp3Refill(Mp3Decoder *m) {
 }
 
 // 1フレーム分デコードして m->synth.pcm に出す。曲の終わりか、続けられないエラーなら false
-// (Spotify では、リングが空になったときも false。そのときは stream.error が MAD_ERROR_BUFLEN)
+// (Spotify では、リングが空になったときも false。そのときは stream.error が MAD_ERROR_BUFLEN。
+// SD が途中で読めなくなったときも false で、readError が立つ)
 static bool mp3Decode(Mp3Decoder *m) {
   while (true) {
     if (m->stream.buffer == nullptr || m->stream.error == MAD_ERROR_BUFLEN) {
@@ -1847,7 +1876,7 @@ static PlayResult playSd(int index) {
   String title = trackTitle(path);
 
   File f = SD.open(path, FILE_READ);
-  if (!f) {
+  if (!f && !sdReopen(f, path, "open failed")) {
     status("sd open error", title);
     return PLAY_ERROR;
   }
@@ -1870,6 +1899,7 @@ static PlayResult playSd(int index) {
   uint32_t underflows = 0;
   uint32_t maxGapUs = 0;            // loop が1周するのにかかった最長時間。長ければ何かに止められている
   uint32_t lastIter = micros();
+  int reopens = 0;
   unsigned long lastLcd = 0;
   unsigned long started = millis();
   // A2DP ストリームは接続直後から流れ続けているので、再生を始めるまでの無音区間でも
@@ -1904,6 +1934,14 @@ static PlayResult playSd(int index) {
 
     uint32_t t0 = micros();
     if (!mp3Decode(m)) {
+      // 曲の途中で読めなくなった。カードを初期化し直して続きから読む (デコーダには読めた分が残っている)
+      if (m->readError && reopens < SD_REOPEN_MAX) {
+        reopens++;
+        if (sdReopen(f, path, "read error")) {
+          m->readError = false;
+          continue;
+        }
+      }
       if (!m->eof) result = PLAY_ERROR;
       break;
     }
@@ -1947,10 +1985,10 @@ static PlayResult playSd(int index) {
   if (frames) {
     uint32_t avgUs = decodeUs / frames;
     Serial.printf("mp3: %lu frames, decode avg %lu us/frame (%lu%% of real time), "
-                  "longest loop %lu ms, underflow %lu times\n",
+                  "longest loop %lu ms, underflow %lu times, sd reopen %d times\n",
                   (unsigned long)frames, (unsigned long)avgUs,
                   (unsigned long)(avgUs * 100 / (1152UL * 1000000 / A2DP_RATE)),
-                  (unsigned long)(maxGapUs / 1000), (unsigned long)underflows);
+                  (unsigned long)(maxGapUs / 1000), (unsigned long)underflows, reopens);
   }
   finishPlayback(result, String(pos / 1024) + "KB", "SD の読み込みかデコードが追いついていない");
   return result;
