@@ -1,5 +1,5 @@
 /*
- * espoke — microSD の MP3 を Bluetooth イヤホンで鳴らし、Discord のメッセージをやりとりする
+ * espoke — microSD の MP3 を Bluetooth イヤホンで鳴らし、Discord のメッセージをやりとりする。LCD でゲームも遊べる
  *
  * 対応ボード: Raspberry Pi Pico WH
  * FQBN: rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble
@@ -11,7 +11,7 @@
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
  *      BOOTSEL を押しても再生を始める
  *   4. LCD1602A の画面はホームから選ぶ。ホームの1行目は月日と時刻 (NTP で合わせた日本時間)、2行目で
- *      SW2 / SW3 で Music / Spotify / Discord / System を選び、SW4 で開く (Spotify は Wi-Fi につながっているときだけ出る)。
+ *      SW2 / SW3 で Music / Spotify / Discord / Mario / System を選び、SW4 で開く (Spotify は Wi-Fi につながっているときだけ出る)。
  *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
  *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
@@ -39,6 +39,8 @@
  *                SW4 でその曲から再生する。SW4 長押しで、選んだ曲に関係なくシャッフルで再生する。SW1 で一覧へ
  *        一覧と曲選択の SW3 長押しで、再生中の画面へ
  *        再生中: SW1 長押し 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 / SW4 シャッフル / SW1 曲選択へ
+ *   8. ホームの Mario は、マリオのような横スクロールのゲーム。上の段が空中、下の段が地面で、右の旗まで進む。
+ *      曲を流したまま遊べる。SW2 ← / SW3 → / SW4 ジャンプ / SW1 一時停止 (一時停止中はホームへ)
  *
  * 音声フォーマット:
  *   MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
@@ -209,7 +211,9 @@ LiquidCrystal_I2C *lcd = nullptr;
 static uint8_t lcdAddr = LCD_ADDR_DEFAULT;  // 棒を描くときは LiquidCrystal_I2C を通さず直接送る
 static bool    lcdResyncOn = true;           // "lcd resync off" で、描き直すときの区切りの合わせ直しを止める (調べるとき用)
 static const uint8_t LCD_PLAY_MARK = 6;      // 曲選択の画面で再生中の印 (▶) に使う自作文字。ほかの画面では棒の 7 段
-static bool    lcdPlayMarkLoaded = false;    // 今 LCD_PLAY_MARK が ▶ になっているか
+// 自作文字の組。ふだんは棒と ⇄、曲選択の画面では棒の 7 段を ▶ に、ゲームではゲームの絵にする (lcdCharsWanted())
+enum LcdChars { CHARS_BARS, CHARS_PLAY, CHARS_GAME };
+static int     lcdCharsLoaded = CHARS_BARS;  // 今 LCD に載せている組
 
 // 帯域の棒。writePcm() で鳴らす音をモノラルにして溜め、BAR_HOP ごとに FFT して段の高さを記録しておく。
 // A2DP のバッファには 370ms 分ほど先の音まで入っているので、描くときは今イヤホンへ送り出している
@@ -291,10 +295,10 @@ static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
-// LCD の画面。ホームで Music / Spotify / Discord / System を選んで開き、Discord ではさらに Receive (受信) か Send (送信) を選ぶ。
-// SW1 (か GP15) で前の画面に戻る
-enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY };
-static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify"};  // シリアルに出す名前
+// LCD の画面。ホームで Music / Spotify / Discord / Mario / System を選んで開き、Discord ではさらに Receive (受信) か
+// Send (送信) を選ぶ。SW1 (か GP15) で前の画面に戻る。Mario はゲーム
+enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY, PAGE_GAME };
+static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify", "mario"};  // シリアルに出す名前
 static int    page = PAGE_MUSIC;           // 起動中は Music の画面に状態を出し、setup() の最後でホームにする
 static int    pageBeforeMsg = -1;          // 着信で Receive の画面に切り替える前の画面。戻るときはここへ
 static String mainLines[2];                // Music の画面の内容。他の画面を見ている間も更新しておく
@@ -309,7 +313,7 @@ struct MenuItem {
   int         page;
 };
 static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Spotify", PAGE_SPOTIFY}, {"Discord", PAGE_DISCORD},
-                                     {"System", PAGE_SYSTEM}};
+                                     {"Mario", PAGE_GAME}, {"System", PAGE_SYSTEM}};
 static const MenuItem DISCORD_MENU[] = {{"Receive", PAGE_MSG}, {"Send", PAGE_INPUT}};
 static const int HOME_COUNT = sizeof(HOME_MENU) / sizeof(HOME_MENU[0]);
 static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
@@ -354,6 +358,10 @@ static KeyState keys[KEY_COUNT] = {
   {PIN_DASH,  HIGH, HIGH, 0, false, false},
   {PIN_ENTER, HIGH, HIGH, 0, false, false},
 };
+// シリアルの "sw 3 500" で、スイッチを押したことにする (PC から操作して確かめるとき用)。swSimUntil[i] まで押している。
+// pollButton() は本物のスイッチと同じに扱う (チャタリングを除く 30ms と長押しの見分けも同じ)
+static bool   swSim[KEY_COUNT] = {};
+static unsigned long swSimUntil[KEY_COUNT] = {};
 // Music の再生中の見え方で SW1〜SW4 を押したときに出すコマンド (SW1 は長押し)。シリアルから打ったのと同じに扱う
 static const char *const PLAY_KEY_COMMANDS[KEY_COUNT] = {"pause", "prev", "next", "shuffle"};
 static String keyCommand = "";             // スイッチで出して、まだ処理していないコマンド
@@ -450,6 +458,81 @@ static char     wsKind = 0;                 // バイナリフレームの1バ�
 static String   wsText = "";                // 音以外のフレームの中身
 static bool     wifiFast = false;           // "wifi fast" で、Spotify の間 Wi-Fi を常時受信にする (既定は省電力)
 
+// ゲーム (ホームの Mario)。横スクロールのアクションで、LCD の 2 行を 上の段 (空中) と 下の段 (地面) にして、
+// 1 文字を 1 マスとして動かす。コースは 1 列 (1 マス幅) ごとに、地面か穴か・土管・上の段のもの を持つ
+static const unsigned long GAME_TICK_MS = 50;  // 1 コマ。動きはすべてコマで数える
+static const int GAME_MOVE_TICKS  = 3;     // SW2 / SW3 を押している間、これだけのコマごとに 1 マス進む (150ms)
+static const int GAME_JUMP_MIN    = 6;     // ジャンプで上の段にいる長さ (コマ)。SW4 をすぐ離したとき。2 マス進める
+static const int GAME_JUMP_MAX    = 14;    // SW4 を押し続けたとき。幅 3 の穴を越えるには 4 マス進む 12 コマが要る
+static const int GAME_STOMP_TICKS = 8;     // クリボーを踏んで跳ね返ったときの長さ (SW4 を押していれば GAME_JUMP_MAX まで)
+static const int GAME_JUMP_BUFFER = 3;     // 着地の少し前に押した SW4 も、着地したら跳ぶ
+static const int GAME_CAM_LEAD    = 5;     // マリオが画面の左からこのマスより右へ行くと画面を送る (先を見せる)
+static const int GAME_LEN_MAX     = 208;   // コースの長さの上限 (マス)
+static const int GAME_GOOMBA_MAX  = 24;
+static const int GAME_LIVES       = 3;
+static const int GAME_INTRO_TICKS = 40;    // コースの頭に WORLD 1-1 などを出す長さ (2 秒)
+static const int GAME_DIE_TICKS   = 44;    // やられてから次へ進むまで
+static const int GAME_CLEAR_TEXT  = 26;    // 旗に触れてから COURSE CLEAR を出すまで (その間に城の方へ歩く)
+static const int GAME_CLEAR_TICKS = 60;    // 旗に触れてから次のコースへ進むまで
+static const int GAME_MUSH_TICKS  = 5;     // きのこが 1 マス動くコマ数。マリオ (3) より遅いので、少し迷っても追いつける
+static const int GAME_MUSH_RISE   = 10;    // きのこがブロックからせり上がる長さ
+static const int GAME_HURT_TICKS  = 40;    // スーパーマリオがクリボーに当たって小さくなったあと、何にも当たらない長さ (2 秒)
+static const int GAME_GROW_TICKS  = 12;    // 大きくなる / 小さくなるときに、大小の絵を入れ替えて見せる長さ
+enum GameState { GS_TITLE, GS_INTRO, GS_PLAY, GS_DYING, GS_CLEAR, GS_PAUSE, GS_OVER };
+// gameTiles の 1 列の中身。GT_ITEM は ? ブロックの中身がきのこ (無ければコイン)
+enum { GT_PIT = 0x01, GT_PIPE = 0x02, GT_QBLOCK = 0x04, GT_USED = 0x08, GT_COIN = 0x10, GT_ITEM = 0x20 };
+struct Goomba {
+  int16_t x;
+  int8_t  dir;     // 歩く向き。-1 が左
+  uint8_t squash;  // 踏まれてから消えるまでの残りコマ。0 なら生きている
+  bool    awake;   // 画面に入って歩き始めた
+};
+static int      gameState = GS_TITLE;
+static int      gameResume = GS_PLAY;      // 一時停止を解いたら戻る状態
+static int      gameLevel = 0;             // 何番目のコースか。0 が 1-1 で、4 つで次のワールド
+static int      gameLives = GAME_LIVES;
+static int      gameCoins = 0;
+static uint32_t gameScore = 0;
+static uint32_t gameTop = 0;               // 一番いいスコア (電源を切ると忘れる)
+static bool     gameNewTop = false;        // GAME OVER のスコアが gameTop を超えた
+static uint8_t  gameTiles[GAME_LEN_MAX];
+static int      gameLen = 0;
+static int      gameFlag = 0;              // ゴールの旗の列
+static Goomba   gameGoombas[GAME_GOOMBA_MAX];
+static int      gameGoombaN = 0;
+static int      gameCam = 0;               // 画面の左端の列
+static int      gameTimer = 0;             // INTRO / DYING / CLEAR に入ってからのコマ
+static bool     gameFell = false;          // 穴に落ちてやられた
+static uint32_t gameTicks = 0;             // アニメーション用
+static unsigned long lastGameTick = 0;
+static uint32_t gameRand = 1;              // コースを作る乱数 (xorshift)。同じコースは何度やっても同じ形になる
+static int      gmX = 0, gmY = 1;          // マリオのいるマス。gmY は 0 が上の段、1 が下の段
+static bool     gmAir = false;             // ジャンプか、クリボーを踏んだ跳ね返りで上の段に浮いている
+static int      gmAirTicks = 0, gmAirMin = 0;
+static int      gmMoveWait = 0;            // 次に 1 マス進めるまでのコマ
+static int      gmMoveReq = 0;             // コマの間に押された SW2 (-1) / SW3 (1)。すぐ離しても 1 マスは進む
+static int      gmJumpReq = 0;             // 押された SW4 を効かせる残りコマ
+static int      gmIdle = 0;                // 最後に進んでからのコマ。立ち止まったら走る絵をやめる
+static bool     gmLeft = false;            // 左を向いている
+static bool     gmStep = false;            // 走る絵の足
+static int      gmCombo = 0;               // 着地せずに続けて踏んだクリボーの数
+static bool     gmBig = false;             // スーパーマリオ (きのこを取った)。クリボーに当たっても小さくなるだけで済む
+static int      gmHurt = 0;                // 小さくなったあと、何にも当たらない残りのコマ。その間は点滅する
+static int      gmGrow = 0;                // 大きくなる / 小さくなる途中。大小の絵を入れ替えて見せる残りのコマ
+static bool     gameMush = false;          // きのこが出ている (1 つだけ)
+static int      gameMushX = 0, gameMushY = 0, gameMushDir = 1;
+static int      gameMushRise = 0;          // ブロックからせり上がっている残りのコマ。その間は動かず、取れない
+// ゲームの画面。自作文字は 8 つしか無いので、そのコマに出ている絵だけを載せる (gameFlush())
+static uint8_t  gameSlots[8][8];           // 自作文字 0〜7 に載せている絵
+static uint8_t  gameShown[LCD_ROWS][LCD_COLS];  // LCD に書いてある文字コード
+static bool     gameShownValid = false;    // false なら次は全部書く
+static const int GAME_GLYPHS = 16;         // 1 コマに置ける絵の種類 (自作文字に載るのは 8 つまで)
+static uint16_t gfCell[LCD_ROWS][LCD_COLS]; // 組み立て中のコマ。LCD の文字コードか、0x100 | gfBits の番号。0xFFFF は空き
+static uint8_t  gfBits[GAME_GLYPHS][8];
+static char     gfAlt[GAME_GLYPHS];        // 自作文字に載せきれなかったとき、代わりに出す文字
+static int      gfN = 0;
+static uint32_t gameFlushMaxUs = 0;        // gameFlush() にかかった最長の時間。"game" で出して戻す
+
 // ---------------- LCD ----------------
 
 static void drawRow(uint8_t row, const String &text) {
@@ -531,29 +614,32 @@ static void setupLCD() {
 
 // 自作文字を LCD に作る。棒の 1〜7 段を自作文字 0〜6 (下から h 行を塗る)、シャッフルの印 (⇄) を 7 にする。
 // 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない曲選択の画面 (Music と Spotify) では、
-// 6 を再生中の印 (▶) にする (lcdPlayMark())。lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず
-// 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
+// 6 を再生中の印 (▶) にする。ゲームの画面では、8 つともゲームの絵 (gameSlots) にする (lcdCharsWanted())。
+// lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
 static void createLcdChars() {
   static const uint8_t SHUFFLE_MARK[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
   static const uint8_t PLAY_MARK[8] = {0x10, 0x18, 0x1C, 0x1E, 0x1C, 0x18, 0x10, 0x00};
   if (!lcd) return;
-  lcdPlayMarkLoaded = lcdPlayMark();
+  lcdCharsLoaded = lcdCharsWanted();
   for (uint8_t c = 0; c < 8; c++) {
     Wire.beginTransmission(lcdAddr);
     lcdSendRaw(0x40 | (c << 3), false);  // CGRAM の c 文字目へ
     for (uint8_t r = 0; r < 8; r++) {
       uint8_t bits = (r >= 7 - c) ? 0x1F : 0x00;
       if (c == 7) bits = SHUFFLE_MARK[r];
-      if (c == LCD_PLAY_MARK && lcdPlayMarkLoaded) bits = PLAY_MARK[r];
+      if (c == LCD_PLAY_MARK && lcdCharsLoaded == CHARS_PLAY) bits = PLAY_MARK[r];
+      if (lcdCharsLoaded == CHARS_GAME) bits = gameSlots[c][r];
       lcdSendRaw(bits, true);
     }
     Wire.endTransmission();
   }
 }
 
-// 自作文字 LCD_PLAY_MARK を、棒の 7 段ではなく再生中の印 (▶) にしておく画面か
-static bool lcdPlayMark() {
-  return (page == PAGE_SPOTIFY && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
+// 今の画面に要る自作文字の組
+static int lcdCharsWanted() {
+  if (page == PAGE_GAME) return CHARS_GAME;
+  if ((page == PAGE_SPOTIFY && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS)) return CHARS_PLAY;
+  return CHARS_BARS;
 }
 
 // ---------------- 帯域の棒 ----------------
@@ -1100,8 +1186,12 @@ static String pageSummary(int p) {
 static void drawPage() {
   lastPageDraw = millis();
   lcdResync();
-  if (lcdPlayMark() != lcdPlayMarkLoaded) createLcdChars();  // "lcd resync off" で作り直していないとき
+  if (lcdCharsWanted() != lcdCharsLoaded) createLcdChars();  // "lcd resync off" で作り直していないとき
   switch (page) {
+    case PAGE_GAME:
+      gameShownValid = false;  // 全部書き直す
+      gameRender();
+      break;
     case PAGE_HOME:
       if (!homeItemShown(homeSel)) homeSel = 0;  // Wi-Fi が切れて Spotify が消えた
       drawRow(0, clockLine());
@@ -1232,7 +1322,7 @@ static void sendDone(const String &result) {
   if (page == PAGE_INPUT) drawPage();
 }
 
-// 画面を開く。Receive の画面は最新のメッセージを頭から出す
+// 画面を開く。Receive の画面は最新のメッセージを頭から出す。ゲームは離れていた間の分を進めない
 static void openPage(int p) {
   page = p;
   pageBeforeMsg = -1;
@@ -1240,6 +1330,7 @@ static void openPage(int p) {
     msgView = 0;
     resetMsgScroll();
   }
+  if (p == PAGE_GAME) lastGameTick = millis();
   Serial.printf("page %s\n", PAGE_NAMES[p]);
   drawPage();
 }
@@ -1250,6 +1341,7 @@ static void goBack() {
   else if (page == PAGE_MUSIC) onMusicKey(KEY_BACK);
   else if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
   else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
+  else if (page == PAGE_GAME) gameBack();
   else if (page != PAGE_HOME) openPage(PAGE_HOME);
 }
 
@@ -1269,6 +1361,10 @@ static void onKey(int id) {
   }
   if (page == PAGE_MUSIC) {
     onMusicKey(id);
+    return;
+  }
+  if (page == PAGE_GAME) {
+    onGameKey(id);
     return;
   }
   // SW1 はどの画面でも前の画面に戻る (Send だけは backspace で、戻るのは長押し)
@@ -1550,11 +1646,30 @@ static void onMorseKey(int id) {
   drawPage();
 }
 
+// "sw" で押したことにしているか。時間が来たら離す
+static bool swSimHeld(int i) {
+  if (swSim[i] && (long)(millis() - swSimUntil[i]) >= 0) swSim[i] = false;
+  return swSim[i];
+}
+
+// "sw 3" で SW3 を 100ms、"sw 3 600" で 600ms 押したことにする。"sw 3 0" で離す。押している間に送り直すと、その時から数え直す
+static void swCommand(const String &cmd) {
+  const int n = cmd.substring(3).toInt();
+  const int sp = cmd.indexOf(' ', 3);
+  const long ms = sp > 0 ? cmd.substring(sp + 1).toInt() : 100;
+  if (n < 1 || n > KEY_COUNT) {
+    Serial.println("sw <1-4> [ms]");
+    return;
+  }
+  swSim[n - 1] = ms > 0;
+  swSimUntil[n - 1] = millis() + ms;
+}
+
 // スイッチを見て、押されたらそれぞれの役目をする。再生中も呼ばれるので待たずに返す
 static void pollButton() {
   for (int i = 0; i < KEY_COUNT; i++) {
     KeyState &k = keys[i];
-    bool raw = digitalRead(k.pin);
+    bool raw = digitalRead(k.pin) && !swSimHeld(i);
     if (raw != k.raw) {
       k.raw = raw;
       k.changedAt = millis();
@@ -1589,9 +1704,754 @@ static void pollButton() {
   if (page == PAGE_SPOTIFY && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
   if (page == PAGE_SPOTIFY && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
   if (page == PAGE_MUSIC && millis() - lastMuScroll >= MSG_SCROLL_MS) scrollMusic();
-  // Music と Spotify (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文は、描き直す間隔を空ける
-  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && page != PAGE_SPOTIFY && !(page == PAGE_MSG && msgCount);
+  // ゲームは開いている間だけ進める。着信などで画面が変わったら一時停止にしておく
+  if (page == PAGE_GAME) gameUpdate();
+  else if (gameBusy()) gamePause();
+  // Music と Spotify (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文、ゲーム (コマごとに
+  // 書いている) は、描き直す間隔を空ける
+  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && page != PAGE_SPOTIFY && page != PAGE_GAME &&
+              !(page == PAGE_MSG && msgCount);
   if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
+}
+
+// ---------------- ゲーム ----------------
+//
+// ホームの Mario。右の旗まで進む横スクロールのアクション。LCD の 1 文字が 1 マスで、上の段は空中、下の段は地面。
+// 穴に落ちるか、クリボーに横からぶつかるとやられる。クリボーは上から踏むと倒せる。下の段から ? ブロックの下で
+// 跳ぶとコインが出る。100 枚で 1UP。きのこ入りの ? ブロックもあり、きのこを取るとスーパーマリオ (背が高くなる) になって、
+// クリボーに当たっても小さくなるだけで済む。pollButton() から GAME_TICK_MS ごとに 1 コマ進めるので、曲を流しながら遊べる
+//   SW2 ← / SW3 → (押している間進む) / SW4 ジャンプ (押している間は長く浮く) / SW1 一時停止 (一時停止中はホームへ)
+
+// 絵 (5x8 ドット)。上の行から順に、下位 5 bit が左から右。マリオとクリボーは一番下の行を空けておき、下の段では
+// 地面の線を足す (gameSprite())
+static const uint8_t G_STAND[8] = {0b01110, 0b01111, 0b01101, 0b11110, 0b01110, 0b01010, 0b11011, 0b00000};
+static const uint8_t G_RUN_A[8] = {0b01110, 0b01111, 0b01101, 0b11110, 0b01110, 0b11011, 0b10001, 0b00000};
+static const uint8_t G_RUN_B[8] = {0b01110, 0b01111, 0b01101, 0b01110, 0b01111, 0b01100, 0b01110, 0b00000};
+static const uint8_t G_JUMP[8] = {0b01110, 0b01111, 0b01101, 0b11110, 0b01111, 0b11000, 0b00011, 0b00000};
+// ちびマリオ。スーパーマリオ (上の 4 つ) より 2 行低い
+static const uint8_t G_S_STAND[8] = {0b00000, 0b00000, 0b01110, 0b01111, 0b11110, 0b01110, 0b01010, 0b00000};
+static const uint8_t G_S_RUN_A[8] = {0b00000, 0b00000, 0b01110, 0b01111, 0b11110, 0b01110, 0b11011, 0b00000};
+static const uint8_t G_S_RUN_B[8] = {0b00000, 0b00000, 0b01110, 0b01111, 0b01110, 0b01110, 0b01100, 0b00000};
+static const uint8_t G_S_JUMP[8] = {0b00000, 0b00000, 0b01110, 0b01111, 0b11110, 0b01111, 0b11000, 0b00000};
+static const uint8_t G_DEAD[8] = {0b00000, 0b00000, 0b10101, 0b11111, 0b01110, 0b01110, 0b01010, 0b00000};
+static const uint8_t G_MUSH[8] = {0b00000, 0b01110, 0b11011, 0b11111, 0b01010, 0b01110, 0b01110, 0b00000};
+static const uint8_t G_GOOMBA_A[8] = {0b00000, 0b01110, 0b11111, 0b10101, 0b11111, 0b01110, 0b11010, 0b00000};
+static const uint8_t G_GOOMBA_B[8] = {0b00000, 0b01110, 0b11111, 0b10101, 0b11111, 0b01110, 0b01011, 0b00000};
+static const uint8_t G_SQUASH[8] = {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01110, 0b11111, 0b00000};
+static const uint8_t G_PIPE[8] = {0b11111, 0b11111, 0b01110, 0b01110, 0b01110, 0b01110, 0b01110, 0b11111};
+static const uint8_t G_GROUND[8] = {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111};
+static const uint8_t G_QBLOCK[8] = {0b11111, 0b11101, 0b10011, 0b10101, 0b10001, 0b10101, 0b11111, 0b00000};
+static const uint8_t G_COIN_A[8] = {0b00000, 0b01110, 0b11011, 0b11011, 0b11011, 0b01110, 0b00000, 0b00000};
+static const uint8_t G_COIN_B[8] = {0b00000, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00000};
+static const uint8_t G_FLAG_TOP[8] = {0b00010, 0b11110, 0b01110, 0b00110, 0b00010, 0b00010, 0b00010, 0b00010};
+static const uint8_t G_FLAG_BASE[8] = {0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b00111, 0b00111, 0b11111};
+
+static int gameRnd(int n) {
+  gameRand ^= gameRand << 13;
+  gameRand ^= gameRand >> 17;
+  gameRand ^= gameRand << 5;
+  return gameRand % n;
+}
+
+// クリボーが 1 マス歩くコマ数。先のコースほど速い
+static int gameGoombaTicks() {
+  return std::max(5, 9 - gameLevel / 2);
+}
+
+static void gameAddGoomba(int x) {
+  if (gameGoombaN < GAME_GOOMBA_MAX) gameGoombas[gameGoombaN++] = {(int16_t)x, -1, 0, false};
+}
+
+static void gameRemoveGoomba(int i) {
+  gameGoombas[i] = gameGoombas[--gameGoombaN];
+}
+
+// gameLevel 番目のコースを作る。先へ行くほど長く、穴が広く、仕掛けの間が詰まり、クリボーが増える。
+// 仕掛け (穴・土管・クリボー・ブロックとコイン) は、平らな地面を 2 マス以上はさんで 1 つずつ置く。
+// 土管の上の段にブロックがあると通れず、穴の手前の上にブロックがあると跳べないので、隣り合わせない。
+// 最初の仕掛けは ? ブロックにする (下から跳んでたたくのを、まず試せるように)
+static void gameGenerate() {
+  const int d = gameLevel;
+  gameRand = 0x9E3779B9u ^ ((uint32_t)(d + 1) * 2654435761u);
+  if (!gameRand) gameRand = 1;
+  gameLen = std::min(GAME_LEN_MAX, 96 + 16 * std::min(d, 7));
+  gameFlag = gameLen - 6;
+  memset(gameTiles, 0, sizeof(gameTiles));
+  gameGoombaN = 0;
+  const int maxPit = std::min(3, 2 + d / 4);  // 穴の幅の上限。ワールド 2 から 3
+  const int gap = std::max(2, 4 - d / 2);     // 仕掛けの間の平らな地面
+  int x = 10;                                 // 頭の 10 マスは平ら
+  while (x < gameFlag - 10) {
+    const bool first = x == 10;
+    const int kind = first ? 9 : gameRnd(10);
+    if (kind < 3) {
+      // 穴。上にコインを並べることも
+      const int w = 1 + gameRnd(maxPit);
+      const uint8_t coin = gameRnd(3) == 0 ? GT_COIN : 0;
+      for (int i = 0; i < w; i++) gameTiles[x++] |= GT_PIT | coin;
+    } else if (kind < 5) {
+      // 土管。2 本並べることも、すぐ後ろが穴のこと (土管の上から跳ぶ) も
+      gameTiles[x++] |= GT_PIPE;
+      if (gameRnd(3) == 0) gameTiles[x++] |= GT_PIPE;
+      if (d > 0 && gameRnd(3) == 0) {
+        for (int w = 1 + gameRnd(maxPit); w > 0; w--) gameTiles[x++] |= GT_PIT;
+      }
+    } else if (kind < 8) {
+      // クリボー。先のコースほど 2 匹で来る
+      const int n = gameRnd(4) < 1 + d / 3 ? 2 : 1;
+      for (int i = 0; i < n; i++, x += 2) gameAddGoomba(x);
+    } else {
+      // 上の段に ? ブロックとコインを交互に (コインだけのことも)。頭の ? ブロックは、5 回に 1 回 (最初の仕掛けでは
+      // 必ず) きのこ入り
+      const int w = 1 + gameRnd(4);
+      const bool blocks = first || gameRnd(3) != 0;
+      const uint8_t item = (first || gameRnd(5) == 0) ? GT_ITEM : 0;
+      for (int i = 0; i < w; i++) {
+        gameTiles[x++] |= (blocks && i % 2 == 0) ? GT_QBLOCK | (i == 0 ? item : 0) : GT_COIN;
+      }
+    }
+    x += gap + gameRnd(3);
+  }
+}
+
+// コースの頭から始める (やられたときも、コースは作り直して頭から)
+static void gameStartLevel() {
+  gameGenerate();
+  gmX = 1;
+  gmY = 1;
+  gmAir = false;
+  gmAirTicks = gmMoveWait = gmMoveReq = gmJumpReq = gmCombo = 0;
+  gmIdle = GAME_MOVE_TICKS + 1;
+  gmLeft = false;
+  gmHurt = gmGrow = 0;  // スーパーマリオかどうかは次のコースへ持ち越す (やられたときは gameDie() で戻す)
+  gameMush = false;
+  gameCam = 0;
+  gameTimer = 0;
+  gameState = GS_INTRO;
+}
+
+static void gameNew() {
+  gameLevel = 0;
+  gameLives = GAME_LIVES;
+  gameCoins = 0;
+  gameScore = 0;
+  gmBig = false;
+  gameStartLevel();
+}
+
+// 進めている途中 (一時停止すると戻ってこられる状態) か
+static bool gameBusy() {
+  return gameState == GS_INTRO || gameState == GS_PLAY || gameState == GS_DYING || gameState == GS_CLEAR;
+}
+
+static void gamePause() {
+  gameResume = gameState;
+  gameState = GS_PAUSE;
+  gmMoveReq = gmJumpReq = 0;
+}
+
+// SW1 (か GP15)。遊んでいる途中なら一時停止、それ以外 (一時停止中・タイトル・GAME OVER) ならホームへ
+static void gameBack() {
+  if (gameBusy()) {
+    gamePause();
+    gameRender();
+  } else {
+    openPage(PAGE_HOME);
+  }
+}
+
+static bool gameKeyHeld(int id) {
+  return keys[id].stable == LOW;
+}
+
+// (x, y) のマスに入れないか。コースの外も入れない
+static bool gameSolid(int x, int y) {
+  if (x < 0 || x >= gameLen) return true;
+  return gameTiles[x] & (y == 0 ? (GT_QBLOCK | GT_USED) : GT_PIPE);
+}
+
+// x 列にいる、生きているクリボーの番号。いなければ -1
+static int gameGoombaAt(int x) {
+  for (int i = 0; i < gameGoombaN; i++) {
+    if (gameGoombas[i].x == x && !gameGoombas[i].squash) return i;
+  }
+  return -1;
+}
+
+static void gameAddCoin() {
+  gameScore += 200;
+  if (++gameCoins >= 100) {  // 100 枚で 1UP
+    gameCoins = 0;
+    gameLives = std::min(gameLives + 1, 9);
+  }
+}
+
+static void gameDie(bool fell) {
+  Serial.printf("mario: %s at %d (world %d-%d)\n", fell ? "fell" : "hit", gmX, gameLevel / 4 + 1, gameLevel % 4 + 1);
+  gameState = GS_DYING;
+  gameTimer = 0;
+  gameFell = fell;
+  gmBig = false;
+}
+
+// クリボーにぶつかった。スーパーマリオなら小さくなるだけで、そのあと GAME_HURT_TICKS の間は何にも当たらない
+static void gameHit() {
+  if (gmHurt) return;
+  if (!gmBig) {
+    gameDie(false);
+    return;
+  }
+  gmBig = false;
+  gmHurt = GAME_HURT_TICKS;
+  gmGrow = GAME_GROW_TICKS;
+}
+
+// ブロックからきのこを出す。せり上がってから右へ動く
+static void gameMushSpawn(int x) {
+  gameMush = true;
+  gameMushX = x;
+  gameMushY = 0;
+  gameMushDir = 1;
+  gameMushRise = GAME_MUSH_RISE;
+}
+
+// きのこを取った。スーパーマリオになる (もうなっていれば点だけ)
+static void gameMushEat() {
+  gameMush = false;
+  gameScore += 1000;
+  if (!gmBig) {
+    gmBig = true;
+    gmGrow = GAME_GROW_TICKS;
+  }
+}
+
+// きのこを動かす。上の段では、土管の上でなければ下の段へ落ちる (出てきたブロックの中にいる間は、横へ出るまで落ちない)。
+// 土管かブロックに当たると向きを変え、穴に落ちるか画面の左へ出ると消える。マリオのマスに入ったら取られる
+static void gameMushTick() {
+  if (!gameMush) return;
+  if (gameMushRise > 0) {
+    gameMushRise--;
+    return;
+  }
+  if (gameTicks % GAME_MUSH_TICKS) return;
+  if (gameMushY == 0 && !gameSolid(gameMushX, 0) && !gameSolid(gameMushX, 1)) {
+    gameMushY = 1;
+  } else {
+    int nx = gameMushX + gameMushDir;
+    if (gameSolid(nx, gameMushY)) {
+      gameMushDir = -gameMushDir;
+      nx = gameMushX + gameMushDir;
+    }
+    if (!gameSolid(nx, gameMushY)) gameMushX = nx;
+    else if (gameMushY == 0) gameMushY = 1;  // 両隣もふさがったブロックの中。下へ出す
+  }
+  if (gameMushX < gameCam || (gameMushY == 1 && (gameTiles[gameMushX] & GT_PIT))) {
+    gameMush = false;
+    return;
+  }
+  if (gameMushX == gmX && gameMushY == gmY) gameMushEat();
+}
+
+static void gameAfterDeath() {
+  if (--gameLives > 0) {
+    gameStartLevel();
+    return;
+  }
+  gameNewTop = gameScore > gameTop;
+  if (gameNewTop) gameTop = gameScore;
+  Serial.printf("mario: game over, score %lu\n", (unsigned long)gameScore);
+  gameState = GS_OVER;
+}
+
+// 旗に触れた。上の段で触れると (高い所をつかむと) 点が多い
+static void gameClear() {
+  gameScore += gmY == 0 ? 1000 : 200;
+  gmAir = false;
+  gameState = GS_CLEAR;
+  gameTimer = 0;
+}
+
+// マリオが入ったマスのものに触れる
+static void gameTouch() {
+  if (gmY == 0 && (gameTiles[gmX] & GT_COIN)) {
+    gameTiles[gmX] &= ~GT_COIN;
+    gameAddCoin();
+  }
+  if (gameMush && !gameMushRise && gameMushX == gmX && gameMushY == gmY) gameMushEat();
+  if (gmX == gameFlag) gameClear();
+  else if (gmY == 1 && (gameTiles[gmX] & GT_PIT)) gameDie(true);
+  else if (gmY == 1 && gameGoombaAt(gmX) >= 0) gameHit();
+}
+
+// マリオの位置に合わせて画面を送る。左へは戻さない
+static void gameFollow() {
+  if (gmX - gameCam > GAME_CAM_LEAD) gameCam = std::min(gmX - GAME_CAM_LEAD, gameLen - (int)LCD_COLS);
+}
+
+static void gmMove(int dir) {
+  gmLeft = dir < 0;
+  const int nx = gmX + dir;
+  if (nx < gameCam || gameSolid(nx, gmY)) return;
+  gmX = nx;
+  gmStep = !gmStep;
+  gmIdle = 0;
+  gameTouch();
+  gameFollow();
+}
+
+// 下の段から跳ぶ。真上がブロックなら跳べずに頭でたたき、? ブロックならコインかきのこが出る
+static void gmJump() {
+  if (gmY == 1 && gameSolid(gmX, 0)) {
+    const uint8_t t = gameTiles[gmX];
+    if (t & GT_QBLOCK) {
+      gameTiles[gmX] = (t & ~(GT_QBLOCK | GT_ITEM)) | GT_USED;
+      if (t & GT_ITEM) gameMushSpawn(gmX);
+      else gameAddCoin();
+    }
+    return;
+  }
+  // 土管の上 (上の段に立っている) からも跳べる。上の段のまま浮く
+  gmY = 0;
+  gmAir = true;
+  gmAirTicks = 0;
+  gmAirMin = GAME_JUMP_MIN;
+  gameTouch();
+}
+
+// 上の段から下の段へ落ちる。真下にクリボーがいれば踏んで跳ね返る。続けて踏むと 100, 200, 400, 800, 1600 点
+static void gmFall() {
+  const int g = gameGoombaAt(gmX);
+  if (g >= 0) {
+    gameGoombas[g].squash = 8;  // つぶれた絵を 400ms 出して消す
+    gameScore += 100u << std::min(gmCombo, 4);
+    gmCombo++;
+    gmAir = true;
+    gmAirTicks = 0;
+    gmAirMin = GAME_STOMP_TICKS;
+    return;
+  }
+  gmY = 1;
+  gmCombo = 0;
+  gameTouch();
+}
+
+// 画面に入ったクリボーを歩かせる。土管か別のクリボーに当たると向きを変え、穴に落ちると消える
+static void gameGoombasTick() {
+  const bool step = gameTicks % gameGoombaTicks() == 0;
+  for (int i = 0; i < gameGoombaN;) {
+    Goomba &g = gameGoombas[i];
+    if (g.squash) {
+      if (--g.squash == 0) {
+        gameRemoveGoomba(i);
+        continue;
+      }
+    } else if (g.x < gameCam) {  // 画面の左へ出た。もう戻ってこない
+      gameRemoveGoomba(i);
+      continue;
+    } else {
+      if (g.x < gameCam + LCD_COLS) g.awake = true;
+      if (step && g.awake) {
+        const int nx = g.x + g.dir;
+        if (gameSolid(nx, 1) || gameGoombaAt(nx) >= 0) {
+          g.dir = -g.dir;
+        } else {
+          g.x = nx;
+          if (gameTiles[nx] & GT_PIT) {
+            gameRemoveGoomba(i);
+            continue;
+          }
+          if (gmY == 1 && gmX == nx) {
+            gameHit();
+            if (gameState != GS_PLAY) return;
+          }
+        }
+      }
+    }
+    i++;
+  }
+}
+
+static void gamePlayTick() {
+  if (gmIdle <= GAME_MOVE_TICKS) gmIdle++;
+  if (gmHurt) gmHurt--;
+  if (gmGrow) gmGrow--;
+
+  // SW4。立っている (浮いていない) ときだけ跳べる
+  if (gmJumpReq > 0) {
+    gmJumpReq--;
+    if (!gmAir) {
+      gmJumpReq = 0;
+      gmJump();
+      if (gameState != GS_PLAY) return;
+    }
+  }
+
+  // SW2 / SW3。押している間 GAME_MOVE_TICKS ごとに進む。押した直後のコマですぐ 1 マス進む
+  int dir = (gameKeyHeld(KEY_DASH) ? 1 : 0) - (gameKeyHeld(KEY_DOT) ? 1 : 0);
+  if (gmMoveReq) {
+    dir = gmMoveReq;
+    gmMoveReq = 0;
+    gmMoveWait = 0;
+  }
+  if (dir == 0) {
+    gmMoveWait = 0;
+  } else if (--gmMoveWait <= 0) {
+    gmMoveWait = GAME_MOVE_TICKS;
+    gmMove(dir);
+    if (gameState != GS_PLAY) return;
+  }
+
+  // 上の段にいれば、浮いている間が終わったら落ちる。SW4 を離すと早めに落ちる。土管の上なら立っていられる
+  if (gmY == 0) {
+    if (gmAir) {
+      gmAirTicks++;
+      if ((gmAirTicks >= gmAirMin && !gameKeyHeld(KEY_ENTER)) || gmAirTicks >= GAME_JUMP_MAX) gmAir = false;
+    }
+    if (!gmAir && !gameSolid(gmX, 1)) {
+      gmFall();
+      if (gameState != GS_PLAY) return;
+    }
+  }
+
+  gameGoombasTick();
+  if (gameState == GS_PLAY) gameMushTick();
+}
+
+// 旗に触れたあと。ポールを降り、城の方へ数マス歩いてから COURSE CLEAR を出し、次のコースへ
+static void gameClearTick() {
+  gameTimer++;
+  if (gmIdle <= GAME_MOVE_TICKS) gmIdle++;
+  if (gmHurt) gmHurt--;
+  if (gmGrow) gmGrow--;
+  if (gameTimer == 8) gmY = 1;
+  if (gameTimer > 8 && gameTimer < GAME_CLEAR_TEXT && gameTimer % 4 == 0 && gmX + 1 < gameLen) {
+    gmX++;
+    gmLeft = false;
+    gmStep = !gmStep;
+    gmIdle = 0;
+    gameFollow();
+  }
+  if (gameTimer >= GAME_CLEAR_TICKS) {
+    gameLevel++;
+    gameStartLevel();
+  }
+}
+
+static void gameTick() {
+  gameTicks++;
+  switch (gameState) {
+    case GS_INTRO:
+      if (++gameTimer >= GAME_INTRO_TICKS) gameState = GS_PLAY;
+      break;
+    case GS_PLAY:
+      gamePlayTick();
+      break;
+    case GS_DYING:
+      if (++gameTimer >= GAME_DIE_TICKS) gameAfterDeath();
+      break;
+    case GS_CLEAR:
+      gameClearTick();
+      break;
+  }
+}
+
+// pollButton() から呼ぶ。GAME_TICK_MS ごとにコマを進めて描く。止められていた分 (中継につなぐ間など) は
+// 4 コマまで取り戻し、それより前の分は捨てる
+static void gameUpdate() {
+  if (millis() - lastGameTick < GAME_TICK_MS) return;
+  for (int n = 0; n < 4 && millis() - lastGameTick >= GAME_TICK_MS; n++) {
+    lastGameTick += GAME_TICK_MS;
+    gameTick();
+  }
+  if (millis() - lastGameTick >= GAME_TICK_MS) lastGameTick = millis();
+  gameRender();
+}
+
+// ゲームの画面のスイッチ。SW2 / SW3 / SW4 は押したことだけ覚えておき、次のコマで動かす
+static void onGameKey(int id) {
+  if (id == KEY_BACK) {
+    gameBack();
+    return;
+  }
+  switch (gameState) {
+    case GS_PLAY:
+      if (id == KEY_ENTER) gmJumpReq = GAME_JUMP_BUFFER;
+      if (id == KEY_DOT) gmMoveReq = -1;
+      if (id == KEY_DASH) gmMoveReq = 1;
+      return;
+    case GS_TITLE:
+    case GS_OVER:
+      if (id == KEY_ENTER) gameNew();
+      break;
+    case GS_PAUSE:
+      if (id == KEY_ENTER) gameState = gameResume;
+      break;
+  }
+  gameRender();
+}
+
+// ---- ゲームの画面 ----
+
+// 5 bit の左右を入れ替える
+static uint8_t gameMirror(uint8_t b) {
+  uint8_t m = 0;
+  for (int i = 0; i < 5; i++) {
+    if (b & (1 << i)) m |= 0x10 >> i;
+  }
+  return m;
+}
+
+// 絵 spr を shift 行下げ (地面に沈む)、left なら左右を入れ替え、ground なら一番下に地面の線を足して out に作る
+static void gameSprite(const uint8_t *spr, bool left, int shift, bool ground, uint8_t *out) {
+  for (int r = 0; r < 8; r++) {
+    const uint8_t b = r >= shift ? spr[r - shift] : 0;
+    out[r] = left ? gameMirror(b) : b;
+  }
+  if (ground) out[7] |= 0x1F;
+}
+
+static void gfClear() {
+  gfN = 0;
+  for (auto &row : gfCell) {
+    for (uint16_t &c : row) c = 0xFFFF;
+  }
+}
+
+// 組み立て中のコマの (row, col) に LCD の文字 ch を置く。もう置いてあれば置かない (先に置いたものが手前)
+static void gfChar(int row, int col, uint8_t ch) {
+  if (col >= 0 && col < LCD_COLS && gfCell[row][col] == 0xFFFF) gfCell[row][col] = ch;
+}
+
+static void gfText(int row, int col, const char *s) {
+  for (; *s; s++, col++) gfChar(row, col, (uint8_t)*s);
+}
+
+// 自作文字の絵 bits を置く。同じ絵は 1 つの自作文字を使い回す。alt は自作文字に載せきれなかったときの代わりの文字
+static void gfGlyph(int row, int col, const uint8_t *bits, char alt) {
+  if (col < 0 || col >= LCD_COLS || gfCell[row][col] != 0xFFFF) return;
+  int i = 0;
+  while (i < gfN && memcmp(gfBits[i], bits, 8) != 0) i++;
+  if (i == gfN) {
+    if (gfN == GAME_GLYPHS) {
+      gfCell[row][col] = (uint8_t)alt;
+      return;
+    }
+    memcpy(gfBits[gfN], bits, 8);
+    gfAlt[gfN++] = alt;
+  }
+  gfCell[row][col] = 0x100 | i;
+}
+
+// 組み立てたコマを LCD に出す。要る絵を自作文字に載せ (もう載っていればそのまま、無ければこのコマで使わない所に)、
+// 前のコマから変わった所だけを書く。drawBars() と同じく、1 行の変わった所を 1 回の通信にまとめる
+static void gameFlush() {
+  if (!lcd) return;
+  const uint32_t t0 = micros();
+  int slotOf[GAME_GLYPHS];
+  bool used[8] = {};
+  for (int i = 0; i < gfN; i++) {
+    slotOf[i] = -1;
+    for (int s = 0; s < 8 && slotOf[i] < 0; s++) {
+      if (!used[s] && memcmp(gameSlots[s], gfBits[i], 8) == 0) {
+        slotOf[i] = s;
+        used[s] = true;
+      }
+    }
+  }
+  for (int i = 0; i < gfN; i++) {
+    for (int s = 0; s < 8 && slotOf[i] < 0; s++) {
+      if (used[s]) continue;
+      slotOf[i] = s;
+      used[s] = true;
+      memcpy(gameSlots[s], gfBits[i], 8);
+      Wire.beginTransmission(lcdAddr);
+      lcdSendRaw(0x40 | (s << 3), false);  // CGRAM の s 文字目へ
+      for (uint8_t b : gameSlots[s]) lcdSendRaw(b, true);
+      Wire.endTransmission();
+    }
+  }
+  for (int row = 0; row < LCD_ROWS; row++) {
+    uint8_t want[LCD_COLS];
+    int first = -1, last = -1;
+    for (int c = 0; c < LCD_COLS; c++) {
+      const uint16_t v = gfCell[row][c];
+      if (v == 0xFFFF) want[c] = ' ';
+      else if (v & 0x100) want[c] = slotOf[v & 0xFF] >= 0 ? (uint8_t)slotOf[v & 0xFF] : (uint8_t)gfAlt[v & 0xFF];
+      else want[c] = (uint8_t)v;
+      if (!gameShownValid || want[c] != gameShown[row][c]) {
+        if (first < 0) first = c;
+        last = c;
+      }
+    }
+    if (first < 0) continue;
+    Wire.beginTransmission(lcdAddr);
+    lcdSendRaw(0x80 | (row * 0x40 + first), false);  // row 行目の first 桁目へ
+    for (int c = first; c <= last; c++) {
+      lcdSendRaw(want[c], true);
+      gameShown[row][c] = want[c];
+    }
+    Wire.endTransmission();
+  }
+  gameShownValid = true;
+  gameFlushMaxUs = std::max<uint32_t>(gameFlushMaxUs, micros() - t0);
+}
+
+static const uint8_t *gameMarioSprite() {
+  if (gameState == GS_DYING) return G_DEAD;
+  // 大きくなる / 小さくなる途中は、大小を 2 コマごとに入れ替える
+  const bool big = (gmGrow && ((gmGrow / 2) & 1)) ? !gmBig : gmBig;
+  if (gmY == 0 && gmAir) return big ? G_JUMP : G_S_JUMP;
+  if (gmIdle > GAME_MOVE_TICKS) return big ? G_STAND : G_S_STAND;
+  if (gmStep) return big ? G_RUN_A : G_S_RUN_A;
+  return big ? G_RUN_B : G_S_RUN_B;
+}
+
+// タイトルなどに出すマリオ。今の大きさで
+static const uint8_t *gameMarioIcon() {
+  return gmBig ? G_STAND : G_S_STAND;
+}
+
+// コースの今の画面を組み立てる。手前から マリオ、クリボー、きのこ、コースの順に置く
+static void gameDrawWorld() {
+  uint8_t bits[8];
+  int y = gmY, shift = 0;
+  if (gameState == GS_DYING) {
+    // やられたら少し止まり、跳ねて (上の段へ)、下の段で地面に沈む。穴に落ちたときは、そのまま沈む
+    const int t = gameTimer;
+    if (gameFell) {
+      shift = t;
+    } else if (t >= 22) {
+      y = 1;
+      shift = t - 22;
+    } else if (t >= 12) {
+      y = 0;
+    }
+  }
+  if (shift < 8 && !(gmHurt && (gameTicks & 2))) {  // 小さくなったあとの何にも当たらない間は点滅する
+    gameSprite(gameMarioSprite(), gmLeft, shift, y == 1 && !(gameTiles[gmX] & GT_PIT), bits);
+    gfGlyph(y, gmX - gameCam, bits, 'M');
+  }
+  const bool goombaStep = (gameTicks / gameGoombaTicks()) & 1;
+  for (int i = 0; i < gameGoombaN; i++) {
+    const Goomba &g = gameGoombas[i];
+    gameSprite(g.squash ? G_SQUASH : goombaStep ? G_GOOMBA_B : G_GOOMBA_A, false, 0, true, bits);
+    gfGlyph(1, g.x - gameCam, bits, g.squash ? '_' : 'g');
+  }
+  if (gameMush) {
+    // せり上がる間は、出てきたブロックの所に下から少しずつ出す。絵の一番上の行は空なので、出始めから 1 行は見えるよう 6 行まで下げる
+    gameSprite(G_MUSH, false, (gameMushRise * 6 + GAME_MUSH_RISE - 1) / GAME_MUSH_RISE, gameMushY == 1, bits);
+    gfGlyph(gameMushY, gameMushX - gameCam, bits, 'm');
+  }
+  const bool coinThin = gameTicks % 16 >= 12;  // コインはときどき細く光る
+  for (int c = 0; c < LCD_COLS && gameCam + c < gameLen; c++) {
+    const int x = gameCam + c;
+    const uint8_t t = gameTiles[x];
+    if (x == gameFlag) {
+      gfGlyph(0, c, G_FLAG_TOP, '|');
+      gfGlyph(1, c, G_FLAG_BASE, '|');
+      continue;
+    }
+    if (t & GT_QBLOCK) gfGlyph(0, c, G_QBLOCK, '?');
+    else if (t & GT_USED) gfChar(0, c, 0xFF);  // たたいたブロック。LCD に元からある全面黒
+    else if (t & GT_COIN) gfGlyph(0, c, coinThin ? G_COIN_B : G_COIN_A, 'o');
+    if (t & GT_PIPE) gfGlyph(1, c, G_PIPE, (char)0xFF);
+    else if (!(t & GT_PIT)) gfGlyph(1, c, G_GROUND, '_');
+  }
+}
+
+// 今の状態の画面を組み立てて出す。コースのほかは、文字と マリオ・コインの絵 で出す
+static void gameRender() {
+  char line[LCD_COLS + 1];
+  char score[12];
+  snprintf(score, sizeof(score), "%06lu", (unsigned long)std::min<uint32_t>(gameScore, 999999));
+  gfClear();
+  switch (gameState) {
+    case GS_TITLE:
+      gfText(0, 2, "SUPER MARIO");
+      gfGlyph(0, 14, G_STAND, 'M');
+      snprintf(line, sizeof(line), "TOP %06lu  SW4", (unsigned long)std::min<uint32_t>(gameTop, 999999));
+      gfText(1, 0, line);
+      break;
+    case GS_INTRO:
+      snprintf(line, sizeof(line), "WORLD %d-%d", gameLevel / 4 + 1, gameLevel % 4 + 1);
+      gfText(0, 3, line);
+      gfGlyph(1, 3, gameMarioIcon(), 'M');
+      snprintf(line, sizeof(line), " x %d", gameLives);
+      gfText(1, 4, line);
+      gfGlyph(1, 10, G_COIN_A, 'o');
+      snprintf(line, sizeof(line), "x%02d", gameCoins);
+      gfText(1, 11, line);
+      break;
+    case GS_PAUSE:
+      snprintf(line, sizeof(line), "PAUSE  WORLD %d-%d", gameLevel / 4 + 1, gameLevel % 4 + 1);
+      gfText(0, 0, line);
+      gfGlyph(1, 0, gameMarioIcon(), 'M');
+      snprintf(line, sizeof(line), "x%d", gameLives);
+      gfText(1, 1, line);
+      gfGlyph(1, 4, G_COIN_A, 'o');
+      snprintf(line, sizeof(line), "x%02d", gameCoins);
+      gfText(1, 5, line);
+      gfText(1, 10, score);
+      break;
+    case GS_OVER:
+      gfText(0, 3, "GAME OVER");
+      gfText(1, 0, gameNewTop ? "NEW TOP" : "SCORE");
+      gfText(1, 8, score);
+      break;
+    case GS_CLEAR:
+      if (gameTimer >= GAME_CLEAR_TEXT) {
+        gfText(0, 1, "COURSE CLEAR!");
+        gfText(1, 0, "SCORE");
+        gfText(1, 8, score);
+        break;
+      }
+      gameDrawWorld();
+      break;
+    default:
+      gameDrawWorld();
+      break;
+  }
+  gameFlush();
+}
+
+// "game" で、ゲームの様子と、画面に見えているコースを文字で出す (M マリオ / g クリボー / x つぶれたクリボー / m きのこ /
+// P 土管 / _ 地面 / 空白 穴か空中 / ? ブロック / # たたいたブロック / o コイン / F | 旗)。flush は描くのにかかった最長の時間、
+// big はスーパーマリオか、hurt は小さくなったあと何にも当たらない残りのコマ
+static void gamePrint() {
+  static const char *const STATES[] = {"title", "intro", "play", "dying", "clear", "pause", "over"};
+  Serial.printf("game: %s %d-%d lives %d coins %d score %lu top %lu mario %d,%d air %d cam %d flag %d flush %lu us "
+                "big %d hurt %d\n",
+                STATES[gameState], gameLevel / 4 + 1, gameLevel % 4 + 1, gameLives, gameCoins, (unsigned long)gameScore,
+                (unsigned long)gameTop, gmX, gmY, gmAir, gameCam, gameFlag, (unsigned long)gameFlushMaxUs, gmBig, gmHurt);
+  gameFlushMaxUs = 0;
+  char row[LCD_ROWS][LCD_COLS + 1];
+  for (int c = 0; c < LCD_COLS; c++) {
+    const int x = gameCam + c;
+    const uint8_t t = x < gameLen ? gameTiles[x] : 0;
+    row[0][c] = x == gameFlag ? 'F' : (t & GT_QBLOCK) ? '?' : (t & GT_USED) ? '#' : (t & GT_COIN) ? 'o' : ' ';
+    row[1][c] = x == gameFlag ? '|' : (t & GT_PIPE) ? 'P' : (t & GT_PIT) ? ' ' : '_';
+  }
+  for (int i = 0; i < gameGoombaN; i++) {
+    const int c = gameGoombas[i].x - gameCam;
+    if (c >= 0 && c < LCD_COLS) row[1][c] = gameGoombas[i].squash ? 'x' : 'g';
+  }
+  if (gameMush && gameMushX >= gameCam && gameMushX - gameCam < LCD_COLS) row[gameMushY][gameMushX - gameCam] = 'm';
+  if (gmX >= gameCam && gmX - gameCam < LCD_COLS) row[gmY][gmX - gameCam] = 'M';
+  row[0][LCD_COLS] = row[1][LCD_COLS] = 0;
+  Serial.printf("game: |%s|\ngame: |%s|\n", row[0], row[1]);
+}
+
+// "game" で様子を出し、"game lcd" で続けて LCD の中身 ("lcd" と同じ) も出す (同じコマの絵になる)。
+// "game level 5" で 5 番目 (0 から数える。5 は 2-2) のコースから新しく始める (調べるとき用)
+static void gameCommand(const String &cmd) {
+  if (cmd.startsWith("game level")) {
+    gameNew();
+    gameLevel = std::max(0, (int)cmd.substring(10).toInt());
+    gameStartLevel();
+    if (page == PAGE_GAME) gameRender();
+  }
+  gamePrint();
+  if (cmd == "game lcd") dumpLcd();
 }
 
 // ---------------- シリアル ----------------
@@ -1903,7 +2763,16 @@ static PlayResult pollAbort() {
       lcdCommand(cmd);
       return PLAY_NONE;
     }
-    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / shuffle / vol [0-100|+|-] / wifi on / wifi off / lcd");
+    if (cmd.startsWith("sw ")) {
+      swCommand(cmd);
+      return PLAY_NONE;
+    }
+    if (cmd.startsWith("game")) {
+      gameCommand(cmd);
+      return PLAY_NONE;
+    }
+    Serial.println("再生中に使えるのは pause / stop / next / prev / rand / shuffle / vol [0-100|+|-] / wifi on / wifi off / lcd /"
+                   " sw / game");
   }
 
   // BOOTSEL の読み取りは一瞬フラッシュと割り込みを止めるので、頻繁には見に行かない
@@ -3121,7 +3990,8 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / pause / next / prev / rand / stop / list / now / shuffle / vol [0-100|+|-] /"
-    " wifi on|off|fast|save / bt / scan / relay / spotify [n|off] / status / lcd [chars|resync on|off]";
+    " wifi on|off|fast|save / bt / scan / relay / spotify [n|off] / status / lcd [chars|resync on|off] /"
+    " sw <1-4> [ms] / game [lcd|level n]";
 
 static void printStatus() {
   Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u spotify=%d\n",
@@ -3136,6 +4006,14 @@ static void handleCommand(String cmd) {
   if (!cmd.length()) return;
   if (cmd.startsWith("spotify")) {
     spotifySerial(cmd);
+    return;
+  }
+  if (cmd.startsWith("sw ")) {
+    swCommand(cmd);
+    return;
+  }
+  if (cmd.startsWith("game")) {
+    gameCommand(cmd);
     return;
   }
   if (spMode) {
