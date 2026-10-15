@@ -335,8 +335,17 @@ def to_lcd(text, limit):
     return text.encode("cp932")[:limit]
 
 
+def short_name(name):
+    """サーバーでの名前 "本名 / AKA" から AKA だけを取り出す。AKA が無ければ本名のまま。
+    AKA の中にも / がある人がいる ("中村大翔 / >_< /") ので、最初の / で分ける"""
+    real, _, aka = name.replace("／", "/").partition("/")
+    return aka.strip() or real.strip() or name
+
+
 def tidy_text(text):
     """Discord の書式を外して、LCD に出す文にする。Bot で受け取った発言にも、通知の本文にも使う"""
+    # 通知の本文のメンションは "\u2068@本名 / AKA\u2069" と囲まれて来るので、名前と同じく AKA にする
+    text = re.sub("\u2068@([^\u2069]*)\u2069", lambda m: "@" + short_name(m.group(1)), text)
     text = re.sub(r"<a?:(\w+):\d+>", r":\1:", text)  # カスタム絵文字
     text = re.sub(r"https?://[^\s)>]+", "URL", text)  # (https://...) の閉じ括弧は残す
     text = re.sub(r"\*\*|__|~~|\|\||`", "", text)    # 太字・下線・打ち消し・伏せ字・コード
@@ -1162,7 +1171,7 @@ def run_discord(token, guild_id, channel_id, send_id):
     def add(m):
         nonlocal last_channel
         last_channel = m.channel
-        add_message(m.id, m.created_at, m.author.display_name, discord_text(m),
+        add_message(m.id, m.created_at, short_name(m.author.display_name), discord_text(m),
                     None if channel_id else m.channel.name)
 
     async def send(text):
@@ -1295,7 +1304,7 @@ def run_notify(channel, webhook):
         name, ch = parse_title(title)
         if ch is None or (channel and not same(ch, channel)) or echoed(body):
             return
-        add_message(STORE.next_id(), datetime.datetime.now(JST), name, tidy_text(body),
+        add_message(STORE.next_id(), datetime.datetime.now(JST), short_name(name), tidy_text(body),
                     None if channel else ch)
 
     SEND = send if webhook else (lambda text: "no webhook")
