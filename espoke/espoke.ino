@@ -33,6 +33,7 @@
  *   6. RELAY_HOST の中継 (tools/discord_relay.py) に HTTPS でつなぎ、Discord のメッセージを受け取る。
  *      届いたら Receive の画面に切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
  *      変換して送ってくるので、そのまま LCD に書ける。Send の画面で打った文は、同じ中継を通して Discord に送る
+ *      RELAY_HOST につなげなければ、RELAY_HOST2 (別の PC の tools/relay_gateway.py。同じ中継へ渡す) を試す
  *   7. ホームで Spotify を開くと Spotify モードになる。中継が、同じ PC で動かす go-librespot の音を MP3 にして
  *      WebSocket で流してくるので、SD の曲と同じく libmad でデコードしてイヤホンで鳴らす。モードの間は
  *      Spotify の画面だけを使い、Discord は受け取らない (届いた発言は、モードを抜けてつなぎ直すと届く)
@@ -75,13 +76,17 @@
 // libmad を読み込んでいるこのヘッダ経由で取り込む (再生クラス自体は使わない)
 #include <BackgroundAudioMP3.h>
 
-#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / RELAY_HOST / RELAY_KEY
+#include "arduino_secrets.h"  // WIFI_SSID / WIFI_PASS / RELAY_HOST / RELAY_HOST2 / RELAY_KEY
 #include "relay_ca.h"         // RELAY_CA: 中継の証明書を確かめるルート CA
 
 // 古い arduino_secrets.h でもビルドできるように。RELAY_HOST が空なら Discord は受け取らない
 #ifndef RELAY_HOST
 #define RELAY_HOST ""
 #define RELAY_KEY  ""
+#endif
+// 予備の入口 (別の PC の tools/relay_gateway.py)。RELAY_HOST につなげないときに試す。空なら使わない
+#ifndef RELAY_HOST2
+#define RELAY_HOST2 ""
 #endif
 #ifndef RELAY_PORT
 #define RELAY_PORT 8443  // tailscale funnel が使えるのは 443 / 8443 / 10000
@@ -416,6 +421,7 @@ static String relayStatus = "connecting";  // メッセージがまだ無いと�
 static unsigned long lastRelayTry = 0;     // 最後につなぎにいった時刻
 static unsigned long relayRetryMs = 0;     // lastRelayTry からこれだけたったら、次につなぎにいく
 static int    relayFailures = 0;           // 続けてつなげなかった回数
+static int    relayHostIdx = 0;            // つなぎにいく入口。0 が RELAY_HOST、1 が RELAY_HOST2。つながった方を使い続ける
 static unsigned long lastRelayData = 0;    // 最後に何か (空行を含む) 届いた時刻
 static String relayLine = "";              // 受信途中の1行
 static String relayLastId = "";            // 最後に受け取ったメッセージの ID
@@ -3359,6 +3365,10 @@ static void relayFailed() {
   relayRetryMs = RELAY_RETRY_MS << std::min(relayFailures, RELAY_BACKOFF_MAX);
 }
 
+static const char *relayHost() {
+  return relayHostIdx ? RELAY_HOST2 : RELAY_HOST;
+}
+
 // 中継につなぎ、メッセージの流れを受け取り始める。TLS の握手に 4〜8 秒かかり (P-384 の証明書を確かめるのが重い)、
 // A2DP のバッファ (370ms) では持たないので、再生ループの中 (pollAbort) からは送る文があるときしか呼ばない。
 // loop() が、止まっている間か曲の合間に呼ぶ。送る文 (relayOutbox) があれば、POST で一緒に送る。
@@ -3391,18 +3401,27 @@ static void relayConnect() {
   }
 
   // TLS は受信バッファ (RELAY_TLS_RX)、BearSSL のスタック (RELAY_TLS_STACK)、コンテキストなどを使う。足りているかをログで見る
+  // Funnel の入口が中継の PC へだけつながなくなることがある (握手の途中ですぐ切られる)。予備の入口 (RELAY_HOST2) が
+  // あれば、すぐそちらも試す。つながった方を次からも使う
   uint32_t heap = rp2040.getFreeHeap();
   unsigned long t0 = millis();
-  if (!relay->connect(RELAY_HOST, spMode ? SPOTIFY_PORT : RELAY_PORT)) {
+  for (int tries = RELAY_HOST2[0] ? 2 : 1;; ) {
+    if (relay->connect(relayHost(), spMode ? SPOTIFY_PORT : RELAY_PORT)) break;
     char err[64] = "";
     int code = relay->getLastSSLError(err, sizeof(err));
-    Serial.printf("relay: connect failed (ssl %d %s), heap %luKB\n", code, err, (unsigned long)(heap / 1024));
-    relayClose("relay error");
-    relayFailed();
-    sendDone(relayStatus);
-    return;
+    Serial.printf("relay: connect to %s failed (ssl %d %s), heap %luKB\n", relayHost(), code, err,
+                  (unsigned long)(heap / 1024));
+    relay->stop();
+    if (RELAY_HOST2[0]) relayHostIdx ^= 1;
+    if (--tries == 0) {
+      relayClose("relay error");
+      relayFailed();
+      sendDone(relayStatus);
+      return;
+    }
+    t0 = millis();
   }
-  Serial.printf("relay: tls %lu ms, heap %luKB -> %luKB, bearssl stack %u/%u bytes\n", millis() - t0,
+  Serial.printf("relay: tls %lu ms (%s), heap %luKB -> %luKB, bearssl stack %u/%u bytes\n", millis() - t0, relayHost(),
                 (unsigned long)(heap / 1024), (unsigned long)(rp2040.getFreeHeap() / 1024),
                 (unsigned)tlsStackUsed(), (unsigned)RELAY_TLS_STACK);
 
@@ -3412,14 +3431,14 @@ static void relayConnect() {
   if (spMode) {
     relay->printf("GET %s?win=%d HTTP/1.1\r\nHost: %s\r\nX-Key: %s\r\nUpgrade: websocket\r\n"
                   "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-                  spService == PAGE_YOUTUBE ? "/youtube" : "/spotify", SP_WIN, RELAY_HOST, RELAY_KEY, WS_KEY);
+                  spService == PAGE_YOUTUBE ? "/youtube" : "/spotify", SP_WIN, relayHost(), RELAY_KEY, WS_KEY);
   } else if (relayOutbox.length()) {
     relay->printf("POST /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n"
                   "Content-Type: text/plain\r\nContent-Length: %u\r\n\r\n%s",
-                  relayLastId.c_str(), RELAY_HOST, RELAY_KEY, relayOutbox.length(), relayOutbox.c_str());
+                  relayLastId.c_str(), relayHost(), RELAY_KEY, relayOutbox.length(), relayOutbox.c_str());
   } else {
     relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n\r\n",
-                  relayLastId.c_str(), RELAY_HOST, RELAY_KEY);
+                  relayLastId.c_str(), relayHost(), RELAY_KEY);
   }
   String head = relay->readStringUntil('\n');  // "HTTP/1.0 200 OK" (Spotify は "HTTP/1.1 101 Switching Protocols")
   head.trim();
@@ -4343,17 +4362,17 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / pause / next / prev / rand / stop / list / now / shuffle / vol [0-100|+|-] /"
-    " wifi on|off|fast|save / bt / scan / relay / spotify [n|off] / youtube [n|off|invert] / status /"
+    " wifi on|off|fast|save / bt / scan / relay [1|2] / spotify [n|off] / youtube [n|off|invert] / status /"
     " lcd [chars|resync on|off] /"
     " sw <1-4> [ms] / game [lcd|level n]";
 
 static void printStatus() {
-  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u mode=%s\n",
+  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s, %s) msgs=%u mode=%s\n",
                 WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
                 a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
                 (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
                 digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
-                morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount, spMode ? PAGE_NAMES[spService] : "-");
+                morseText.c_str(), relayOpen, relayStatus.c_str(), relayHost(), (unsigned)msgCount, spMode ? PAGE_NAMES[spService] : "-");
 }
 
 static void handleCommand(String cmd) {
@@ -4426,8 +4445,10 @@ static void handleCommand(String cmd) {
     findAndConnect();
   } else if (cmd == "bt") {
     btConnecting = !a2dp.connected();  // System の Bluetooth で SW4 を押したのと同じ
-  } else if (cmd == "relay") {
-    // 中継につなぎ直す。失敗が続いて延びていた間隔も戻し、次の loop() ですぐつなぎにいく
+  } else if (cmd == "relay" || cmd == "relay 1" || (cmd == "relay 2" && RELAY_HOST2[0])) {
+    // 中継につなぎ直す。失敗が続いて延びていた間隔も戻し、次の loop() ですぐつなぎにいく。
+    // 1 か 2 で、つなぎにいく入口 (RELAY_HOST か RELAY_HOST2) を選ぶ
+    if (cmd.length() > 5) relayHostIdx = cmd.endsWith("2");
     relayClose("reconnect");
     relayFailures = 0;
     relayRetryMs = 0;

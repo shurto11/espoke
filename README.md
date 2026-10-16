@@ -25,7 +25,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `espoke/` | 本体。microSD の MP3 を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージを受け取って出し、モールスで打った文を送る。Wi-Fi につながっているときは Spotify も鳴らし、YouTube も見られる。ゲーム（Mario）も遊べる |
 | `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
 | `docs/` | 部品の取り付け手順など |
-| `tools/` | Discord と Spotify と YouTube の中継（PC 側で動かす）、その Spotify と YouTube の部分を Pico の代わりに試すスクリプト、基板の配置図を作るスクリプト |
+| `tools/` | Discord と Spotify と YouTube の中継（PC 側で動かす）とその予備の入口、その Spotify と YouTube の部分を Pico の代わりに試すスクリプト、基板の配置図を作るスクリプト |
 
 ビルド実測値（`rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble`）:
 
@@ -430,6 +430,9 @@ $EDITOR espoke/arduino_secrets.h
 #define RELAY_HOST "dynabook.tailxxxx.ts.net"
 #define RELAY_PORT 8443
 #define RELAY_KEY  "your-relay-key"
+
+// 予備の入口（任意）。RELAY_HOST につなげないときに試す（8.10 節）
+#define RELAY_HOST2 "ubuntubook.tailxxxx.ts.net"
 ```
 
 `RELAY_HOST` を書かなければ Discord も Spotify も YouTube も使わない。Spotify と YouTube は同じ `RELAY_HOST` の 10000 番につなぐ（変えるなら `#define SPOTIFY_PORT`。7.7 節）。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
@@ -477,6 +480,7 @@ $EDITOR espoke/arduino_secrets.h
 | `bt` | イヤホンに1回つなぎにいく（System の Bluetooth で SW4 を押したのと同じ。7.5 節） |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
 | `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（8.6 節） |
+| `relay 1` / `relay 2` | つなぎにいく入口を `RELAY_HOST` / `RELAY_HOST2`（予備の入口。8.10 節）にして、つなぎ直す |
 | `status` | Wi-Fi / IP / Bluetooth / 連続再生 / 一時停止 / シャッフル / 音量 / SD の曲数 / 空きヒープの状態を表示 |
 | `lcd` | LCD の中身を読んでシリアルに出す。自作文字 0〜7 の絵と、2 行に書いてある文字コード（16 進）。再生中でも効く |
 | `lcd chars` | 自作文字（棒と `⇄`）を LCD に作り直す |
@@ -951,6 +955,7 @@ Discord の決めたサーバー（か1つのチャンネル）の発言を、es
 Spotify モードでは、go-librespot の音を MP3 にして流す（8.7 節）。
 YouTube モードでは、yt-dlp と ffmpeg で動画の音と LCD 用の動画を作って流す（8.9 節）。
 Bot を入れられないサーバーでは、dynabook で動かす Discord アプリの通知から受け取る（8.8 節）。
+Funnel の入口が dynabook へつながらなくなったときのために、別の PC に予備の入口を置いている（8.10 節）。
 
 ### 8.1 経路
 
@@ -1180,6 +1185,8 @@ curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head 
 - 証明書は `espoke/relay_ca.h` のルート CA（Let's Encrypt の Root YE / ISRG Root X2 / ISRG Root X1）で確かめる。
   期限を確かめるのに時計が要るので、最初につなぐ前に NTP（`ntp.nict.jp`）で合わせる。
   Wi-Fi につないだ直後は合わせられないことがあるので、失敗したら 10 秒後にやり直す（中継の失敗とは数えず、間隔も延ばさない）
+- `RELAY_HOST2`（予備の入口。8.10 節）を書いておくと、`RELAY_HOST` に TLS でつなげなかったときに、すぐそちらも試す。
+  つながった方を次からも使い、そちらでつなげなくなったら戻る。今どちらにつないでいるかは `status` の `relay=` の括弧の中に出る
 - 直近 8 件を覚えておく。届いたら**Receive の画面に切り替える**（7.5 節）。SW1（か GP15）で元の画面に戻る
 - 1行目は名前と時刻、2行目は本文。16 文字を超える本文は 0.3 秒ごとに1文字ずつ流し、頭と末尾で 1.5 秒止まる
 - SW2 で古いメッセージ、SW3 で新しいメッセージを見る
@@ -1206,7 +1213,7 @@ curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head 
 |---|---|
 | `connecting` | 起動直後。まだつなぎにいっていない |
 | `no message` | つながっている。まだ発言が無い |
-| `relay error` | TLS でつなげなかった。シリアルに `relay: connect failed (ssl <番号> ...)` が出る |
+| `relay error` | TLS でつなげなかった（`RELAY_HOST2` があれば、両方とも）。シリアルに `relay: connect to <名前> failed (ssl <番号> ...)` が出る |
 | `relay 403` など | 中継に断られた。`RELAY_KEY` が違う |
 | `relay no reply` | 応答のヘッダが来なかった |
 | `relay lost` / `relay silent` | 切れた / 90 秒何も届かなかった。30 秒以内につなぎ直す |
@@ -1541,6 +1548,71 @@ ffmpeg -i pipe:<音> -i pipe:<映像>                                 <┘
 - dynabook で `--youtube-test` が Bad Apple!!（3 分 39 秒）を 14 秒で 1314 コマにできた
 - Pico で YouTube モードに入り、Funnel の 10000 番から一覧が届いた。cookie が無いので `youtube login` と出た
 
+### 8.10 予備の入口（tools/relay_gateway.py）
+
+Tailscale の Funnel の入口（東京の ingress）が、dynabook へだけつながなくなることがある。
+2026-10-14〜15 に 3 回起き、数時間続いた。症状は次のとおり。
+
+- 中継も dynabook の Tailscale も正常なのに、外から 8443 番・10000 番につなぐと、TLS の握手の途中ですぐ（50ms ほどで）切られる。
+- dynabook の `tailscale status --json` で見ると、入口のノード（`funnel-ingress-node`）との間で何も届いていない（rx/tx 0）。
+- `tailscale funnel ... off` から 2 分半待って戻すと、1 回は直ったが、2 回は直らなかった。
+
+そうなっている間も、**同じ入口から別の PC（ubuntubook）の Funnel は通った**。
+そこで ubuntubook でも同じ 2 つのポートを公開し、届いたものを tailnet の中を通して dynabook の中継へ渡す。
+Pico は `RELAY_HOST` につなげなければ `RELAY_HOST2` を試す（8.6 節）。
+
+```
+                         Funnel 8443（TLS は tailscaled）─> 127.0.0.1:8001 ─┐ relay_gateway.py
+   Pico ── インターネット ─┤                                                ├── TLS ──> dynabook:10000 ──> 中継
+                         Funnel 10000（TCP のまま）─────> 127.0.0.1:8010 ─┘ （tailnet の中）
+                                                         ubuntubook の証明書で TLS を受ける
+```
+
+- 中継の 10000 番（中継が TLS を受ける口）は、8443 番と同じ処理（`/stream`・`/spotify`・`/youtube`）を受けるので、どちらも 10000 番へ渡す。
+  dynabook の Funnel の入口が詰まっていても、tailnet の中からは 10000 番につながる。
+- 10000 番を ubuntubook で TLS で受け直すのは、Pico が証明書の名前を確かめるため（中継の証明書の名前は dynabook）。
+  ubuntubook の証明書も `tailscale cert` で取り出す（Let's Encrypt。中間 CA は YE2 で、Root YE から先は dynabook と同じなので `relay_ca.h` はそのまま）。
+- Pico へは 2KB ずつ書き、TLS のレコードを Pico の受信バッファ（4KB）に収める。
+- TLS のソケットは別のスレッドから同時に読み書きすると壊れるので、1 本の接続を 1 つのスレッドで、届いている方から読んでもう一方へ書く。
+
+ubuntubook での準備:
+
+```bash
+sudo tailscale set --operator=$USER      # 一度だけ (tailscale cert と funnel を sudo なしで)
+mkdir -p ~/espoke && cp tools/relay_gateway.py ~/espoke/
+tailscale funnel --bg --https=8443 http://127.0.0.1:8001
+tailscale funnel --bg --tcp=10000 tcp://127.0.0.1:8010
+```
+
+```ini
+# ~/.config/systemd/user/espoke-gateway.service
+[Unit]
+Description=espoke relay gateway (spare Funnel ingress to the dynabook relay)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u %h/espoke/relay_gateway.py --upstream dynabook.<tailnet>.ts.net:10000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user enable --now espoke-gateway
+loginctl enable-linger $USER             # ログアウトしても動かす
+journalctl --user -u espoke-gateway -f   # 接続ごとに「tls: 85 s, to pico 563 KB, to relay 6 KB (pico closed)」
+```
+
+証明書は `~/espoke/tls.crt` と `tls.key` に、起動時と 1 日ごとに取り出す。ubuntubook を閉じている間は予備の入口も使えない。
+
+確かめたこと（2026-10-15。dynabook の入口が詰まっている間）:
+
+- 公開の IPv4（`curl --resolve ubuntubook.<tailnet>.ts.net:8443:<dig @1.1.1.1 の IPv4>`）で、8443 番の `/x` に中継の 404、10000 番の `/` に中継の 200 が返った
+- `spotify_probe.py --path /youtube --connect <IPv4> https://ubuntubook.<tailnet>.ts.net:10000` で、一覧が届き、動画が 1 秒あたり 15.9KB（128kbps に足りる）で流れ、コマは遅れなかった
+- Pico が dynabook で失敗したあと ubuntubook に 4.4 秒でつながり、Discord のメッセージと YouTube の一覧が届いた
+
 ## 9. トラブルシューティング
 
 | 症状 | 原因と対処 |
@@ -1581,6 +1653,7 @@ ffmpeg -i pipe:<音> -i pipe:<映像>                                 <┘
 | Receive の画面のカナが記号やキリル文字になる | LCD の文字 ROM が A02（欧文）。半角カナが出るのは A00（日本語）の LCD1602A だけ |
 | `relay: connect failed (ssl -1000 ...)` が出る、または `heap` が 15KB を切っている | TLS に使う RAM が足りない（7.6 節）。つなぐには 10KB ほど要る。SD の曲数（`SD_MAX_TRACKS`）を減らすなどして空ける |
 | `relay: connect failed` が出るが、`heap` は足りている | 時計が合っていない（`ntp failed`）、Funnel が止まっている、Let's Encrypt がルート CA を替えた（`relay_ca.h` を更新する）のどれか。PC から 8.5 節の curl を試す |
+| 中継も Funnel の設定も正常なのに `relay error`。PC から curl でつなぐと、TLS の握手の途中ですぐ切られる | Funnel の入口が、中継の PC へだけつながなくなっている（8.10 節）。予備の入口があれば Pico は自分でそちらに移る |
 | `relay 403` | `RELAY_KEY` が dynabook の `relay.env` と違う |
 | 発言しても本文が空で届く | Developer Portal で Message Content Intent が OFF（8.3 節） |
 | espoke から送ると `send: discord 403` | Bot に「メッセージを送信」の権限が無い（8.3 節） |
