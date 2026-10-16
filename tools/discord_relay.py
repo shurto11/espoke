@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-espoke 用の Discord と Spotify の中継。常時動かしておく PC (学校の dynabook) の上で動かす。
+espoke 用の Discord と Spotify と YouTube の中継。常時動かしておく PC (学校の dynabook) の上で動かす。
 
 Discord の決めたサーバー (かチャンネル) に書き込まれた発言を受け取り、LCD1602A に出せる文字だけの
 1行にして Pico WH へ流す。LCD の文字 ROM (A00) にあるのは英数字と半角カタカナだけで、
@@ -14,6 +14,10 @@ Spotify は、同じ PC で動かす go-librespot (非公式の Spotify Connect 
 Pico へ流す。Pico は SD の曲と同じく libmad で鳴らす。プレイリストの一覧や曲送りは go-librespot の
 API を呼ぶ (Spotify の Web API や開発者アプリは使わない)。使い方は下の「Spotify」の節。
 
+YouTube は、yt-dlp で自分のアカウントの一覧 (おすすめ・登録チャンネル・後で見る・高評価・再生リスト) を読み、
+選んだ動画を yt-dlp でダウンロードし、ffmpeg で MP3 と、LCD の 6x2 文字に出す白黒の小さな動画にして Pico へ流す。
+下の「YouTube」の節。
+
 Pico は Tailscale に入れないので、tailscale funnel でこのサーバを
 https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HTTPS でつながせる。
 (dynabook の 443 番は tailnet 向けの tailscale serve で使っているので、Funnel は 8443 番にする)
@@ -23,6 +27,7 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     python3 -m venv ~/espoke/venv
     ~/espoke/venv/bin/pip install discord.py 'fugashi[unidic-lite]'
     ~/espoke/venv/bin/pip install lameenc     # Spotify を使うときだけ
+    ~/espoke/venv/bin/pip install "yt-dlp[default]"   # YouTube を使うときだけ (ffmpeg と deno も要る)
 
 設定 (環境変数。--env で読むファイルにも書ける):
     DISCORD_TOKEN       Bot のトークン
@@ -36,19 +41,26 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     SPOTIFY_PIPE        go-librespot が音を書く FIFO のパス。無ければ Spotify は使わない (/spotify は 404)
     SPOTIFY_API         go-librespot の API。既定 http://127.0.0.1:3678
     SPOTIFY_KBPS        Pico へ流す MP3 のビットレート。既定 128 (途切れるなら 96)
-    SPOTIFY_TLS_PORT    Spotify の TLS を受けるポート (Funnel の 10000 番の転送先)。既定 8010
+    SPOTIFY_TLS_PORT    Spotify と YouTube の TLS を受けるポート (Funnel の 10000 番の転送先)。既定 8010
+    YOUTUBE_COOKIES     ログインしたブラウザから書き出した cookie のファイル。無ければ YouTube は使わない (/youtube は 404)
+    YOUTUBE_DENO        deno のパス。既定 ~/espoke/bin/deno (yt-dlp が YouTube の JS を解くのに使う)
+    YOUTUBE_KBPS        Pico へ流す MP3 のビットレート。既定 128
+    YOUTUBE_FPS         LCD に出す動画の 1 秒あたりのコマ数。既定 6 (Pico の音が途切れるなら下げる)
+    YOUTUBE_FULL        0 なら、横長の動画は LCD 全体ではなく左の 6x2 文字に収める (右に題名と時間が出る)
 
 使い方:
     ~/espoke/venv/bin/python discord_relay.py                 # ~/espoke/relay.env を読んで動かす
     ~/espoke/venv/bin/python discord_relay.py --notify        # Bot を使わず Discord アプリの通知から受け取る
     ~/espoke/venv/bin/python discord_relay.py --no-discord    # Discord につながず /post だけで試す
     ~/espoke/venv/bin/python discord_relay.py --convert "今日は雨"   # 変換結果だけ見る
+    ~/espoke/venv/bin/python discord_relay.py --youtube-test URL     # YouTube の動画を LCD のコマにして端末に出す
 
     GET  /stream?after=<id>  after より新しい発言を1行ずつ流し続ける (X-Key ヘッダが要る)
     POST /stream?after=<id>  本文 (UTF-8) を Discord に送ってから、GET と同じく流す (X-Key ヘッダが要る)。
                              送った結果は X-Sent ヘッダ ("ok" か理由)。--no-discord なら差出人 espoke の発言として流し返す
     POST /post               本文 (UTF-8) を差出人 test の発言として流す。試験用 (X-Key ヘッダが要る)
     GET  /spotify?win=<n>    WebSocket。Spotify の音と操作をやりとりする (X-Key ヘッダが要る。下の「Spotify」の節)
+    GET  /youtube?win=<n>    WebSocket。YouTube の音と動画と操作をやりとりする (X-Key ヘッダが要る。下の「YouTube」の節)
 
 1行は  <メッセージ ID> TAB <HH:MM> TAB <名前> TAB <本文> LF  で、cp932 のバイト列。
 サーバー全体を受け取るときは、本文の頭に "#チャンネル名 " を付ける。
@@ -113,25 +125,49 @@ Spotify:
     文字はすべて LCD の文字コード (cp932 の1バイト文字)。
     中継は Pico がまだ読んでいない量を win 以下に抑える。Pico は受信リングに空きが無ければ読まないので、
     流す速さは Pico が決める。win は、曲送りのときに捨てる前の曲の量の上限でもある
+
+YouTube:
+    relay.env に YOUTUBE_COOKIES=/home/<user>/espoke/yt-cookies.txt を書くと有効になる。cookie はログインした
+    ブラウザから書き出す (yt-dlp で使うとアカウントが制限されることがあるので、サブのアカウントがよい)。
+    yt-dlp は YouTube の JS を解くのに deno (2.3 以上) か node (22 以上) が要る。deno を YOUTUBE_DENO に置く。
+
+    Pico とは Spotify と同じ形の WebSocket で1本つなぐ (GET /youtube?win=<n>。Funnel の 10000 番)。違うのは:
+        下り L  0〜3 番は Home (おすすめ) / Subscriptions (登録チャンネル) / Watch later / Liked videos、
+                そのあとに自分の再生リスト
+             I  曲名とアーティストの代わりに、動画の題名とチャンネル。1 つの一覧は YT_ITEMS 本まで
+             T  題名 TAB チャンネル TAB 長さ (秒。ライブなど分からなければ -1)
+             V  LCD の動画のコマ: 位置 (4 バイト) 時刻 (4 バイト。どちらもリトルエンディアン) 幅 (1 バイト)
+                マスの番号 (幅 x 2 バイト) 絵 x 種類数
+                位置は、そのコマの時刻の音が、このセッションで送った MP3 (A の中身) の何バイト目か。時刻は動画の頭からの ms。
+                幅は文字の数で、ふつうは 16 (LCD 全体)。横長の動画は上下を、縦長の動画 (ショート動画) は時計回りに 90 度回して
+                元の左右を切る。YOUTUBE_FULL=0 なら、横長の動画は 6 (左の 6x2 文字に収める)。
+                マスは上の行の左から。番号は絵の何番目 (0〜7) か、0x20 (空白) か 0xFF (全面黒)。
+                絵は 8 バイトずつで、自作文字と同じ形 (上の行から、下位 5 bit が左から右。1 が明るいドット)
+    yt-dlp と ffmpeg は、Pico がつないでいる間に今の動画の分だけ動かす。Pico が切れたら止め、つなぎ直して R が来たら
+    切れたところから鳴らす。
 """
 
 import argparse
 import asyncio
 import base64
 import bisect
+import collections
 import concurrent.futures
 import datetime
 import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import select
 import socket
 import ssl
 import stat
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -181,6 +217,28 @@ SP_POLL = 1.0              # go-librespot の状態を見る間隔 (秒)
 SP_HOLD_WAIT = 2.0         # Pico が一時停止を頼んでから、状態が「再生中」でも音を止めたままにする時間 (秒)
 SP_TIMEOUT = 90            # Pico から何も来なければ切る (秒)。Pico は 30 秒ごとに C を送ってくる
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# YouTube
+YT_FPS = 6                 # LCD に出す動画の 1 秒あたりのコマ数。YOUTUBE_FPS で変えられる
+YT_KBPS = 128              # Pico へ流す MP3 のビットレート。YOUTUBE_KBPS で変えられる
+YT_FULL_COLS = 16          # 動画は LCD 全体 (16x2 文字、80x16 ドット、実寸 57x11.5mm) に出す。はみ出た所は切る
+YT_COLS = 6                # YOUTUBE_FULL=0 のときは左の 6x2 文字 (30x16 ドット、実寸 20.7x11.5mm でほぼ 16:9) に収め、
+                           # 右に題名と時間を出す
+YT_ROWS = 2
+YT_GLYPHS = 8              # LCD の自作文字の数。空白 (0x20) と全面黒 (0xFF) のほかに出せる絵の種類
+YT_MARGIN = 6              # ドットの明るさがしきい値からこれだけ以内なら、前のコマのままにする (ちらつかないように)
+YT_KEEP_DIFF = 1           # 前のコマとこれだけのドットしか違わないマスは、前のままにする (自作文字の書き換えを減らす)
+YT_LISTS = (("Home", ":ytrec"), ("Subscriptions", ":ytsubs"), ("Watch later", ":ytwatchlater"),
+            ("Liked videos", ":ytfav"))  # 一覧の頭に置くもの。このあとに自分の再生リストが続く
+YT_PLAYLISTS = "https://www.youtube.com/feed/playlists"
+YT_ITEMS = 100             # 1 つの一覧から読む動画の数
+# 映像は一番小さいもの (144p 前後。LCD には 30x16 ドットしか出さない)、音は一番よいもの
+YT_FORMAT = "(wv[vcodec^=avc1][height>=120]/wv[height>=120]/wv)+ba/w[height>=120]/b"
+YT_BUF_MAX = 64 << 20      # まだ送っていない MP3 をメモリに溜める上限 (1 時間ほど)。超えたら ffmpeg を待たせる
+YT_TRIM = 1 << 20          # 送った MP3 は、これだけ溜まったら前から捨てる
+YT_FAIL_MAX = 3            # 見られない動画がこれだけ続いたら止める
+YT_PREFETCH_TTL = 3600     # 先に取っておいた次の動画の情報を使う期限 (秒)。URL は数時間で切れる
+YT_RESUME_BACK = 3000      # つなぎ直して続きから鳴らすとき、送った所からこれだけ (ms) 戻す (Pico に溜まっていた分)
 
 # ---------------- LCD 用の変換 ----------------
 
@@ -467,8 +525,8 @@ class SessionClosed(Exception):
     pass
 
 
-class SpotifySession:
-    """Pico との WebSocket 1本。送る側は、Pico がまだ読んでいない量を win 以下に抑える。
+class StreamSession:
+    """Pico との WebSocket 1本 (Spotify と YouTube で同じ)。送る側は、Pico がまだ読んでいない量を win 以下に抑える。
     音 (A) より、それ以外のフレーム (曲名や状態) を先に送る (音を送り続けると、状態の知らせがなかなか割り込めない)。
     wlock は書く順番をそろえる。cond は数と状態を守る"""
 
@@ -939,7 +997,7 @@ class Spotify:
 
     def serve(self, handler, win):
         """Pico との WebSocket が開いてから閉じるまで"""
-        s = SpotifySession(handler.connection, win)
+        s = StreamSession(handler.connection, win)
         with self.lock:
             old, self.session = self.session, s
         if old:
@@ -991,6 +1049,750 @@ class Spotify:
 SPOTIFY = None  # SPOTIFY_PIPE があれば main() が作る
 
 
+# ---------------- YouTube ----------------
+#
+# yt-dlp で自分のアカウントの一覧 (おすすめ・登録チャンネル・後で見る・高評価・自分の再生リスト) を読み、選んだ動画を
+# yt-dlp でダウンロードして、ffmpeg で MP3 と小さな灰色の動画にする。動画は LCD の 6x2 文字 (30x16 ドット) の白黒にして V で送る。
+# Pico との WebSocket もフレームの形も Spotify と同じで、V だけを足す。yt-dlp と ffmpeg は、Pico がつないでいる間に
+# 今の動画の分だけ動かす
+
+_BLANK, _FULL = (0,) * 8, (0x1F,) * 8  # LCD に元からある空白 (0x20) と全面黒 (0xFF) のマスの絵
+
+
+def yt_options(cookies, deno):
+    """yt-dlp に渡す設定。YouTube の JS を解くのに deno が要る (node なら 22 以上)"""
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True}
+    if cookies:
+        opts["cookiefile"] = cookies
+    if deno and os.path.exists(deno):
+        opts["js_runtimes"] = {"deno": {"path": deno}}
+    return opts
+
+
+def yt_reason(e):
+    """yt-dlp の例外を、Pico の LCD に出す短い理由にする"""
+    msg = str(e).lower()
+    for words, reason in ((("sign in", "login", "cookies", "401"), "youtube login"), (("private",), "private video"),
+                          (("members",), "members only"), (("premiere", "will begin", "upcoming"), "not started")):
+        if any(w in msg for w in words):
+            return reason
+    return "unavailable"
+
+
+def _dist(a, b):
+    """2 つのマスの絵で、違うドットの数"""
+    return sum((x ^ y).bit_count() for x, y in zip(a, b))
+
+
+def _otsu(values):
+    """明るさを 2 つに分けるしきい値 (大津の方法。分けた 2 つの平均の差が一番大きくなる所)"""
+    hist = [0] * 256
+    for v in values:
+        hist[v] += 1
+    total, total_sum = len(values), sum(i * h for i, h in enumerate(hist))
+    best, th, n0, sum0 = -1.0, 127, 0, 0
+    for t in range(255):
+        n0 += hist[t]
+        sum0 += t * hist[t]
+        if n0 == 0:
+            continue
+        if n0 == total:
+            break
+        d = sum0 / n0 - (total_sum - sum0) / (total - n0)
+        between = n0 * (total - n0) * d * d
+        if between > best:
+            best, th = between, t
+    return th
+
+
+def _merge_cells(cells):
+    """空白と全面黒のほかに YT_GLYPHS 種類より多い絵があれば、数の少ない絵を近い絵 (空白と全面黒も含む) に寄せていき、
+    YT_GLYPHS 種類にする。寄せる組は、変わるドットの数 (マスの数 x 違うドット) が一番少ないもの"""
+    counts = collections.Counter(g for g in cells if g not in (_BLANK, _FULL))
+    if len(counts) <= YT_GLYPHS:
+        return cells
+    # LCD 全体 (32 マス) では 20 回以上寄せるので、違うドットの数は先に数えておく
+    dist = {(a, b): _dist(a, b) for a in counts for b in list(counts) + [_BLANK, _FULL] if a != b}
+    into = {}
+    while len(counts) > YT_GLYPHS:
+        _, src, dst = min((counts[a] * d, a, b) for (a, b), d in dist.items()
+                          if a in counts and (b in counts or b in (_BLANK, _FULL)))
+        into[src] = dst
+        if dst in counts:
+            counts[dst] += counts[src]
+        del counts[src]
+    def final(g):
+        while g in into:
+            g = into[g]
+        return g
+    return [final(g) for g in cells]
+
+
+def yt_geometry(cols):
+    """cols 文字幅の動画の、ffmpeg に出させる灰色の大きさと、実寸の枠 (0.1mm 単位、すき間込み)。
+    灰色は 1 マスを 5 ドット + すき間 1 列、1 行を 8 ドット + すき間 1 行とする。LCD のドットは横 0.6mm・縦 0.7mm 間隔で、
+    すき間もほぼ 1 ドット分なので、この 1 つが 6x7 (0.1mm) になる。6 文字なら 35x17 と 210x119"""
+    w, h = cols * 6 - 1, YT_ROWS * 9 - 1
+    return (w, h), (w * 6, h * 7)
+
+
+def yt_art(codes, glyphs):
+    """マスの番号と絵を、端末に出す絵にする (# が点いているドット。マスの間は空ける)。幅はマスの数から"""
+    cols = len(codes) // YT_ROWS
+    lines = []
+    for cy in range(YT_ROWS):
+        for r in range(8):
+            row = []
+            for cx in range(cols):
+                c = codes[cy * cols + cx]
+                bits = 0 if c == 0x20 else 0x1F if c == 0xFF else glyphs[c][r]
+                row.append("".join("#" if bits >> (4 - k) & 1 else "." for k in range(5)))
+            lines.append(" ".join(row))
+        lines.append("")
+    return "\n".join(lines)
+
+
+class LcdVideo:
+    """動画のコマ (ffmpeg が出す yt_geometry() の灰色) を、LCD の cols x YT_ROWS 文字の絵にする。
+    2 値化は大津のしきい値にする。網目のディザより形が分かりやすく、空白や全面黒のマスが増えるので自作文字も足りやすい。
+    前のコマを覚えておき、ちらつきを抑える"""
+
+    def __init__(self, cols):
+        self.cols = cols
+        self.th = None     # 前のコマのしきい値
+        self.bits = None   # 前のコマのドット (行ごと)
+        self.cells = None  # 前のコマのマスの絵
+
+    def frame(self, gray):
+        """灰色 1 コマ -> (マスの番号, 絵のリスト)。マスは上の行の左から。番号は絵の何番目か、0x20 (空白) か 0xFF (全面黒)。
+        絵は上の行から 8 バイトで、下位 5 bit が左から右 (LCD の自作文字と同じ)。明るいドットを 1 にする"""
+        (w, h), _ = yt_geometry(self.cols)
+        # すき間の列 (6 列ごと) と行 (9 行目) を抜いて、6 文字なら 30x16、16 文字なら 80x16 にする
+        dots = [[gray[y * w + x] for x in range(w) if x % 6 != 5] for y in range(h) if y != 8]
+        flat = [v for row in dots for v in row]
+        t = _otsu(flat) if max(flat) - min(flat) >= 32 else 127  # ほとんど一色なら、明るいか暗いかで決める
+        # しきい値は前のコマから少しずつ動かす。場面が変わったときはすぐ合わせる
+        self.th = t if self.th is None or abs(t - self.th) > 48 else (2 * self.th + t) / 3
+        prev = self.bits
+        self.bits = [[prev[y][x] if prev and abs(v - self.th) <= YT_MARGIN else int(v > self.th)
+                      for x, v in enumerate(row)] for y, row in enumerate(dots)]
+        cells = []
+        for i in range(self.cols * YT_ROWS):
+            cy, cx = divmod(i, self.cols)
+            g = tuple(sum(self.bits[cy * 8 + r][cx * 5 + k] << (4 - k) for k in range(5)) for r in range(8))
+            if self.cells and _dist(g, self.cells[i]) <= YT_KEEP_DIFF:
+                g = self.cells[i]
+            cells.append(g)
+        self.cells = cells = _merge_cells(cells)
+        glyphs, codes = [], []
+        for g in cells:
+            if g == _BLANK:
+                codes.append(0x20)
+            elif g == _FULL:
+                codes.append(0xFF)
+            else:
+                if g not in glyphs:
+                    glyphs.append(g)
+                codes.append(glyphs.index(g))
+        return bytes(codes), glyphs
+
+
+class YtStream:
+    """動画 1 本を MP3 (ffmpeg の pipe:1) と灰色の小さな動画 (もう 1 本のパイプ) にして、どちらもメモリに溜める。
+    音と映像は yt-dlp がダウンロードしてパイプで ffmpeg に渡す。ffmpeg に URL を直接読ませると、dynabook では
+    403 で断られた (手元の PC では通った)。yt-dlp は決まった大きさに区切って頼むので通る。
+    yt-dlp も ffmpeg も実時間の十数倍で進むので、送るのに合わせて待たせない (一時停止しても YouTube との接続が止まらない)。
+    cond は呼ぶ側 (YouTube) と同じものを使い、溜まるたびに知らせる"""
+
+    def __init__(self, info, kbps, fps, cond, start_ms=0, full=True):
+        import yt_dlp
+        self.info, self.kbps, self.fps, self.cond = info, kbps, fps, cond
+        self.start_ms = start_ms  # 動画のどこから鳴らすか (つなぎ直して続きから鳴らすとき)
+        self.mp3 = bytearray()
+        self.mp3_base = 0         # mp3[0] が、この動画の MP3 の何バイト目か (送った分は前から捨てる)
+        self.frames = collections.deque()  # (動画の頭からの ms, 12 マスの番号, 絵) を古い順に
+        self.audio_done = False
+        self.closed = False
+
+        fmts = info.get("requested_formats") or [info]
+        video = next((f for f in fmts if f.get("vcodec") not in (None, "none")), None)
+        audio = next((f for f in fmts if f.get("acodec") not in (None, "none")), fmts[0])
+        srcs = [audio] if video is None or video is audio else [audio, video]
+        # 調べた情報 (URL を含む) をファイルにして yt-dlp に読ませる。動画を調べ直さないので、すぐダウンロードが始まる
+        fd, self.info_json = tempfile.mkstemp(prefix="espoke-yt-", suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(yt_dlp.YoutubeDL.sanitize_info(info), f)
+        self.downloads, inputs = [], []
+        for f in srcs:
+            r, w = os.pipe()
+            self.downloads.append(subprocess.Popen(
+                [sys.executable, "-m", "yt_dlp", "--load-info-json", self.info_json, "-f", f["format_id"], "-o", "-",
+                 "--quiet", "--no-warnings", "--no-progress"], stdin=subprocess.DEVNULL, stdout=w))
+            os.close(w)
+            inputs.append(r)
+        # 続きから鳴らすときは、出す側で頭を捨てる (パイプは飛ばして読めない)
+        skip = ["-ss", "%.3f" % (start_ms / 1000)] if start_ms else []
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        for r in inputs:
+            cmd += ["-i", "pipe:%d" % r]
+        cmd += ["-map", "0:a:0"] + skip + ["-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "%dk" % kbps,
+                                         "-id3v2_version", "0", "-write_xing", "0", "-f", "mp3", "pipe:1"]
+        fds = list(inputs)
+        # 動画は LCD 全体に出す。横長の動画は上下を、縦長の動画 (ショート動画) は時計回りに 90 度回して (動画の上が右)
+        # 元の左右を切り、中央の帯だけにする。full が偽なら、横長の動画は左の 6x2 文字に収める
+        portrait = video is not None and (video.get("height") or 0) > (video.get("width") or 0) > 0
+        self.cols = YT_FULL_COLS if video and (full or portrait) else YT_COLS
+        if video:
+            # 灰色にしてから縮める (yuv のままだと、奇数の幅で pad が失敗する)。実寸の枠に合わせて (LCD 全体なら、枠を
+            # 覆うように広げてはみ出た所を切り、6x2 文字なら枠に収めて) から、すき間込みのドットの数に平均して縮める
+            vr, vw = os.pipe()
+            gray, box = yt_geometry(self.cols)
+            fit = (("transpose=1," if portrait else "") +
+                   "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (box + box)
+                   if self.cols == YT_FULL_COLS else
+                   "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:-1:-1" % (box + box))
+            vf = "fps=%d,format=gray,%s,scale=%d:%d:flags=area" % ((fps, fit) + gray)
+            cmd += ["-map", "%d:v:0" % (len(srcs) - 1)] + skip + ["-vf", vf, "-f", "rawvideo", "pipe:%d" % vw]
+            fds.append(vw)
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, pass_fds=fds)
+        for r in inputs:
+            os.close(r)
+        self.video_done = not video
+        if video:
+            os.close(vw)
+            threading.Thread(target=self._read_video, args=(vr,), daemon=True).start()
+        threading.Thread(target=self._read_audio, daemon=True).start()
+
+    def _read_audio(self):
+        try:
+            while True:
+                data = self.proc.stdout.read1(65536)
+                if not data:
+                    break
+                with self.cond:
+                    self.mp3 += data
+                    self.cond.notify_all()
+                    # 送るのが追いつかないほど溜まったら (長いライブなど)、ffmpeg を待たせる
+                    self.cond.wait_for(lambda: self.closed or len(self.mp3) < YT_BUF_MAX)
+                    if self.closed:
+                        break
+        except (OSError, ValueError):
+            pass
+        finally:
+            with self.cond:
+                self.audio_done = True
+                self.cond.notify_all()
+
+    def _read_video(self, fd):
+        (w, h), _ = yt_geometry(self.cols)
+        conv, size = LcdVideo(self.cols), w * h
+        try:
+            with os.fdopen(fd, "rb") as f:
+                k = 0
+                while not self.closed:
+                    gray = f.read(size)
+                    if len(gray) < size:
+                        break
+                    codes, glyphs = conv.frame(gray)
+                    with self.cond:
+                        self.frames.append((self.start_ms + k * 1000 // self.fps, codes, glyphs))
+                        self.cond.notify_all()
+                    k += 1
+        except (OSError, ValueError):
+            pass
+        finally:
+            with self.cond:
+                self.video_done = True
+                self.cond.notify_all()
+
+    def _next(self, sent):
+        """MP3 を sent バイト送ったあと、次に送れる MP3 の量と、その終わりの時刻 (ms)。まだ溜まっていなければ None。
+        コマはその時刻の音より先に送るので、その時刻までのコマが出そろうのも待つ。cond を持って呼ぶ"""
+        n = min(len(self.mp3) - (sent - self.mp3_base), SP_FRAME)
+        if n < SP_FRAME and not self.audio_done:
+            return None
+        end = self.start_ms + (sent + n) * 8 // self.kbps
+        if not self.video_done and (not self.frames or self.frames[-1][0] <= end):
+            return None
+        return n, end
+
+    def ready(self, sent):
+        return self._next(sent) is not None
+
+    def take(self, sent):
+        """次に送るもの: (その MP3 の時刻までのコマ, MP3)。終わりなら ([], b"")。ready() のあとに cond を持って呼ぶ"""
+        n, end = self._next(sent)
+        frames = []
+        while self.frames and self.frames[0][0] <= end:
+            frames.append(self.frames.popleft())
+        pos = sent - self.mp3_base
+        return frames, bytes(self.mp3[pos:pos + n])
+
+    def trim(self, sent):
+        """送り終えた MP3 を前から捨てる。cond を持って呼ぶ"""
+        if sent - self.mp3_base >= YT_TRIM:
+            del self.mp3[:sent - self.mp3_base]
+            self.mp3_base = sent
+            self.cond.notify_all()  # 溜める上限で待っている読む側を起こす
+
+    def close(self):
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+        for p in [self.proc] + self.downloads:
+            p.kill()
+            p.wait()
+        self.proc.stdout.close()
+        try:
+            os.remove(self.info_json)
+        except OSError:
+            pass
+
+
+class YouTube:
+    """YouTube の一覧と再生の操作と、その音と動画を Pico に流すところ。Pico とのセッションは 1 本だけ"""
+
+    def __init__(self, cookies, deno, kbps, fps, full):
+        import yt_dlp  # 使うときだけ要る
+        self.yt_dlp = yt_dlp
+        self.opts = yt_options(cookies, deno)
+        self.kbps, self.fps, self.full = kbps, fps, full
+        self.ydl_lock = threading.Lock()  # yt-dlp は 1 つずつ使う (cookie のファイルを同時に書かないように)
+        self.ops = concurrent.futures.ThreadPoolExecutor(1)       # 再生の操作は 1 つずつ
+        self.list_ops = concurrent.futures.ThreadPoolExecutor(1)  # 一覧を読むのと、次の動画を先に調べるの
+        self.cache = {}  # 一覧の URL -> (読んだ時刻, [(動画の URL, 題名, チャンネル, 長さ)])
+        self.cache_lock = threading.Lock()
+        self.lock = threading.Lock()
+        self.session = None
+        # 再生の様子。cond で守る
+        self.cond = threading.Condition()
+        self.lists = []          # [(名前, URL)]。L で送った順
+        self.stream = None       # 鳴らしている YtStream
+        self.gen = 0             # 動画が変わるたびに増やす。送る側はこれを見て Z を送る
+        self.holding = False     # 一時停止中。音もコマも送らない
+        self.cur = (None, -1)    # 鳴らしている (一覧の URL, 動画の番号)
+        self.state = "stopped"
+        self.shuffle = False
+        self.history = []        # 前に鳴らした動画の番号 (前の動画へ戻るとき)
+        self.next_pick = -1      # シャッフル中に次に鳴らす動画の番号 (先に調べておくため、先に決める)
+        self.prefetched = None   # (一覧の URL, 動画の番号, 調べた時刻, yt-dlp の情報)
+        self.sent_ms = 0         # 今の動画の、送った所の時刻 (ms)
+        self.resume_ms = 0       # セッションが切れたときの所。R で続きから鳴らす
+
+    # --- yt-dlp ---
+
+    def _extract(self, url, **extra):
+        with self.ydl_lock, self.yt_dlp.YoutubeDL(dict(self.opts, **extra)) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    def _flat(self, url, limit):
+        """一覧の中身 [(URL, 題名, チャンネル, 長さ)]。動画は開かずに一覧だけ読む。SP_TRACKS_TTL の間覚えておく"""
+        with self.cache_lock:
+            hit = self.cache.get(url)
+        if hit and time.monotonic() - hit[0] < SP_TRACKS_TTL:
+            return hit[1]
+        info = self._extract(url, extract_flat="in_playlist", playlistend=limit)
+        items = []
+        for e in info.get("entries") or []:
+            u = e and (e.get("url") or e.get("id") and "https://www.youtube.com/watch?v=" + e["id"])
+            if u:
+                items.append((u, e.get("title") or "", e.get("channel") or e.get("uploader") or "", e.get("duration")))
+        with self.cache_lock:
+            self.cache[url] = (time.monotonic(), items)
+        return items
+
+    def _resolve(self, url):
+        """動画の情報 (音と映像の URL を含む)。見られなければ None と理由"""
+        try:
+            return self._extract(url, format=YT_FORMAT), None
+        except Exception as e:  # yt-dlp の DownloadError など
+            sys.stderr.write("youtube: %s: %s\n" % (url, e))
+            return None, yt_reason(e)
+
+    # --- 操作 ---
+
+    def _error(self, s, text):
+        try:
+            s.send(b"E", text.encode())
+        except SessionClosed:
+            pass
+
+    def _status(self, s):
+        """状態 (S) を知らせる。形は Spotify と同じ"""
+        with self.cond:
+            url, i = self.cur
+            n = next((k for k, (_, u) in enumerate(self.lists) if u == url), -1)
+            text = "%s\t%d\t%d\t%d\t%d" % (self.state, self.shuffle, n, s.cmds, i if n >= 0 else -1)
+        s.send(b"S", text.encode())
+
+    def _stop_stream(self):
+        """鳴らしている動画をやめる。送る側は Z を送って、次の動画を待つ"""
+        with self.cond:
+            old, self.stream = self.stream, None
+            self.gen += 1
+            self.cond.notify_all()
+        if old:
+            old.close()
+
+    def _pick_next(self, n_items, i):
+        """i の次に鳴らす番号。シャッフル中はランダム (先に決めておいたもの)。一覧の終わりなら -1"""
+        with self.cond:
+            if self.shuffle:
+                if not 0 <= self.next_pick < n_items or self.next_pick == i:
+                    self.next_pick = random.choice([k for k in range(n_items) if k != i] or [i])
+                return self.next_pick
+        return i + 1 if i + 1 < n_items else -1
+
+    def _start(self, s, url, i, start_ms=0):
+        """一覧 url の i 番目の動画を鳴らし始める。見られない動画は飛ばして次へ (YT_FAIL_MAX 本まで)"""
+        items = self._flat(url, YT_ITEMS)
+        for _ in range(YT_FAIL_MAX):
+            self._stop_stream()
+            with self.cond:
+                self.cur, self.state, self.holding, self.next_pick = (url, i), "playing", False, -1
+                pre, self.prefetched = self.prefetched, None
+            video, title, channel, duration = items[i]
+            s.send(b"T", to_lcd(title, SP_TITLE_MAX) + b"\t" + to_lcd(channel, SP_TITLE_MAX)
+                   + b"\t%d" % (duration or -1))
+            self._status(s)
+            if pre and pre[:2] == (url, i) and time.monotonic() - pre[2] < YT_PREFETCH_TTL:
+                info, why = pre[3], None
+            else:
+                info, why = self._resolve(video)
+            if s.closed:
+                return
+            if info:
+                break
+            self._error(s, why)
+            i = self._pick_next(len(items), i)
+            if i < 0:
+                break
+        else:
+            info = None
+        if not info:
+            with self.cond:
+                self.state = "stopped"
+            return self._status(s)
+        st = YtStream(info, self.kbps, self.fps, self.cond, start_ms, self.full)
+        with self.cond:
+            self.stream, self.sent_ms = st, start_ms
+            self.cond.notify_all()
+        sys.stderr.write("youtube: play %s (%s)\n" % (info.get("title"), "+".join(
+            f.get("format_id", "?") for f in info.get("requested_formats") or [info])))
+        # 題名とチャンネルは、一覧のものより詳しいことがある。長さは一覧に無いことがある (ライブは -1)
+        s.send(b"T", to_lcd(info.get("title") or title, SP_TITLE_MAX) + b"\t"
+               + to_lcd(info.get("channel") or channel, SP_TITLE_MAX)
+               + b"\t%d" % (-1 if info.get("is_live") else int(info.get("duration") or -1)))
+        # 次の動画を先に調べておく (切り替えの待ちを短くする)
+        nxt = self._pick_next(len(items), i)
+        if nxt >= 0:
+            def prefetch():
+                info, _ = self._resolve(items[nxt][0])
+                if info:
+                    with self.cond:
+                        if self.cur[0] == url:
+                            self.prefetched = (url, nxt, time.monotonic(), info)
+            self.list_ops.submit(prefetch)
+
+    def _play(self, s, n, i, shuffle):
+        """n 番目の一覧を i 番目の動画から鳴らす。shuffle ならシャッフルを入れて、ランダムな動画から"""
+        url = self.lists[n][1]
+        try:
+            items = self._flat(url, YT_ITEMS)
+        except Exception as e:
+            sys.stderr.write("youtube: list %d: %s\n" % (n, e))
+            return self._error(s, yt_reason(e))
+        if not items:
+            return self._error(s, "no videos")
+        with self.cond:
+            self.history = []
+            if shuffle:
+                self.shuffle = True
+        self._start(s, url, random.randrange(len(items)) if shuffle else min(i, len(items) - 1))
+
+    def _skip(self, s, step):
+        """次 (step 1) か前 (step -1) の動画へ。次はシャッフル中ならランダム、一覧の終わりなら頭へ。前は鳴らした順に戻る"""
+        url, i = self.cur
+        if url is None:
+            return
+        items = self._flat(url, YT_ITEMS)
+        with self.cond:
+            back = self.history.pop() if step < 0 and self.history else None
+        if step > 0:
+            nxt = self._pick_next(len(items), i)
+            nxt = 0 if nxt < 0 else nxt
+            with self.cond:
+                self.history = (self.history + [i])[-SP_LISTS:]
+        else:
+            nxt = back if back is not None else (i - 1) % len(items)
+        self._start(s, url, nxt)
+
+    def _ended(self, s, gen):
+        """動画を最後まで送った。一覧の次へ (シャッフル中はランダム)。一覧の終わりなら止める"""
+        with self.cond:
+            if gen != self.gen:
+                return  # もう別の動画にした
+        url, i = self.cur
+        nxt = self._pick_next(len(self._flat(url, YT_ITEMS)), i)
+        if nxt < 0:
+            self._stop_stream()
+            with self.cond:
+                self.state = "stopped"
+            return self._status(s)
+        with self.cond:
+            self.history = (self.history + [i])[-SP_LISTS:]
+        self._start(s, url, nxt)
+
+    def _hold(self, s, on):
+        """一時停止 / 再開。送る側は次のフレームから送らない / 送る。状態の知らせは送らない
+        (命令を読むスレッドから呼ぶので、送る窓が空くのを待つと、窓を空ける C を読めなくなる)"""
+        with self.cond:
+            self.holding = on
+            if self.stream:
+                self.state = "paused" if on else "playing"
+            self.cond.notify_all()
+
+    def _resume(self, s):
+        """再開。セッションが切れて動画をやめていたら、切れたときの所から鳴らし直す"""
+        with self.cond:
+            restart = self.stream is None and self.cur[0] is not None and self.state != "stopped"
+            url, i = self.cur
+        if restart:
+            self._start(s, url, i, self.resume_ms)
+        else:
+            self._hold(s, False)
+            self._status(s)
+
+    def _toggle_shuffle(self, s):
+        with self.cond:
+            self.shuffle = not self.shuffle
+            self.next_pick = -1
+            self.prefetched = None  # シャッフルでない次の動画を調べていた
+        self._status(s)
+
+    def _end_session(self, s):
+        """Pico が切れた。動画をやめ (「並列で他のことはしない」)、つなぎ直したら続きから鳴らせるように所を覚えておく。
+        次につないだときは一時停止として知らせ、再開 (R) で続きから鳴らす"""
+        with self.cond:
+            self.resume_ms = max(0, self.sent_ms - YT_RESUME_BACK)
+            if self.state != "stopped":
+                self.state = "paused"
+        self._stop_stream()
+
+    def _command(self, s, data):
+        kind, arg = data[:1], data[1:].decode("ascii", "replace")
+        if kind == b"C":
+            if arg.isdigit():
+                s.ack(int(arg))
+            return
+        sys.stderr.write("youtube: %s\n" % data.decode("ascii", "replace"))
+        if kind in (b"K", b"R", b"P", b"U", b"N", b"B"):
+            s.cmds += 1
+        n, _, i = arg.partition(":")
+        n = int(n) if n.isdigit() and int(n) < len(self.lists) else -1
+        i = int(i) if i.isdigit() else -1
+        if kind == b"K":
+            self._hold(s, True)  # 今すぐ止める
+            self._submit(self._status, s)
+        elif kind == b"R":
+            self._submit(self._resume, s)
+        elif kind == b"P" and n >= 0:
+            self._submit(self._play, s, n, max(i, 0), False)
+        elif kind == b"U" and n >= 0:
+            self._submit(self._play, s, n, 0, True)
+        elif kind == b"Q" and n >= 0 and i >= 0:
+            self.list_ops.submit(self._send_items, s, n, i)
+        elif kind == b"N":
+            self._submit(self._skip, s, 1)
+        elif kind == b"B":
+            self._submit(self._skip, s, -1)
+        elif kind == b"F":
+            self._submit(self._toggle_shuffle, s)
+
+    def _submit(self, fn, *args):
+        """操作を順に1つずつする。失敗したらログに出す (投げっぱなしだと例外が消える)"""
+        def done(f):
+            if f.exception() and not isinstance(f.exception(), SessionClosed):
+                sys.stderr.write("youtube: %s: %r\n" % (fn.__name__, f.exception()))
+        self.ops.submit(fn, *args).add_done_callback(done)
+
+    # --- Pico へ送る ---
+
+    def _send_lists(self, s):
+        """一覧の一覧を送る。頭は YT_LISTS (おすすめ・登録チャンネル・後で見る・高評価)、そのあとに自分の再生リスト。
+        再生リストを読めなければ、その理由 (Pico に出す) を返す"""
+        lists, why = list(YT_LISTS), None
+        try:
+            lists += [(title, url) for url, title, _, _ in self._flat(YT_PLAYLISTS, SP_LISTS - len(YT_LISTS))
+                      if "list=WL" not in url and "list=LL" not in url]
+        except Exception as e:
+            sys.stderr.write("youtube: playlists: %s\n" % e)
+            why = yt_reason(e)
+        with self.cond:
+            self.lists = lists
+        for i, (name, _) in enumerate(lists):
+            s.send(b"L", b"%d\t%d\t" % (i, len(lists)) + (to_lcd(name, SP_NAME_MAX) or b"?"))
+        return why
+
+    def _send_items(self, s, n, start):
+        """n 番目の一覧の、start 番目から SP_PAGE 本の題名とチャンネルを I で送る (Spotify の曲の一覧と同じ形)"""
+        try:
+            items = self._flat(self.lists[n][1], YT_ITEMS)
+            if not items:
+                return s.send(b"I", b"%d\t-1\t0\t" % n)
+            for i in range(start, min(start + SP_PAGE, len(items))):
+                _, title, channel, _ = items[i]
+                s.send(b"I", b"%d\t%d\t%d\t" % (n, i, len(items)) + (to_lcd(title, SP_TRACK_MAX) or b"?")
+                       + b"\t" + to_lcd(channel, SP_ARTIST_MAX))
+        except SessionClosed:
+            pass
+        except Exception as e:
+            sys.stderr.write("youtube: list %d: %s\n" % (n, e))
+            self._error(s, yt_reason(e))
+
+    def _send_av(self, s):
+        """鳴らしている動画の MP3 と LCD のコマを送る。コマは、その時刻の音より先に送る。
+        コマには、その時刻の音が、このセッションで送った MP3 の何バイト目かを付ける (Pico はそこを鳴らすときに出す。
+        動画の切れ目や一時停止や、Pico が読み捨てた分があっても、Pico が受け取った MP3 のバイト数で数えるので合う)"""
+        gen, sent, base, ended = None, 0, 0, False
+
+        def ready():
+            st = self.stream
+            return s.closed or self.gen != gen or (st is not None and not self.holding and not ended and st.ready(sent))
+
+        while not s.closed:
+            with self.cond:
+                self.cond.wait_for(ready, 1)
+                if s.closed:
+                    break
+                new = self.gen != gen
+                if new:
+                    gen, sent, ended = self.gen, 0, False
+                elif not ready() or self.stream is None or self.holding or ended:
+                    continue
+                else:
+                    st = self.stream
+                    frames, data = st.take(sent)
+            if new:
+                s.send(b"Z")  # これより前の音は前の動画 (Pico が曲送りを頼んだのなら、Pico はそれまでを捨てる)
+                base = s.audio
+                continue
+            if not data:
+                ended = True
+                self._submit(self._ended, s, gen)
+                continue
+            for ms, codes, glyphs in frames:
+                offset = (base + (ms - st.start_ms) * self.kbps // 8) & 0xFFFFFFFF
+                s.send(b"V", struct.pack("<IIB", offset, ms, st.cols) + codes + b"".join(bytes(g) for g in glyphs))
+            if not s.send(b"A", data, held=lambda: self.holding or self.gen != gen):
+                continue  # 一時停止か、別の動画にした。続きは次に送る
+            s.audio += len(data)
+            sent += len(data)
+            with self.cond:
+                st.trim(sent)
+                self.sent_ms = st.start_ms + sent * 8 // self.kbps
+
+    def _heartbeat(self, s):
+        """何も送っていなければ HEARTBEAT 秒ごとに H を送る"""
+        while not s.wait_closed(5):
+            if time.monotonic() - s.last_send >= HEARTBEAT:
+                s.send(b"H")
+
+    def serve(self, handler, win):
+        """Pico との WebSocket が開いてから閉じるまで"""
+        s = StreamSession(handler.connection, win)
+        with self.lock:
+            old, self.session = self.session, s
+        if old:
+            old.close()
+        sys.stderr.write("youtube: session start win=%d\n" % win)
+
+        def run(target):
+            def body():
+                try:
+                    target(s)
+                except SessionClosed:
+                    pass
+                except Exception as e:  # 送る側が死んだら全体を閉じる (Pico はつなぎ直してくる)
+                    sys.stderr.write("youtube: %s: %r\n" % (target.__name__, e))
+                    s.close()
+            threading.Thread(target=body, daemon=True).start()
+
+        handler.connection.settimeout(SP_TIMEOUT)
+        try:
+            why = self._send_lists(s)
+            self._status(s)
+            if why:
+                self._error(s, why)  # 状態 (S) のあとに送る。Pico は S で知らせの文字を消す
+            run(self._send_av)
+            run(self._heartbeat)
+            while not s.closed:
+                op, data = ws_read(s.read)
+                if op is None or op == 0x8:
+                    break
+                if op == 0x9:
+                    s.send(b"", data, 0xA)  # ping には pong を返す
+                elif op == 0x2 and data:
+                    self._command(s, data)
+        except (OSError, EOFError, SessionClosed) as e:
+            if not s.closed:
+                sys.stderr.write("youtube: %r\n" % e)
+        finally:
+            s.close()
+            with self.lock:
+                last = self.session is s
+                if last:
+                    self.session = None
+            if last:
+                self._submit(self._end_session, s)
+            sys.stderr.write("youtube: session end (%d KB audio, unread max %d/%d)\n"
+                             % (s.audio // 1024, s.unread_max, win))
+
+
+YOUTUBE = None  # YOUTUBE_COOKIES があれば main() が作る
+
+
+def youtube_test(url, cookies, deno, kbps, fps, full):
+    """Pico を使わずに、url の動画を LCD のコマにして端末に出す (# が点いているドット)。2 値化の具合と、
+    実時間より速く作れるかを見る。端末ならその速さで描き直し、パイプに流すなら待たずに全部出す"""
+    import yt_dlp
+    t0 = time.monotonic()
+    with yt_dlp.YoutubeDL(dict(yt_options(cookies, deno), format=YT_FORMAT)) as ydl:
+        info = ydl.extract_info(url, download=False)
+    print("%s / %s (%s 秒)。調べるのに %.1f 秒。形式 %s" % (
+        info.get("title"), info.get("channel"), info.get("duration"), time.monotonic() - t0,
+        "+".join(f.get("format_id", "?") for f in info.get("requested_formats") or [info])))
+    cond = threading.Condition()
+    st = YtStream(info, kbps, fps, cond, full=full)
+    tty = sys.stdout.isatty()
+    t1, count, glyph_sum, full = time.monotonic(), 0, 0, 0
+    try:
+        while True:
+            with cond:
+                cond.wait_for(lambda: st.frames or st.video_done)
+                if not st.frames:
+                    break
+                ms, codes, glyphs = st.frames.popleft()
+                st.mp3_base += len(st.mp3)  # MP3 は捨てる
+                del st.mp3[:]
+                cond.notify_all()
+            count += 1
+            glyph_sum += len(glyphs)
+            full += len(glyphs) == YT_GLYPHS
+            if tty:
+                time.sleep(max(0, t1 + ms / 1000 - time.monotonic()))
+                print("\x1b[H\x1b[J%d:%02d\n%s" % (ms // 60000, ms // 1000 % 60, yt_art(codes, glyphs)), flush=True)
+            else:
+                print("%d ms (%d glyphs)\n%s" % (ms, len(glyphs), yt_art(codes, glyphs)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        st.close()
+    el = time.monotonic() - t1
+    print("%d コマ (%.1f 秒分) を %.1f 秒で作った。自作文字は平均 %.1f 個、%d 個使い切ったコマが %d%%" % (
+        count, count / fps, el, glyph_sum / max(count, 1), YT_GLYPHS, 100 * full // max(count, 1)))
+
+
 # ---------------- HTTP ----------------
 
 def stream_after(url):
@@ -1023,9 +1825,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
-        if url.path == "/spotify" and SPOTIFY:
+        service = {"/spotify": SPOTIFY, "/youtube": YOUTUBE}.get(url.path)
+        if service:
             if self._authorized():
-                self._spotify(url)
+                self._websocket(url, service)
             return
         if url.path != "/stream":
             return self._text("espoke discord relay\n" if url.path == "/" else "not found\n",
@@ -1034,8 +1837,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._stream(stream_after(url))
 
-    def _spotify(self, url):
-        """WebSocket に切り替えて、Spotify の音と操作をやりとりする"""
+    def _websocket(self, url, service):
+        """WebSocket に切り替えて、Spotify か YouTube (service) の音と操作をやりとりする"""
         key = self.headers.get("Sec-WebSocket-Key", "")
         if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
             return self._text("websocket only\n", 400)
@@ -1046,7 +1849,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                           "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
         self.close_connection = True
-        SPOTIFY.serve(self, win)
+        service.serve(self, win)
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
@@ -1362,10 +2165,10 @@ def funnel_host():
 
 
 def main():
-    global KEY, SPOTIFY
+    global KEY, SPOTIFY, YOUTUBE
 
     ap = argparse.ArgumentParser(
-        description="espoke 用: Discord の発言を LCD 用の半角カナにして Pico WH へ流す。Spotify の音も流す")
+        description="espoke 用: Discord の発言を LCD 用の半角カナにして Pico WH へ流す。Spotify と YouTube の音も流す")
     ap.add_argument("--port", type=int, default=8001)
     ap.add_argument("--env", default="~/espoke/relay.env",
                     help="DISCORD_TOKEN などを書いたファイル (無ければ環境変数だけを見る)")
@@ -1375,18 +2178,28 @@ def main():
     how.add_argument("--notify", action="store_true",
                      help="Bot を使わず、同じ PC で動かす Discord アプリの通知から受け取る")
     ap.add_argument("--convert", metavar="TEXT", help="TEXT を変換して表示し、終わる")
+    ap.add_argument("--youtube-test", metavar="URL",
+                    help="URL の YouTube の動画を、Pico の LCD に出すコマにして端末に出し、終わる")
     args = ap.parse_args()
 
     if args.convert is not None:
         print(to_lcd(args.convert, TEXT_MAX).decode("cp932"))
         return
 
-    # ログにリダイレクトしても起動メッセージがすぐ出るようにする
-    sys.stdout.reconfigure(line_buffering=True)
-
     env = os.path.expanduser(args.env)
     if os.path.exists(env):
         load_env(env)
+    cookies = os.path.expanduser(os.environ.get("YOUTUBE_COOKIES", ""))
+    deno = os.path.expanduser(os.environ.get("YOUTUBE_DENO", "~/espoke/bin/deno"))
+    yt_kbps = int(os.environ.get("YOUTUBE_KBPS", YT_KBPS))
+    yt_fps = int(os.environ.get("YOUTUBE_FPS", YT_FPS))
+    yt_full = os.environ.get("YOUTUBE_FULL", "1") != "0"
+    if args.youtube_test:
+        return youtube_test(args.youtube_test, cookies, deno, yt_kbps, yt_fps, yt_full)
+
+    # ログにリダイレクトしても起動メッセージがすぐ出るようにする
+    sys.stdout.reconfigure(line_buffering=True)
+
     KEY = os.environ.get("RELAY_KEY", "")
     if not KEY:
         sys.exit("RELAY_KEY が設定されていない (%s か環境変数に書く)" % env)
@@ -1416,6 +2229,17 @@ def main():
         except ImportError:
             sys.exit("Spotify には lameenc が要る (~/espoke/venv/bin/pip install lameenc)")
         print("spotify: %s から %s kbps の MP3 にして流す" % (pipe, SPOTIFY.kbps))
+    if cookies:
+        try:
+            YOUTUBE = YouTube(cookies, deno, yt_kbps, yt_fps, yt_full)
+        except ImportError:
+            sys.exit('YouTube には yt-dlp が要る (~/espoke/venv/bin/pip install "yt-dlp[default]")')
+        if not os.path.exists(cookies):
+            print("youtube: %s が無い (ブラウザの cookie を書き出して置く)" % cookies)
+        if not os.path.exists(deno):
+            print("youtube: %s が無い (YouTube の JS を解くのに deno が要る)" % deno)
+        print("youtube: %s kbps の MP3 と、%d コマ/秒の LCD の動画 (%s) にして流す"
+              % (yt_kbps, yt_fps, "LCD 全体" if yt_full else "横長の動画は左の 6x2 文字"))
 
     # Funnel が 127.0.0.1 へ中継してくるので、外には直接開けない
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -1423,15 +2247,15 @@ def main():
     print("  http://127.0.0.1:%d/" % args.port)
     print()
     print("公開していなければ:  tailscale funnel --bg --https=%d %d" % (FUNNEL_PORT, args.port))
-    if SPOTIFY:
-        # Spotify は TLS をここで受ける。証明書は tailscale cert で Funnel と同じものを取り出す
+    if SPOTIFY or YOUTUBE:
+        # Spotify と YouTube は TLS をここで受ける。証明書は tailscale cert で Funnel と同じものを取り出す
         tls_port = int(os.environ.get("SPOTIFY_TLS_PORT", SPOTIFY_TLS_PORT))
         cert, key = (os.path.join(os.path.dirname(env), name) for name in ("tls.crt", "tls.key"))
         if funnel_host():
             threading.Thread(target=keep_cert, args=(host, cert, key), daemon=True).start()
         tls_server = TLSHTTPServer(("127.0.0.1", tls_port), Handler, cert, key)
         threading.Thread(target=tls_server.serve_forever, daemon=True).start()
-        print("Spotify も:          tailscale funnel --bg --tcp=%d tcp://127.0.0.1:%d" % (SPOTIFY_FUNNEL_PORT, tls_port))
+        print("Spotify と YouTube も: tailscale funnel --bg --tcp=%d tcp://127.0.0.1:%d" % (SPOTIFY_FUNNEL_PORT, tls_port))
     print()
     print("espoke/arduino_secrets.h に書く:")
     print('  #define RELAY_HOST "%s"' % host)

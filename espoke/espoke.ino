@@ -1,5 +1,6 @@
 /*
- * espoke — microSD の MP3 を Bluetooth イヤホンで鳴らし、Discord のメッセージをやりとりする。LCD でゲームも遊べる
+ * espoke — microSD の MP3 を Bluetooth イヤホンで鳴らし、Discord のメッセージをやりとりする。Spotify と YouTube も
+ * 中継を通して聞ける (YouTube は LCD に小さな白黒の動画も出す)。LCD でゲームも遊べる
  *
  * 対応ボード: Raspberry Pi Pico WH
  * FQBN: rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble
@@ -11,7 +12,8 @@
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
  *      BOOTSEL を押しても再生を始める
  *   4. LCD1602A の画面はホームから選ぶ。ホームの1行目は月日と時刻 (NTP で合わせた日本時間)、2行目で
- *      SW2 / SW3 で Music / Spotify / Discord / Mario / System を選び、SW4 で開く (Spotify は Wi-Fi につながっているときだけ出る)。
+ *      SW2 / SW3 で Music / Spotify / YouTube / Discord / Mario / System を選び、SW4 で開く
+ *      (Spotify と YouTube は Wi-Fi につながっているときだけ出る)。
  *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
  *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
@@ -39,6 +41,11 @@
  *                SW4 でその曲から再生する。SW4 長押しで、選んだ曲に関係なくシャッフルで再生する。SW1 で一覧へ
  *        一覧と曲選択の SW3 長押しで、再生中の画面へ
  *        再生中: SW1 長押し 再生 / 一時停止 / SW2 前の曲 / SW3 次の曲 / SW4 シャッフル / SW1 曲選択へ
+ *      ホームで YouTube を開くと、同じ仕組みの YouTube モードになる。一覧は自分のアカウントのおすすめ・登録チャンネル・
+ *      後で見る・高評価・再生リストで、曲選択の代わりに動画を選ぶ (スイッチは Spotify と同じ)。中継は動画も
+ *      LCD 全体 (16x2 文字、80x16 ドット) の白黒のコマにして送ってくるので、再生中の画面に、その時刻の音を
+ *      イヤホンへ送り出すときに出す (横長の動画は上下を、ショート動画は 90 度回して左右を切る)。一時停止中は題名と 経過/長さ。
+ *      中継を YOUTUBE_FULL=0 にすると、横長の動画は左の 6x2 文字に出て、右に題名と 経過/長さ が出る
  *   8. ホームの Mario は、マリオのような横スクロールのゲーム。上の段が空中、下の段が地面で、右の旗まで進む。
  *      曲を流したまま遊べる。SW2 ← / SW3 → / SW4 ジャンプ / SW1 一時停止 (一時停止中はホームへ)
  *
@@ -57,6 +64,8 @@
 #include <StackThunk.h>
 #include <BluetoothAudio.h>
 #include <Wire.h>
+#include <hardware/dma.h>
+#include <hardware/i2c.h>
 #include <LiquidCrystal_I2C.h>
 #include <SPI.h>
 #include <SD.h>
@@ -214,6 +223,17 @@ static const uint8_t LCD_PLAY_MARK = 6;      // 曲選択の画面で再生中�
 // 自作文字の組。ふだんは棒と ⇄、曲選択の画面では棒の 7 段を ▶ に、ゲームではゲームの絵にする (lcdCharsWanted())
 enum LcdChars { CHARS_BARS, CHARS_PLAY, CHARS_GAME };
 static int     lcdCharsLoaded = CHARS_BARS;  // 今 LCD に載せている組
+// ゲームと YouTube の動画のコマ (gameFlush()) は、LCD に送る I2C のバイト列を作って DMA に送らせ、送り終えるのを待たない。
+// 自作文字を 8 つと 2 行を書くと 100kHz で 50ms ほどかかり、その間 CPU が止まると MP3 のデコードが追いつかず、
+// A2DP のバッファが空になってピーと鳴った (YouTube の 6 コマ/秒で、ほぼ毎秒。feedSilence() の説明)。
+// DMA は I2C の IC_DATA_CMD に 16bit ずつ書く (下位 8bit がデータ、bit 9 が STOP)
+static const size_t LCD_DMA_MAX = (8 * 9 + LCD_ROWS * (1 + LCD_COLS)) * 5;  // 自作文字 8 つ (番地 + 8 行) と 2 行 (番地 + 16 文字)
+static const unsigned long LCD_DMA_TIMEOUT_MS = 200;  // 送り終わらなければ打ち切る (一杯の 530 バイトで 48ms)
+static uint16_t lcdDmaBuf[LCD_DMA_MAX];
+static size_t   lcdDmaLen = 0;
+static int      lcdDmaCh = -1;                // 使う DMA のチャンネル。取れなければ -1 (止まって送る)
+static bool     lcdDmaBusy = false;           // 送っている途中。送り終えるまで Wire で LCD を読み書きしない (lcdIdle())
+static unsigned long lcdDmaStartMs = 0;
 
 // 帯域の棒。writePcm() で鳴らす音をモノラルにして溜め、BAR_HOP ごとに FFT して段の高さを記録しておく。
 // A2DP のバッファには 370ms 分ほど先の音まで入っているので、描くときは今イヤホンへ送り出している
@@ -295,10 +315,11 @@ static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
-// LCD の画面。ホームで Music / Spotify / Discord / Mario / System を選んで開き、Discord ではさらに Receive (受信) か
+// LCD の画面。ホームで Music / Spotify / YouTube / Discord / Mario / System を選んで開き、Discord ではさらに Receive (受信) か
 // Send (送信) を選ぶ。SW1 (か GP15) で前の画面に戻る。Mario はゲーム
-enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY, PAGE_GAME };
-static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify", "mario"};  // シリアルに出す名前
+enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY, PAGE_GAME, PAGE_YOUTUBE };
+static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify", "mario",
+                                         "youtube"};  // シリアルに出す名前
 static int    page = PAGE_MUSIC;           // 起動中は Music の画面に状態を出し、setup() の最後でホームにする
 static int    pageBeforeMsg = -1;          // 着信で Receive の画面に切り替える前の画面。戻るときはここへ
 static String mainLines[2];                // Music の画面の内容。他の画面を見ている間も更新しておく
@@ -312,8 +333,8 @@ struct MenuItem {
   const char *title;
   int         page;
 };
-static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Spotify", PAGE_SPOTIFY}, {"Discord", PAGE_DISCORD},
-                                     {"Mario", PAGE_GAME}, {"System", PAGE_SYSTEM}};
+static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Spotify", PAGE_SPOTIFY}, {"YouTube", PAGE_YOUTUBE},
+                                     {"Discord", PAGE_DISCORD}, {"Mario", PAGE_GAME}, {"System", PAGE_SYSTEM}};
 static const MenuItem DISCORD_MENU[] = {{"Receive", PAGE_MSG}, {"Send", PAGE_INPUT}};
 static const int HOME_COUNT = sizeof(HOME_MENU) / sizeof(HOME_MENU[0]);
 static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
@@ -405,9 +426,12 @@ static int    msgView = 0;                 // Receive の画面で見ている�
 static Marquee msgMarq = {0, 0};          // 本文を流している位置
 static unsigned long lastMsgScroll = 0;
 
-// Spotify モード。その間は Spotify の画面だけを出し、中継には /spotify の WebSocket でつなぐ (Discord は受け取らない)
+// Spotify モード。その間は Spotify の画面だけを出し、中継には /spotify の WebSocket でつなぐ (Discord は受け取らない)。
+// YouTube モードも同じ仕組みで、/youtube につなぐ (spService)。画面の並びもフレームの形も同じで、YouTube では
+// 動画のコマ (V) が足される
 static bool   spMode = false;
-static bool   spWs = false;                 // 中継との今の接続が /spotify の WebSocket か
+static int    spService = PAGE_SPOTIFY;     // どちらのモードか (PAGE_SPOTIFY か PAGE_YOUTUBE)。画面もこのページになる
+static bool   spWs = false;                 // 中継との今の接続が /spotify (か /youtube) の WebSocket か
 // Spotify の画面の見え方。プレイリストの一覧 → 曲選択 → 再生中 の順に進み、SW1 で戻る
 enum SpView { SP_LISTS, SP_TRACKS, SP_NOW };
 static int    spView = SP_LISTS;
@@ -457,6 +481,43 @@ static uint32_t wsLeft = 0;                 // 中身の残りのバイト数
 static char     wsKind = 0;                 // バイナリフレームの1バイト目 (種類)。0 ならまだ読んでいない
 static String   wsText = "";                // 音以外のフレームの中身
 static bool     wifiFast = false;           // "wifi fast" で、Spotify の間 Wi-Fi を常時受信にする (既定は省電力)
+static uint32_t spAudioIn = 0;              // 受け取った MP3 の累計 (Z を待つ間に捨てた分も)。YouTube のコマの位置はこれで数える
+
+// YouTube の動画。中継が LCD 全体 (16x2 文字) のコマを V で送ってくるので、その時刻の音をイヤホンへ送り出すときに出す。
+// コマには、その時刻の音が受け取った MP3 の何バイト目かが付いている。LCD 全体のときは題名と時間を出さない (一時停止中は文字だけ)。
+// 中継を YOUTUBE_FULL=0 にすると、横長の動画は左の 6x2 文字 (30x16 ドット。実寸でほぼ 16:9) のコマになり、右に題名と時間を出す
+static const int    YT_COLS = 6;            // 動画に使う文字の数 (2 行とも)。右の 9 桁 (1 桁空ける) に題名と時間を出す
+// 待たせておくコマの数。コマはその時刻の音より先に届くので、受信リング (12KB で 0.75 秒) とデコーダの入力 (0.25 秒) と
+// A2DP のバッファ (0.4 秒) の分を、6 コマ/秒で持てるだけ (約 1.4KB)
+static const size_t YT_QUEUE = 16;
+static const unsigned long YT_TICK_MS = 20;  // 時刻の来たコマを探す間隔 (6 コマ/秒には十分細かい)
+struct YtFrame {
+  uint32_t offset;                          // このコマの時刻の音が、受け取った MP3 の何バイト目か (spAudioIn で数えた位置)
+  uint32_t ms;                              // 動画の頭からの時刻
+  uint8_t  cols;                            // 何文字幅のコマか。ふつうは LCD_COLS (LCD 全体)。YOUTUBE_FULL=0 の横長の動画は YT_COLS
+  uint8_t  cells[2 * LCD_COLS];             // マスの中身 (上の行の左から 2 * cols)。glyphs の何番目か、0x20 (空白) か 0xFF (全面黒)
+  uint8_t  n;                               // 絵の数 (8 まで)
+  uint8_t  glyphs[8][8];                    // 自作文字と同じ形 (上の行から、下位 5 bit が左から右)
+};
+static YtFrame *ytQueue = nullptr;          // 届いたコマ (YT_QUEUE)。YouTube でつないだときに、受信リングのあとで取る
+static size_t   ytHead = 0, ytCount = 0;    // 一番古いコマの位置と数
+static YtFrame  ytShown;                    // 出しているコマ
+static bool     ytHaveFrame = false;        // 今の動画のコマを出した。再生中の画面を動画の見え方にする (ytVideoOn())
+static bool     ytInvert = false;           // "youtube invert" で白黒を入れ替える (LCD の色で見やすい方が違う)
+static int      ytDuration = -1;            // 動画の長さ (秒)。分からなければ (ライブなど) -1
+static uint32_t ytShownCount = 0, ytDropped = 0;  // 出したコマと、出す前に時刻が過ぎて捨てたコマ ("youtube" で出す)
+static uint8_t  ytIn[9 + 2 * LCD_COLS + 64];  // 受け取り途中の V の中身
+static size_t   ytInLen = 0;
+// デコードした MP3 の位置の記録。A2DP のバッファには 0.4 秒ほど先の音まで入っているので、今送り出している所の位置は、
+// 書いたときの記録から探す (帯域の棒と同じ)
+struct YtMark {
+  uint32_t frame;   // 書いたフレームの通算 (barFrames) がここまでのとき
+  uint32_t offset;  // MP3 はここまで (spAudioIn で数えた位置) デコードした
+};
+static const size_t YT_MARKS = 24;          // A2DP のバッファ1周分 (MP3 の 14 フレーム) より多めに持つ
+static YtMark   ytMarks[YT_MARKS];
+static size_t   ytMarkHead = 0;
+static unsigned long lastYtTick = 0;
 
 // ゲーム (ホームの Mario)。横スクロールのアクションで、LCD の 2 行を 上の段 (空中) と 下の段 (地面) にして、
 // 1 文字を 1 マスとして動かす。コースは 1 列 (1 マス幅) ごとに、地面か穴か・土管・上の段のもの を持つ
@@ -531,7 +592,7 @@ static uint16_t gfCell[LCD_ROWS][LCD_COLS]; // 組み立て中のコマ。LCD �
 static uint8_t  gfBits[GAME_GLYPHS][8];
 static char     gfAlt[GAME_GLYPHS];        // 自作文字に載せきれなかったとき、代わりに出す文字
 static int      gfN = 0;
-static uint32_t gameFlushMaxUs = 0;        // gameFlush() にかかった最長の時間。"game" で出して戻す
+static uint32_t gameFlushMaxUs = 0;        // gameFlush() で止まった最長の時間 (前のコマを送り終えるのを待つ分も)。"game" で出して戻す
 
 // ---------------- LCD ----------------
 
@@ -539,6 +600,7 @@ static void drawRow(uint8_t row, const String &text) {
   if (!lcd) return;
   String s = text.substring(0, LCD_COLS);
   while (s.length() < LCD_COLS) s += ' ';
+  lcdIdle();
   lcd->setCursor(0, row);
   lcd->print(s);
 }
@@ -610,16 +672,21 @@ static void setupLCD() {
   lcd->init();
   lcd->backlight();
   createLcdChars();
+  lcdDmaCh = dma_claim_unused_channel(false);
+  if (lcdDmaCh < 0) Serial.println("LCD: no DMA channel, frames block while sent");
 }
+
+// シャッフルの印 (⇄)。ふだんは自作文字 7。YouTube の動画を出している間は、動画の絵と一緒に gfGlyph() で載せる
+static const uint8_t SHUFFLE_MARK[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
 
 // 自作文字を LCD に作る。棒の 1〜7 段を自作文字 0〜6 (下から h 行を塗る)、シャッフルの印 (⇄) を 7 にする。
 // 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない曲選択の画面 (Music と Spotify) では、
-// 6 を再生中の印 (▶) にする。ゲームの画面では、8 つともゲームの絵 (gameSlots) にする (lcdCharsWanted())。
+// 6 を再生中の印 (▶) にする。ゲームと YouTube の動画の画面では、8 つともその絵 (gameSlots) にする (lcdCharsWanted())。
 // lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
 static void createLcdChars() {
-  static const uint8_t SHUFFLE_MARK[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
   static const uint8_t PLAY_MARK[8] = {0x10, 0x18, 0x1C, 0x1E, 0x1C, 0x18, 0x10, 0x00};
   if (!lcd) return;
+  lcdIdle();
   lcdCharsLoaded = lcdCharsWanted();
   for (uint8_t c = 0; c < 8; c++) {
     Wire.beginTransmission(lcdAddr);
@@ -637,8 +704,8 @@ static void createLcdChars() {
 
 // 今の画面に要る自作文字の組
 static int lcdCharsWanted() {
-  if (page == PAGE_GAME) return CHARS_GAME;
-  if ((page == PAGE_SPOTIFY && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS)) return CHARS_PLAY;
+  if (page == PAGE_GAME || ytVideoOn()) return CHARS_GAME;
+  if ((spPage() && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS)) return CHARS_PLAY;
   return CHARS_BARS;
 }
 
@@ -760,15 +827,80 @@ static void setupBars() {
   Serial.printf("bars: fft %lu us\n", (unsigned long)(micros() - t0));
 }
 
-// LCD に1文字ぶん送る (data なら文字、そうでなければ命令)。PCF8574 のつなぎは LiquidCrystal_I2C と同じで
-// P0=RS, P2=E, P3=バックライト, P4〜P7=D4〜D7。RS とデータを出してから E を上げ下げし、下げたところで読ませる
-static void lcdSendRaw(uint8_t b, bool data) {
+// LCD に1文字ぶん送る I2C のバイト (5 つ) を作る (data なら文字、そうでなければ命令)。PCF8574 のつなぎは
+// LiquidCrystal_I2C と同じで P0=RS, P2=E, P3=バックライト, P4〜P7=D4〜D7。RS とデータを出してから E を上げ下げし、下げたところで読ませる
+static void lcdEncode(uint8_t b, bool data, uint8_t out[5]) {
   const uint8_t base = 0x08 | (data ? 0x01 : 0x00);
-  Wire.write(base | (b & 0xF0));
-  for (uint8_t nibble : {(uint8_t)(b & 0xF0), (uint8_t)(b << 4)}) {
-    Wire.write(base | nibble | 0x04);
-    Wire.write(base | nibble);
+  const uint8_t hi = b & 0xF0, lo = (uint8_t)(b << 4);
+  out[0] = base | hi;
+  out[1] = base | hi | 0x04;
+  out[2] = base | hi;
+  out[3] = base | lo | 0x04;
+  out[4] = base | lo;
+}
+
+// LCD に1文字ぶん送る (Wire.beginTransmission() と endTransmission() の間で呼ぶ)
+static void lcdSendRaw(uint8_t b, bool data) {
+  uint8_t out[5];
+  lcdEncode(b, data, out);
+  Wire.write(out, sizeof(out));
+}
+
+// LCD に1文字ぶん送るのを、DMA で送るバイト列に足す。lcdIdle() してから足し、lcdDmaSend() で送る
+static void lcdQueue(uint8_t b, bool data) {
+  uint8_t out[5];
+  lcdEncode(b, data, out);
+  for (uint8_t v : out) {
+    if (lcdDmaLen < LCD_DMA_MAX) lcdDmaBuf[lcdDmaLen++] = v;
   }
+}
+
+// lcdQueue() で足したバイト列を、1 回の I2C の通信で DMA に送らせる。送り終えるのは待たない。
+// DMA のチャンネルが取れていなければ、Wire で止まって送る
+static void lcdDmaSend() {
+  if (!lcdDmaLen) return;
+  if (lcdDmaCh < 0) {
+    for (size_t i = 0; i < lcdDmaLen; i += 250) {  // Wire のバッファは 256 バイト
+      Wire.beginTransmission(lcdAddr);
+      for (size_t k = i; k < std::min(lcdDmaLen, i + 250); k++) Wire.write((uint8_t)lcdDmaBuf[k]);
+      Wire.endTransmission();
+    }
+    lcdDmaLen = 0;
+    return;
+  }
+  i2c_hw_t *hw = i2c_get_hw(i2c0);  // Wire は i2c0 (GP0 / GP1)
+  lcdDmaBuf[lcdDmaLen - 1] |= I2C_IC_DATA_CMD_STOP_BITS;
+  hw->enable = 0;  // 相手の番地は止めてから変える (Wire も同じことをする)
+  hw->tar = lcdAddr;
+  hw->enable = 1;
+  (void)hw->clr_tx_abrt;  // 前の通信の打ち切りが残っていると、送る FIFO が止まったままになる
+  hw->dma_cr = I2C_IC_DMA_CR_TDMAE_BITS;
+  dma_channel_config c = dma_channel_get_default_config(lcdDmaCh);
+  channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+  channel_config_set_read_increment(&c, true);
+  channel_config_set_write_increment(&c, false);
+  channel_config_set_dreq(&c, i2c_get_dreq(i2c0, true));  // 送る FIFO に空きができるたびに 1 つ
+  dma_channel_configure(lcdDmaCh, &c, &hw->data_cmd, lcdDmaBuf, lcdDmaLen, true);
+  lcdDmaBusy = true;
+  lcdDmaStartMs = millis();
+  lcdDmaLen = 0;
+}
+
+// DMA で送っている LCD のバイト列を、STOP まで送り終えるのを待つ。Wire で LCD を読み書きする前と、
+// 次の lcdQueue() の前に呼ぶ (DMA と Wire が同時に I2C を使うと壊れる)
+static void lcdIdle() {
+  if (!lcdDmaBusy) return;
+  i2c_hw_t *hw = i2c_get_hw(i2c0);
+  while (dma_channel_is_busy(lcdDmaCh) || !(hw->status & I2C_IC_STATUS_TFE_BITS) ||
+         (hw->status & I2C_IC_STATUS_MST_ACTIVITY_BITS)) {
+    // LCD が応答しなかった (FIFO が捨てられて止まる) か、送り終わらない。打ち切る (5 秒ごとの描き直しで戻る)
+    if ((hw->raw_intr_stat & I2C_IC_RAW_INTR_STAT_TX_ABRT_BITS) || millis() - lcdDmaStartMs >= LCD_DMA_TIMEOUT_MS) {
+      dma_channel_abort(lcdDmaCh);
+      break;
+    }
+  }
+  (void)hw->clr_tx_abrt;  // 読むと打ち切りの状態が消える (残っていると、次に Wire で送るのが失敗する)
+  lcdDmaBusy = false;
 }
 
 // LCD の今の番地から1バイト読む (読むと番地は1つ進む)。RW (P1) を上げて D4〜D7 (P4〜P7) に 1 を書くと、
@@ -793,6 +925,7 @@ static uint8_t lcdReadRaw() {
 // LCD の中身を読んでシリアルに出す ("lcd")。自作文字 0〜7 を絵で、2 行に書いてある文字コードを 16 進で
 static void dumpLcd() {
   if (!lcd) return;
+  lcdIdle();
   uint8_t cg[64], dd[LCD_ROWS][LCD_COLS];
   Wire.beginTransmission(lcdAddr);
   lcdSendRaw(0x40, false);  // CGRAM の 0 番地へ
@@ -843,6 +976,7 @@ static void lcdCommand(const String &cmd) {
 // LiquidCrystal_I2C の init() は 1 秒待つので使わない
 static void lcdResync() {
   if (!lcd || !lcdResyncOn) return;
+  lcdIdle();
   bool first = true;
   for (uint8_t nibble : {0x30, 0x30, 0x30, 0x20}) {
     Wire.beginTransmission(lcdAddr);
@@ -864,15 +998,21 @@ static void lcdResync() {
   createLcdChars();
 }
 
+// 今イヤホンへ送り出している所が、書いたフレームの通算 (barFrames) で何番目か。
+// A2DP のバッファと pcmChunk に残っている分だけ、書いた所より前
+static uint32_t a2dpNowFrame() {
+  const uint32_t queued = (A2DP_BUFFER - 1) - a2dp.availableForWrite() / 2 + pcmChunkLen;
+  return barFrames - queued / 2;
+}
+
 // 今イヤホンへ送り出している所の棒を 2行目に描く。LiquidCrystal_I2C は 4bit ごとに I2C の通信を
-// 3 回するので 16 文字で 20ms ほど止まる。変わった所だけを1回の通信にまとめて送る (100kHz で最大 8ms 程度)
+// 3 回するので 16 文字で 20ms ほど止まる。変わった所だけを1回の通信にまとめて送る (100kHz で最大 8ms 程度)。
+// YouTube では棒の代わりに動画を出すので描かない
 static void drawBars() {
   lastBarDraw = millis();
   if (!lcd || !((page == PAGE_MUSIC && muView == MU_NOW) || (page == PAGE_SPOTIFY && spView == SP_NOW))) return;
 
-  // A2DP のバッファと pcmChunk に残っている分だけ、今鳴っているのは書いた所より前
-  const uint32_t queued = (A2DP_BUFFER - 1) - a2dp.availableForWrite() / 2 + pcmChunkLen;
-  const uint32_t now = barFrames - queued / 2;
+  const uint32_t now = a2dpNowFrame();
   const BarFrame *cur = nullptr;
   for (const BarFrame &h : barHist) {
     if ((int32_t)(h.frame - now) <= 0 && (!cur || (int32_t)(h.frame - cur->frame) > 0)) cur = &h;
@@ -892,6 +1032,7 @@ static void drawBars() {
   }
   if (first < 0) return;
 
+  lcdIdle();
   Wire.beginTransmission(lcdAddr);
   lcdSendRaw(0x80 | (0x40 + first), false);  // 2行目の first 桁目へ
   for (int i = first; i <= last; i++) {
@@ -976,9 +1117,20 @@ static String clockLine() {
   return s;
 }
 
-// ホームに出す項目か。Spotify は Wi-Fi につながっていて、中継があるときだけ
+// ホームに出す項目か。Spotify と YouTube は Wi-Fi につながっていて、中継があるときだけ
 static bool homeItemShown(int i) {
-  return HOME_MENU[i].page != PAGE_SPOTIFY || (RELAY_HOST[0] && WiFi.status() == WL_CONNECTED);
+  const int p = HOME_MENU[i].page;
+  return (p != PAGE_SPOTIFY && p != PAGE_YOUTUBE) || (RELAY_HOST[0] && WiFi.status() == WL_CONNECTED);
+}
+
+// 今の画面が Spotify か YouTube の画面か (どちらもモードの間だけ開ける)
+static bool spPage() {
+  return page == PAGE_SPOTIFY || page == PAGE_YOUTUBE;
+}
+
+// 今のモードの名前。曲名や一覧が届く前に出す
+static String spName() {
+  return spService == PAGE_YOUTUBE ? "YouTube" : "Spotify";
 }
 
 // Spotify の画面の2行目。一覧では選んでいる番号か、つながり具合やエラー
@@ -1013,23 +1165,34 @@ static size_t spTopWidth() {
 
 static String spTrackTop() {
   const String *name = spTrackName(spTrackSel);
-  String text = name ? *name : spTrackTotal == 0 ? String("(no tracks)") : String("loading...");
+  String text = name                ? *name
+                : spTrackTotal == 0 ? String(spService == PAGE_YOUTUBE ? "(no videos)" : "(no tracks)")
+                                    : String("loading...");
   return pickTop(spMarq[0], text, spSelIsPlaying(), spShuffle);
 }
 
-// 再生中の画面の1行目。曲名 (収まらなければ流す)、シャッフル中は右端に印
+// 再生中の画面の1行目。曲名 (収まらなければ流す)、シャッフル中は右端に印。
+// YouTube の動画を出している間は、動画の右の 9 桁に出す (ytRender())
 static size_t spNowWidth() {
+  if (ytVideoOn() && !ytFull()) return LCD_COLS - YT_COLS - 1 - (spShuffle ? 1 : 0);
   return spShuffle ? LCD_COLS - 1 : LCD_COLS;
 }
 
-static String spNowTop() {
-  return withShuffleMark(marqText(spNowMarq, spTitle.length() ? spTitle : String("Spotify"), spNowWidth()), spShuffle);
+static String spNowTitle() {
+  return marqText(spNowMarq, spTitle.length() ? spTitle : spName(), spNowWidth());
 }
 
-// 再生中の画面で、収まらない曲名を1文字ずつ流す (2行目の棒はそのまま)
+static String spNowTop() {
+  return withShuffleMark(spNowTitle(), spShuffle);
+}
+
+// 再生中の画面で、収まらない曲名を1文字ずつ流す (2行目の棒と動画はそのまま)
 static void scrollSpNow() {
   lastSpScroll = millis();
-  if (marqStep(spNowMarq, spTitle.length(), spNowWidth())) drawRow(0, spNowTop());
+  if (ytVideoOn() && ytFull()) return;  // LCD 全体の動画のときは題名を出していない
+  if (!marqStep(spNowMarq, spTitle.length(), spNowWidth())) return;
+  if (ytVideoOn()) ytRender();
+  else drawRow(0, spNowTop());
 }
 
 // 再生中の画面に移る。曲名は頭から出す
@@ -1078,7 +1241,7 @@ static String spNowLine() {
   if (!a2dp.connected()) return "no earphone";
   if (!relayOpen) return relayStatus;
   if (spNote.length()) return spNote;
-  if (spPaused) return "pause " + spArtist;
+  if (spPaused) return "pause " + (spService == PAGE_YOUTUBE && ytHaveFrame ? ytTimeText(LCD_COLS - 6) : spArtist);
   if (spState == "stopped" && !spWaitZ) return "stopped";
   if (spWaitZ || spBuffering) return "buffering...";
   return spArtist;
@@ -1193,14 +1356,18 @@ static void drawPage() {
       gameRender();
       break;
     case PAGE_HOME:
-      if (!homeItemShown(homeSel)) homeSel = 0;  // Wi-Fi が切れて Spotify が消えた
+      if (!homeItemShown(homeSel)) homeSel = 0;  // Wi-Fi が切れて Spotify と YouTube が消えた
       drawRow(0, clockLine());
       drawRow(1, menuTitle(HOME_MENU[homeSel].title));
       break;
     case PAGE_SPOTIFY:
-      if (spView == SP_NOW) {
+    case PAGE_YOUTUBE:
+      if (spView == SP_NOW && ytVideoOn()) {
+        gameShownValid = false;  // 全部書き直す (自作文字は lcdResync() が gameSlots に作り直した)
+        ytRender();
+      } else if (spView == SP_NOW) {
         drawRow(0, spNowTop());
-        if (barsOn()) {
+        if (barsOn() && spService == PAGE_SPOTIFY) {
           invalidateBars();
           drawBars();
         } else {
@@ -1210,7 +1377,7 @@ static void drawPage() {
         drawRow(0, spTrackTop());
         drawRow(1, spTrackLine());
       } else {
-        drawRow(0, spLists.empty() ? String("Spotify") : menuTitle(spLists[spSel].c_str()));
+        drawRow(0, spLists.empty() ? spName() : menuTitle(spLists[spSel].c_str()));
         drawRow(1, spListLine());
       }
       break;
@@ -1337,7 +1504,7 @@ static void openPage(int p) {
 
 // 前 (1つ上) の画面に戻る (SW1 か GP15)。着信で切り替わった Receive の画面からは、元の画面に戻る
 static void goBack() {
-  if (page == PAGE_SPOTIFY) onSpotifyKey(KEY_BACK);
+  if (spPage()) onSpotifyKey(KEY_BACK);
   else if (page == PAGE_MUSIC) onMusicKey(KEY_BACK);
   else if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
   else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
@@ -1355,7 +1522,7 @@ static void onKey(int id) {
     onMorseKey(id);
     return;
   }
-  if (page == PAGE_SPOTIFY) {
+  if (spPage()) {
     onSpotifyKey(id);
     return;
   }
@@ -1380,7 +1547,7 @@ static void onKey(int id) {
       bool home = page == PAGE_HOME;
       int &sel = home ? homeSel : discordSel;
       if (id == KEY_DOT || id == KEY_DASH) {
-        // ホームでは出していない項目 (Wi-Fi が無いときの Spotify) を飛ばす。Music は必ず出ている
+        // ホームでは出していない項目 (Wi-Fi が無いときの Spotify と YouTube) を飛ばす。Music は必ず出ている
         do sel = stepSel(sel, home ? HOME_COUNT : DISCORD_COUNT, id);
         while (home && !homeItemShown(sel));
         drawPage();
@@ -1388,7 +1555,7 @@ static void onKey(int id) {
       }
       if (id == KEY_ENTER) {
         int p = home ? HOME_MENU[sel].page : DISCORD_MENU[sel].page;
-        if (p == PAGE_SPOTIFY) spotifyOn();
+        if (p == PAGE_SPOTIFY || p == PAGE_YOUTUBE) spotifyOn(p);
         else if (p == PAGE_MUSIC) musicOpen();
         else openPage(p);
       }
@@ -1417,7 +1584,7 @@ static void onKey(int id) {
   }
 }
 
-// Spotify の画面のスイッチ。一覧でプレイリストを、曲選択で曲を選んで再生し、再生中は曲を送る (Music と同じ並び)。
+// Spotify (と YouTube) の画面のスイッチ。一覧でプレイリストを、曲選択で曲を選んで再生し、再生中は曲を送る (Music と同じ並び)。
 // SW1 で1つ前の見え方に戻り、一覧からはモードを抜ける。曲選択の SW4 長押しは onHold()
 static void onSpotifyKey(int id) {
   if (spView == SP_NOW) {
@@ -1568,8 +1735,8 @@ static void onMusicKey(int id) {
 // 一覧と曲選択の SW3 (再生中の画面へ)
 static bool keyHasHold(int id) {
   if (id == KEY_BACK) return true;
-  bool lists = (page == PAGE_SPOTIFY && spView != SP_NOW) || (page == PAGE_MUSIC && muView != MU_NOW);
-  bool tracks = (page == PAGE_SPOTIFY && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
+  bool lists = (spPage() && spView != SP_NOW) || (page == PAGE_MUSIC && muView != MU_NOW);
+  bool tracks = (spPage() && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
   return (id == KEY_ENTER && tracks) || (id == KEY_DASH && lists);
 }
 
@@ -1578,7 +1745,7 @@ static bool keyHasHold(int id) {
 // SW3 は一覧と曲選択の画面で、再生中の画面へ移る
 static void onHold(int id) {
   if (id == KEY_ENTER) {
-    if (page == PAGE_SPOTIFY && spView == SP_TRACKS) spShufflePlay(spTrackList);
+    if (spPage() && spView == SP_TRACKS) spShufflePlay(spTrackList);
     if (page == PAGE_MUSIC && muView == MU_TRACKS && albumCount()) {
       shuffle = true;  // 次の曲からもアルバムの中でランダムに
       Serial.println("shuffle=on");
@@ -1588,7 +1755,7 @@ static void onHold(int id) {
   }
   if (id == KEY_DASH) {
     // 一覧と曲選択から、再生中の画面へ。何も鳴らしていなければ何もしない
-    if (page == PAGE_SPOTIFY && spView != SP_NOW && (spActive || spState == "playing" || spState == "paused")) {
+    if (spPage() && spView != SP_NOW && (spActive || spState == "playing" || spState == "paused")) {
       spShowNow();
       drawPage();
     }
@@ -1598,7 +1765,7 @@ static void onHold(int id) {
     }
     return;
   }
-  if (page == PAGE_SPOTIFY) {
+  if (spPage()) {
     // まだ何も鳴らしていなければ、一覧で選んでいるものを鳴らす
     if (!spActive && !spPaused && spState != "paused") spPlay(spSel);
     else spTogglePause();
@@ -1701,15 +1868,15 @@ static void pollButton() {
   }
 
   if (page == PAGE_MSG && msgCount && millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
-  if (page == PAGE_SPOTIFY && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
-  if (page == PAGE_SPOTIFY && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
+  if (spPage() && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
+  if (spPage() && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
   if (page == PAGE_MUSIC && millis() - lastMuScroll >= MSG_SCROLL_MS) scrollMusic();
   // ゲームは開いている間だけ進める。着信などで画面が変わったら一時停止にしておく
   if (page == PAGE_GAME) gameUpdate();
   else if (gameBusy()) gamePause();
-  // Music と Spotify (曲名や棒は変わるたびに書いている)、Send (押したときに書いている)、流している本文、ゲーム (コマごとに
-  // 書いている) は、描き直す間隔を空ける
-  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && page != PAGE_SPOTIFY && page != PAGE_GAME &&
+  // Music と Spotify と YouTube (曲名や棒や動画は変わるたびに書いている)、Send (押したときに書いている)、流している本文、
+  // ゲーム (コマごとに書いている) は、描き直す間隔を空ける
+  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && !spPage() && page != PAGE_GAME &&
               !(page == PAGE_MSG && msgCount);
   if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
 }
@@ -2243,10 +2410,11 @@ static void gfGlyph(int row, int col, const uint8_t *bits, char alt) {
 }
 
 // 組み立てたコマを LCD に出す。要る絵を自作文字に載せ (もう載っていればそのまま、無ければこのコマで使わない所に)、
-// 前のコマから変わった所だけを書く。drawBars() と同じく、1 行の変わった所を 1 回の通信にまとめる
+// 前のコマから変わった所だけを書く。書くものは 1 回の通信にまとめて DMA で送り、送り終えるのは待たない (lcdDmaSend())
 static void gameFlush() {
   if (!lcd) return;
   const uint32_t t0 = micros();
+  lcdIdle();  // 前のコマを送り終えてから、同じバッファに作る
   int slotOf[GAME_GLYPHS];
   bool used[8] = {};
   for (int i = 0; i < gfN; i++) {
@@ -2264,10 +2432,8 @@ static void gameFlush() {
       slotOf[i] = s;
       used[s] = true;
       memcpy(gameSlots[s], gfBits[i], 8);
-      Wire.beginTransmission(lcdAddr);
-      lcdSendRaw(0x40 | (s << 3), false);  // CGRAM の s 文字目へ
-      for (uint8_t b : gameSlots[s]) lcdSendRaw(b, true);
-      Wire.endTransmission();
+      lcdQueue(0x40 | (s << 3), false);  // CGRAM の s 文字目へ
+      for (uint8_t b : gameSlots[s]) lcdQueue(b, true);
     }
   }
   for (int row = 0; row < LCD_ROWS; row++) {
@@ -2284,15 +2450,14 @@ static void gameFlush() {
       }
     }
     if (first < 0) continue;
-    Wire.beginTransmission(lcdAddr);
-    lcdSendRaw(0x80 | (row * 0x40 + first), false);  // row 行目の first 桁目へ
+    lcdQueue(0x80 | (row * 0x40 + first), false);  // row 行目の first 桁目へ
     for (int c = first; c <= last; c++) {
-      lcdSendRaw(want[c], true);
+      lcdQueue(want[c], true);
       gameShown[row][c] = want[c];
     }
-    Wire.endTransmission();
   }
   gameShownValid = true;
+  lcdDmaSend();
   gameFlushMaxUs = std::max<uint32_t>(gameFlushMaxUs, micros() - t0);
 }
 
@@ -2728,7 +2893,7 @@ static void togglePause() {
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
-  if (spMode) return PLAY_STOP;  // ホームで Spotify を開いた
+  if (spMode) return PLAY_STOP;  // ホームで Spotify か YouTube を開いた
   pollRelay();
   // enter で送ると決めた文は、曲の途中でも待たずに送る。TLS の握手の間 (4〜8 秒) は無音になり、その後は続きから鳴る
   if (relayOutbox.length() && WiFi.status() == WL_CONNECTED) {
@@ -3123,6 +3288,7 @@ static PlayResult playSd(int index) {
       for (size_t i = 0; i < pcm.length; i++) pcm.samplesX[i][1] = pcm.samplesX[i][0];
     }
     writePcm(&pcm.samplesX[0][0], pcm.length, 2, rateMul);
+    ytMark(m);
 
     if (millis() - lastBarDraw >= BAR_MS) drawBars();
 
@@ -3196,7 +3362,7 @@ static void relayFailed() {
 // 中継につなぎ、メッセージの流れを受け取り始める。TLS の握手に 4〜8 秒かかり (P-384 の証明書を確かめるのが重い)、
 // A2DP のバッファ (370ms) では持たないので、再生ループの中 (pollAbort) からは送る文があるときしか呼ばない。
 // loop() が、止まっている間か曲の合間に呼ぶ。送る文 (relayOutbox) があれば、POST で一緒に送る。
-// Spotify モードでは /spotify に WebSocket でつなぐ
+// Spotify モードでは /spotify に (YouTube モードでは /youtube に) WebSocket でつなぐ
 static void relayConnect() {
   lastRelayTry = millis();
   if (spMode) spotifyPrepare();
@@ -3242,11 +3408,11 @@ static void relayConnect() {
 
   // HTTP/1.0 で頼む。Funnel の手前の Go のプロキシが chunked にせず、届いた分をそのまま流してくる。
   // 送る文があれば POST の本文にする。中継は Discord に送ってから、GET と同じく流し始める。
-  // Spotify は WebSocket に切り替えてもらう (切り替えは HTTP/1.1 にしかない)
+  // Spotify と YouTube は WebSocket に切り替えてもらう (切り替えは HTTP/1.1 にしかない)
   if (spMode) {
-    relay->printf("GET /spotify?win=%d HTTP/1.1\r\nHost: %s\r\nX-Key: %s\r\nUpgrade: websocket\r\n"
+    relay->printf("GET %s?win=%d HTTP/1.1\r\nHost: %s\r\nX-Key: %s\r\nUpgrade: websocket\r\n"
                   "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-                  SP_WIN, RELAY_HOST, RELAY_KEY, WS_KEY);
+                  spService == PAGE_YOUTUBE ? "/youtube" : "/spotify", SP_WIN, RELAY_HOST, RELAY_KEY, WS_KEY);
   } else if (relayOutbox.length()) {
     relay->printf("POST /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n"
                   "Content-Type: text/plain\r\nContent-Length: %u\r\n\r\n%s",
@@ -3411,7 +3577,7 @@ static size_t ringGet(uint8_t *p, size_t n) {
 }
 
 static void spDraw() {
-  if (page == PAGE_SPOTIFY) drawPage();
+  if (spPage()) drawPage();
 }
 
 // 中継へ1つ送る。WebSocket の決まりで、クライアントから送るフレームはマスクする
@@ -3434,13 +3600,15 @@ static void spReportRead() {
   spSend("C" + String(spRead));
 }
 
-// 選曲・曲送りを頼んだ。リングに残っている前の曲を捨て、Z が来るまで届く分も捨てる
+// 選曲・曲送りを頼んだ。リングに残っている前の曲を捨て、Z が来るまで届く分も捨てる。YouTube の前の動画のコマも捨てる
 static void spFlush() {
   spRingHead = spRingLen = 0;
   spWaitZ = true;
   spReset = true;
   spBuffering = true;
   spPaused = false;
+  ytHead = ytCount = 0;
+  ytHaveFrame = false;
 }
 
 // 鳴らし始めるのを頼み、再生中の見え方に移る。title は曲名 (T) が届くまで出しておく名前
@@ -3553,22 +3721,24 @@ static void spTogglePause() {
   spPaused = !spPaused;
   if (!spPaused) spActive = true;
   spSend(spPaused ? "K" : "R");
-  Serial.println(spPaused ? "spotify: paused" : "spotify: resumed");
+  Serial.printf("%s: %s\n", PAGE_NAMES[spService], spPaused ? "paused" : "resumed");
   spDraw();
 }
 
-// Spotify モードに入る。SD の再生は止める (再生ループの中なら pollAbort() が抜ける)。
-// Discord の流れを切り、loop() が /spotify につなぎ直す。Wi-Fi につながっていなければ入らない
-static void spotifyOn() {
+// Spotify モード (service が PAGE_YOUTUBE なら YouTube モード) に入る。SD の再生は止める (再生ループの中なら
+// pollAbort() が抜ける)。Discord の流れを切り、loop() が /spotify (/youtube) につなぎ直す。Wi-Fi につながっていなければ入らない
+static void spotifyOn(int service) {
   if (spMode) {
-    openPage(PAGE_SPOTIFY);
+    if (service == spService) openPage(spService);
+    else Serial.printf("%s: %s モードを抜けてから\n", PAGE_NAMES[service], PAGE_NAMES[spService]);
     return;
   }
   if (!RELAY_HOST[0] || WiFi.status() != WL_CONNECTED) {
-    Serial.println("spotify: no wifi");
+    Serial.printf("%s: no wifi\n", PAGE_NAMES[service]);
     return;
   }
   spMode = true;
+  spService = service;
   autoPlay = false;
   paused = false;
   spLists.clear();
@@ -3578,12 +3748,13 @@ static void spotifyOn() {
   spView = SP_LISTS;
   spTitle = spArtist = spState = spNote = "";
   spShuffle = spPaused = spActive = spWaitZ = false;
-  relayClose("spotify");
+  ytDuration = -1;
+  relayClose(PAGE_NAMES[spService]);
   relayStatus = "connecting...";
   relayFailures = 0;
   relayRetryMs = 0;
-  Serial.println("spotify: on");
-  openPage(PAGE_SPOTIFY);
+  Serial.printf("%s: on\n", PAGE_NAMES[spService]);
+  openPage(spService);
 }
 
 // Spotify モードを抜けてホームへ戻る。後片付け (接続を切る、リングを返す) は loop() の spotifyCleanup() がする
@@ -3591,7 +3762,7 @@ static void spotifyOn() {
 static void spotifyOff() {
   if (!spMode) return;
   spMode = false;
-  Serial.println("spotify: off");
+  Serial.printf("%s: off\n", PAGE_NAMES[spService]);
   openPage(PAGE_HOME);
 }
 
@@ -3615,7 +3786,8 @@ static bool spotifyAllocRing() {
     spSegs[count++] = seg;
   }
   spRingSize = count * SP_SEG;
-  Serial.printf("spotify: ring %u bytes, heap %luKB\n", (unsigned)spRingSize, (unsigned long)(rp2040.getFreeHeap() / 1024));
+  Serial.printf("%s: ring %u bytes, heap %luKB\n", PAGE_NAMES[spService], (unsigned)spRingSize,
+                (unsigned long)(rp2040.getFreeHeap() / 1024));
   return spRingSize >= 2 * SP_SEG;  // 8KB はほしい
 }
 
@@ -3628,6 +3800,10 @@ static void spotifyCleanup() {
   relayClose("spotify off");
   for (size_t i = 0; i < spRingSize / SP_SEG; i++) free(spSegs[i]);
   spRingSize = spRingHead = spRingLen = 0;
+  free(ytQueue);
+  ytQueue = nullptr;
+  ytHead = ytCount = 0;
+  ytHaveFrame = false;
   spLists.clear();
   spLists.shrink_to_fit();
   spForgetTracks();
@@ -3636,13 +3812,21 @@ static void spotifyCleanup() {
   relayRetryMs = 0;
 }
 
-// /spotify の WebSocket につながった。中継はすぐにプレイリストの一覧を送ってくる
+// /spotify (/youtube) の WebSocket につながった。中継はすぐにプレイリストの一覧を送ってくる。
+// YouTube では、受信リングのあとで動画のコマの置き場を取る。リングが残す空き (SP_HEAP_SPARE) から取る
+// (先に取ると、リングが Spotify より 4KB 小さくなった)
 static void spotifyConnected() {
-  if (!spotifyAllocRing()) {
+  bool ok = spotifyAllocRing();
+  if (ok && spService == PAGE_YOUTUBE && !ytQueue) ytQueue = (YtFrame *)malloc(YT_QUEUE * sizeof(YtFrame));
+  if (!ok || (spService == PAGE_YOUTUBE && !ytQueue)) {
     relayClose("no memory");
     relayFailed();
     return;
   }
+  spAudioIn = 0;  // 中継も、コマの位置を接続ごとに数え直す
+  ytHead = ytCount = 0;
+  ytHaveFrame = false;
+  ytResetMarks();
   spWs = true;
   wsHeadLen = 0;
   wsInFrame = false;
@@ -3658,7 +3842,7 @@ static void spotifyConnected() {
   relayStatus = "connected";
   // 切れる前に鳴らしていたら、続きを頼む (中継は切れたときに go-librespot を止めている)
   if (spActive && !spPaused) spSend("R");
-  Serial.printf("spotify: connected (win %d, ring %u)\n", SP_WIN, (unsigned)spRingSize);
+  Serial.printf("%s: connected (win %d, ring %u)\n", PAGE_NAMES[spService], SP_WIN, (unsigned)spRingSize);
   spDraw();
 }
 
@@ -3678,18 +3862,19 @@ static void onSpFrame(char kind, const String &text) {
       if (spLists.size() < SP_LISTS_MAX) spLists.push_back(text.substring(b + 1));
       if (i + 1 >= total || spLists.size() >= SP_LISTS_MAX) {
         if (spSel >= (int)spLists.size()) spSel = 0;
-        Serial.printf("spotify: %u playlists\n", (unsigned)spLists.size());
+        Serial.printf("%s: %u playlists\n", PAGE_NAMES[spService], (unsigned)spLists.size());
         spDraw();  // 全部届いてから1回だけ描く
       }
       break;
     }
-    case 'T':  // 曲名 TAB アーティスト
+    case 'T':  // 曲名 TAB アーティスト (YouTube は 動画の題名 TAB チャンネル TAB 長さの秒数)
       spTitle = a < 0 ? text : text.substring(0, a);
-      spArtist = a < 0 ? String() : text.substring(a + 1);
+      spArtist = a < 0 ? String() : text.substring(a + 1, b < 0 ? text.length() : b);
+      ytDuration = b < 0 ? -1 : text.substring(b + 1).toInt();
       marqReset(spNowMarq);  // 新しい曲名は頭から流す
       lastSpScroll = millis();
       spNote = "";
-      Serial.println("spotify: new track");
+      Serial.printf("%s: new track\n", PAGE_NAMES[spService]);
       spDraw();
       break;
     case 'S': {  // 状態 TAB シャッフル TAB プレイリストの番号 TAB 中継が受け取った操作の数 TAB 曲の番号
@@ -3709,7 +3894,8 @@ static void onSpFrame(char kind, const String &text) {
         if (spState == "stopped") spActive = false;
       }
       spNote = "";
-      Serial.printf("spotify: %s shuffle=%d list=%d track=%d\n", spState.c_str(), spShuffle, spPlaying, spPlayingTrack);
+      Serial.printf("%s: %s shuffle=%d list=%d track=%d\n", PAGE_NAMES[spService], spState.c_str(), spShuffle, spPlaying,
+                    spPlayingTrack);
       spDraw();
       break;
     }
@@ -3733,7 +3919,7 @@ static void onSpFrame(char kind, const String &text) {
     }
     case 'E':
       spNote = text;
-      Serial.printf("spotify: error \"%s\"\n", text.c_str());
+      Serial.printf("%s: error \"%s\"\n", PAGE_NAMES[spService], text.c_str());
       spDraw();
       break;
   }
@@ -3764,6 +3950,7 @@ static void wsFeed(const uint8_t *p, size_t n) {
       wsInFrame = true;
       wsKind = 0;
       wsText = "";
+      ytInLen = 0;
     } else if (wsOp == 0x2 && wsKind == 0) {
       wsKind = (char)*p++;
       n--;
@@ -3771,7 +3958,12 @@ static void wsFeed(const uint8_t *p, size_t n) {
     } else {
       size_t m = std::min((size_t)wsLeft, n);
       if (wsOp == 0x2 && wsKind == 'A') {
+        spAudioIn += m;
         if (!spWaitZ) ringPut(p, m);  // Z を待っている間は前の曲なので捨てる
+      } else if (wsOp == 0x2 && wsKind == 'V') {  // 動画のコマはバイト列のまま (中身に 0 が入る)
+        size_t k = std::min(m, sizeof(ytIn) - ytInLen);
+        memcpy(ytIn + ytInLen, p, k);
+        ytInLen += k;
       } else {
         for (size_t i = 0; i < m && wsText.length() < SP_TEXT_MAX; i++) wsText += (char)p[i];
       }
@@ -3785,7 +3977,8 @@ static void wsFeed(const uint8_t *p, size_t n) {
         relayClose("spotify closed");
         return;
       }
-      if (wsOp == 0x2 && wsKind != 'A') onSpFrame(wsKind, wsText);
+      if (wsOp == 0x2 && wsKind == 'V') ytPush();
+      else if (wsOp == 0x2 && wsKind != 'A') onSpFrame(wsKind, wsText);
     }
   }
 }
@@ -3822,13 +4015,151 @@ static void pollSpotify() {
   }
 }
 
+// ---------------- YouTube の動画 ----------------
+//
+// 中継は V に、その時刻の音が「中継が送った MP3 の何バイト目か」を付けて、その音より先に送ってくる。
+// Pico は受け取った MP3 を同じく数え (spAudioIn。Z を待つ間に捨てた分も数える)、デコードしたフレームごとに
+// 「barFrames がここまでのとき、MP3 はここまでデコードした」を記録する (ytMark())。今イヤホンへ送り出している所の
+// 記録の位置を過ぎたコマのうち、一番新しいものを出す (ytTick())。動画の切れ目・一時停止・読み捨てがあってもずれない
+
+// 再生中の画面を、動画の見え方 (LCD 全体に動画。6x2 文字のコマなら左に動画、右に題名と時間) にしているか。
+// まだコマを出していないときと、イヤホン・中継のつながりやエラーを出すときは、Spotify と同じ文字だけの見え方。
+// LCD 全体のコマは題名と時間を出す所が無いので、一時停止中も文字だけにする
+static bool ytVideoOn() {
+  return page == PAGE_YOUTUBE && spView == SP_NOW && ytHaveFrame && a2dp.connected() && relayOpen &&
+         !spNote.length() && spState != "stopped" && !(ytFull() && spPaused);
+}
+
+// 出しているコマが LCD 全体のものか (6x2 文字なら右に題名と時間を出す)
+static bool ytFull() {
+  return ytShown.cols == LCD_COLS;
+}
+
+// つないだときに、前の接続の記録を捨てる (中継はコマの位置を接続ごとに 0 から数える)
+static void ytResetMarks() {
+  for (YtMark &k : ytMarks) k = {barFrames, 0};
+}
+
+// デコードした MP3 の 1 フレームを A2DP に書いたあとに呼ぶ。まだデコードしていないのは、リングとデコーダの入力の残り
+static void ytMark(const Mp3Decoder *m) {
+  YtMark &k = ytMarks[ytMarkHead];
+  ytMarkHead = (ytMarkHead + 1) % YT_MARKS;
+  k.frame = barFrames;
+  k.offset = spAudioIn - spRingLen - (uint32_t)(m->stream.bufend - m->stream.next_frame);
+}
+
+// 届いた V を待ち行列に入れる。位置 (4 バイト) と時刻 (4 バイト) と幅 (1 バイト。文字の数)、2 行分のマス、
+// そのあとに絵が 8 バイトずつ。曲送りで Z を待っている間は、前の動画のものなので捨てる。いっぱいなら一番古いものを捨てる
+static void ytPush() {
+  const uint8_t cols = ytInLen > 8 ? ytIn[8] : 0;
+  const size_t head = 9 + 2 * cols;
+  if (!ytQueue || spWaitZ || (cols != YT_COLS && cols != LCD_COLS) || ytInLen < head) return;
+  if (ytCount == YT_QUEUE) {
+    ytHead = (ytHead + 1) % YT_QUEUE;
+    ytCount--;
+    ytDropped++;
+  }
+  YtFrame &f = ytQueue[(ytHead + ytCount++) % YT_QUEUE];
+  memcpy(&f.offset, ytIn, 4);
+  memcpy(&f.ms, ytIn + 4, 4);
+  f.cols = cols;
+  memcpy(f.cells, ytIn + 9, 2 * cols);
+  f.n = (uint8_t)std::min<size_t>((ytInLen - head) / 8, 8);
+  memcpy(f.glyphs, ytIn + head, f.n * 8);
+}
+
+// 時刻の来たコマを出す。再生ループから何度も呼ぶ。出すのは一番新しいもので、それより古いものは捨てる
+static void ytTick() {
+  if (!ytCount || millis() - lastYtTick < YT_TICK_MS) return;
+  lastYtTick = millis();
+  const uint32_t now = a2dpNowFrame();
+  const YtMark *cur = nullptr;
+  for (const YtMark &k : ytMarks) {
+    if ((int32_t)(k.frame - now) <= 0 && (!cur || (int32_t)(k.frame - cur->frame) > 0)) cur = &k;
+  }
+  if (!cur) return;
+  int due = -1;
+  while (ytCount && (int32_t)(ytQueue[ytHead].offset - cur->offset) < 0) {
+    if (due >= 0) ytDropped++;
+    due = ytHead;
+    ytHead = (ytHead + 1) % YT_QUEUE;
+    ytCount--;
+  }
+  if (due < 0) return;
+  ytShown = ytQueue[due];
+  ytShownCount++;
+  const bool first = !ytHaveFrame;
+  ytHaveFrame = true;
+  if (page != PAGE_YOUTUBE || spView != SP_NOW) return;
+  if (first) drawPage();  // 文字だけの見え方から動画の見え方へ (自作文字も作り直す)
+  else if (ytVideoOn()) ytRender();
+}
+
+// 秒を "1:23" か "1:02:03" に
+static String ytClock(uint32_t sec) {
+  char s[12];
+  if (sec >= 3600) snprintf(s, sizeof(s), "%lu:%02lu:%02lu", sec / 3600, sec / 60 % 60, sec % 60);
+  else snprintf(s, sizeof(s), "%lu:%02lu", sec / 60, sec % 60);
+  return s;
+}
+
+// 出しているコマの時刻の 経過 / 長さ。width 桁に収まらなければ経過だけ
+static String ytTimeText(size_t width) {
+  String t = ytClock(ytShown.ms / 1000);
+  if (ytDuration > 0 && t.length() + 1 + ytClock(ytDuration).length() <= width) t += "/" + ytClock(ytDuration);
+  return t;
+}
+
+// 動画の右の 2 行目。経過 / 長さ。一時停止中は pause、届くのを待つ間は buffering
+static String ytTimeLine() {
+  if (spPaused) return "pause";
+  if (spWaitZ || spBuffering) return "buffering";
+  return ytTimeText(LCD_COLS - YT_COLS - 1);
+}
+
+// 動画の見え方を描く。LCD 全体に動画のコマ (6x2 文字のコマなら、1 桁空けて右に題名 (流す) と時間)。ゲームと同じく gfGlyph() で組み立てて
+// gameFlush() で出す (要る絵を自作文字に載せ替え、前から変わった所だけ書く)
+static void ytRender() {
+  if (!lcd) return;
+  if (lcdCharsLoaded != CHARS_GAME) {  // 自作文字がまだ動画の組でない (文字だけの見え方から変わったところ)
+    drawPage();                        // 作り直して、全部描き直す (ここへ戻ってくる)
+    return;
+  }
+  gfClear();
+  // シャッフルの印も自作文字を 1 つ使う。先に置いた絵から自作文字に載るので、動画の絵が 8 つあれば最後の 1 つは
+  // 近い方の ROM の文字 (空白か全面黒) になる。LCD 全体のコマでは出さない
+  const int cols = ytShown.cols;
+  if (spShuffle && !ytFull()) gfGlyph(0, LCD_COLS - 1, SHUFFLE_MARK, '*');
+  for (int i = 0; i < 2 * cols; i++) {
+    const int row = i / cols, col = i % cols;
+    const uint8_t c = ytShown.cells[i];
+    if (c < ytShown.n) {
+      uint8_t bits[8];
+      int dots = 0;
+      for (int r = 0; r < 8; r++) {
+        bits[r] = ytInvert ? ytShown.glyphs[c][r] ^ 0x1F : ytShown.glyphs[c][r];
+        dots += __builtin_popcount(bits[r]);
+      }
+      gfGlyph(row, col, bits, dots >= 20 ? (char)0xFF : ' ');
+    } else {
+      gfChar(row, col, ((c == 0xFF) != ytInvert) ? 0xFF : ' ');
+    }
+  }
+  if (!ytFull()) {
+    gfText(0, YT_COLS + 1, spNowTitle().c_str());
+    gfText(1, YT_COLS + 1, ytTimeLine().c_str());
+  }
+  gameFlush();
+}
+
 // 鳴らせる MP3 の量。リングと、デコーダの入力に移してまだデコードしていない分 (mp3Refill() は一度に 4KB まで移す)
 static size_t spQueued(const Mp3Decoder *m) {
   size_t inDecoder = m->stream.buffer ? (size_t)(m->stream.bufend - m->stream.next_frame) : 0;
   return spRingLen + inDecoder;
 }
 
-// Spotify モードで中継とつながっている間、ここで回る。スイッチと中継を見ながら、受信リングの MP3 をデコードして鳴らす。
+// Spotify (と YouTube) モードで中継とつながっている間、ここで回る。スイッチと中継を見ながら、受信リングの MP3 を
+// デコードして鳴らす。YouTube では、時刻の来た動画のコマも出す。
 // 一時停止中や、溜まるのを待つ間は無音を流す (feedSilence() の説明を参照)。モードを抜けるか、接続が切れたら返す
 static void playSpotify() {
   // 省電力にしないと Bluetooth と無線を取り合って途切れる (SD と同じ)。"wifi fast" で常時受信にもできる
@@ -3856,6 +4187,7 @@ static void playSpotify() {
     pollSpotify();
     handleCommand(nextCommand());
     if (!spMode || !relayOpen || !spWs) break;
+    ytTick();
 
     if (spReset) {
       mp3End(m);
@@ -3883,7 +4215,7 @@ static void playSpotify() {
       // 届くのが追いつかなかった。溜まるまで無音で待つ
       spBuffering = true;
       starved++;
-      Serial.printf("spotify: buffering at %lus\n", (millis() - started) / 1000);
+      Serial.printf("%s: buffering at %lus\n", PAGE_NAMES[spService], (millis() - started) / 1000);
       continue;
     }
 
@@ -3902,7 +4234,7 @@ static void playSpotify() {
     struct mad_pcm &pcm = m->synth.pcm;
     rateMul = pcm.samplerate ? (uint32_t)A2DP_RATE / pcm.samplerate : 0;
     if (rateMul == 0 || rateMul > 4 || rateMul * pcm.samplerate != (uint32_t)A2DP_RATE) {
-      Serial.printf("spotify: unsupported %uHz\n", pcm.samplerate);
+      Serial.printf("%s: unsupported %uHz\n", PAGE_NAMES[spService], pcm.samplerate);
       rateMul = 1;
       continue;
     }
@@ -3910,6 +4242,7 @@ static void playSpotify() {
       for (size_t i = 0; i < pcm.length; i++) pcm.samplesX[i][1] = pcm.samplesX[i][0];
     }
     writePcm(&pcm.samplesX[0][0], pcm.length, 2, rateMul);
+    ytMark(m);
 
     if (millis() - lastBarDraw >= BAR_MS) drawBars();
     if (millis() - lastCheck >= 500) {
@@ -3924,22 +4257,34 @@ static void playSpotify() {
 
   mp3End(m);
   playing = false;
-  Serial.printf("spotify: %lu frames, buffering %lu times, underflow %lu times\n",
+  Serial.printf("%s: %lu frames, buffering %lu times, underflow %lu times\n", PAGE_NAMES[spService],
                 (unsigned long)frames, (unsigned long)starved, (unsigned long)underflows);
   spDraw();
 }
 
-// "spotify" でモードに入る (入っていれば一覧と様子を出す)。"spotify 3" で 3 番目を鳴らす。"spotify off" で抜ける
+// "spotify" でモードに入る (入っていれば一覧と様子を出す)。"spotify 3" で 3 番目を鳴らす。"spotify off" で抜ける。
+// "youtube" も同じ ("youtube" も 7 文字)。YouTube のモードの間は "youtube invert" で動画の白黒を入れ替える
 static void spotifySerial(const String &cmd) {
+  const int service = cmd.startsWith("youtube") ? PAGE_YOUTUBE : PAGE_SPOTIFY;
   String arg = cmd.substring(7);
   arg.trim();
+  if (spMode && service != spService) {
+    Serial.printf("%s: %s モードを抜けてから\n", PAGE_NAMES[service], PAGE_NAMES[spService]);
+    return;
+  }
   if (arg == "off") {
     spotifyOff();
     return;
   }
   if (!spMode) {
-    spotifyOn();
-    if (spMode && arg.length()) Serial.println("spotify: 一覧が届いてから番号を打つ");
+    spotifyOn(service);
+    if (spMode && arg.length()) Serial.printf("%s: 一覧が届いてから番号を打つ\n", PAGE_NAMES[service]);
+    return;
+  }
+  if (arg == "invert" && service == PAGE_YOUTUBE) {
+    ytInvert = !ytInvert;
+    Serial.printf("youtube: invert=%d\n", ytInvert);
+    spDraw();
     return;
   }
   if (arg.length()) {
@@ -3950,12 +4295,19 @@ static void spotifySerial(const String &cmd) {
   for (size_t i = 0; i < spLists.size(); i++) {
     Serial.printf("%c%3u %s\n", (int)i == spPlaying ? '>' : ' ', (unsigned)(i + 1), spLists[i].c_str());
   }
-  Serial.printf("spotify: ws=%d state=%s paused=%d wait=%d buffering=%d ring=%u/%u win=%d read=%lu note=\"%s\"\n",
-                spWs, spState.c_str(), spPaused, spWaitZ, spBuffering, (unsigned)spRingLen, (unsigned)spRingSize,
-                SP_WIN, (unsigned long)spRead, spNote.c_str());
+  Serial.printf("%s: ws=%d state=%s paused=%d wait=%d buffering=%d ring=%u/%u win=%d read=%lu note=\"%s\"\n",
+                PAGE_NAMES[spService], spWs, spState.c_str(), spPaused, spWaitZ, spBuffering, (unsigned)spRingLen,
+                (unsigned)spRingSize, SP_WIN, (unsigned long)spRead, spNote.c_str());
+  if (spService == PAGE_YOUTUBE) {
+    // flush は gameFlush() で止まった最長の時間 (出すたびに戻す)。長いと音が途切れる
+    Serial.printf("youtube: frames shown %lu dropped %lu queued %u/%u at %lu ms, flush %lu us, invert %d\n",
+                  (unsigned long)ytShownCount, (unsigned long)ytDropped, (unsigned)ytCount, (unsigned)YT_QUEUE,
+                  (unsigned long)ytShown.ms, (unsigned long)gameFlushMaxUs, ytInvert);
+    gameFlushMaxUs = 0;
+  }
 }
 
-// Spotify モードの間のコマンド。スイッチで出す pause / next / prev / shuffle は Spotify の操作にする
+// Spotify (と YouTube) モードの間のコマンド。スイッチで出す pause / next / prev / shuffle は Spotify (YouTube) の操作にする
 static void spotifyCommand(const String &cmd) {
   if (cmd == "pause") spTogglePause();
   else if (cmd == "next") spSkip(true);
@@ -3965,7 +4317,8 @@ static void spotifyCommand(const String &cmd) {
   else if (cmd.startsWith("wifi")) setWiFi(cmd);
   else if (cmd.startsWith("lcd")) lcdCommand(cmd);
   else if (cmd == "status") printStatus();
-  else Serial.println("Spotify モード中に使えるのは spotify [番号|off] / pause / next / prev / shuffle / vol / wifi / lcd / status");
+  else Serial.printf("%s モード中に使えるのは %s [番号|off%s] / pause / next / prev / shuffle / vol / wifi / lcd / status\n",
+                     PAGE_NAMES[spService], PAGE_NAMES[spService], spService == PAGE_YOUTUBE ? "|invert" : "");
 }
 
 // ---------------- コマンド ----------------
@@ -3990,21 +4343,22 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / pause / next / prev / rand / stop / list / now / shuffle / vol [0-100|+|-] /"
-    " wifi on|off|fast|save / bt / scan / relay / spotify [n|off] / status / lcd [chars|resync on|off] /"
+    " wifi on|off|fast|save / bt / scan / relay / spotify [n|off] / youtube [n|off|invert] / status /"
+    " lcd [chars|resync on|off] /"
     " sw <1-4> [ms] / game [lcd|level n]";
 
 static void printStatus() {
-  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u spotify=%d\n",
+  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s) msgs=%u mode=%s\n",
                 WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
                 a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
                 (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
                 digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
-                morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount, spMode);
+                morseText.c_str(), relayOpen, relayStatus.c_str(), (unsigned)msgCount, spMode ? PAGE_NAMES[spService] : "-");
 }
 
 static void handleCommand(String cmd) {
   if (!cmd.length()) return;
-  if (cmd.startsWith("spotify")) {
+  if (cmd.startsWith("spotify") || cmd.startsWith("youtube")) {
     spotifySerial(cmd);
     return;
   }
@@ -4150,8 +4504,8 @@ void loop() {
   wifiUp = up;
   if (wifiEnabled && !autoPlay && !up && millis() - lastWiFiTry >= WIFI_RETRY_MS) startWiFi();
 
-  // Spotify モードを抜けた。/spotify との接続を切り、受信リングを返す (Discord には下でつなぎ直す)
-  if (!spMode && (spRingSize || spWs)) spotifyCleanup();
+  // Spotify (YouTube) モードを抜けた。/spotify (/youtube) との接続を切り、受信リングを返す (Discord には下でつなぎ直す)
+  if (!spMode && (spRingSize || spWs || ytQueue)) spotifyCleanup();
 
   // イヤホンには頼まれたときだけつなぎにいく (btConnecting の説明を参照)。失敗の理由は status() が
   // Music の1行目に出したもの ("BT timeout" など) をそのまま System にも出す
@@ -4161,7 +4515,7 @@ void loop() {
     if (page == PAGE_SYSTEM) drawPage();
   }
 
-  // Discord の中継につなぐ (Spotify モードでは /spotify に)。TLS の握手で 4〜8 秒止まるので、再生ループの外
+  // Discord の中継につなぐ (Spotify モードでは /spotify に、YouTube モードでは /youtube に)。TLS の握手で 4〜8 秒止まるので、再生ループの外
   // (止まっている間か曲の合間) でだけ。止まる前にバッファを無音で埋めておく。待つ間隔 (relayRetryMs) は
   // 前回の結果で決まる (起動直後は 0)。送る文があれば、つながっていても待たずにつなぎ直す
   if (RELAY_HOST[0] && WiFi.status() == WL_CONNECTED &&
@@ -4174,7 +4528,7 @@ void loop() {
   pollButton();
   handleCommand(nextCommand());
 
-  // Spotify モードでは、つながっている間は playSpotify() の中で回る。つなぎ直すのを待つ間は無音を流す。
+  // Spotify (YouTube) モードでは、つながっている間は playSpotify() の中で回る。つなぎ直すのを待つ間は無音を流す。
   // BOOTSEL は効かない
   if (spMode) {
     if (relayOpen && spWs) playSpotify();
