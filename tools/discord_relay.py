@@ -1136,6 +1136,19 @@ def yt_geometry(cols):
     return (w, h), (w * 6, h * 7)
 
 
+def yt_filter(cols, portrait, fps):
+    """ffmpeg の -vf。fps コマ/秒の、yt_geometry(cols) の大きさの灰色にする。
+    灰色にしてから縮める (yuv のままだと、奇数の幅で pad が失敗する)。実寸の枠に合わせて (LCD 全体なら、枠を
+    覆うように広げてはみ出た所を切り、6x2 文字なら枠に収めて) から、すき間込みのドットの数に平均して縮める。
+    LCD 全体のとき、縦長の動画は時計回りに 90 度回す (動画の上が右)。tools/movie_convert.py も使う"""
+    gray, box = yt_geometry(cols)
+    fit = (("transpose=1," if portrait else "") +
+           "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (box + box)
+           if cols == YT_FULL_COLS else
+           "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:-1:-1" % (box + box))
+    return "fps=%d,format=gray,%s,scale=%d:%d:flags=area" % ((fps, fit) + gray)
+
+
 def yt_art(codes, glyphs):
     """マスの番号と絵を、端末に出す絵にする (# が点いているドット。マスの間は空ける)。幅はマスの数から"""
     cols = len(codes) // YT_ROWS
@@ -1243,15 +1256,8 @@ class YtStream:
         portrait = video is not None and (video.get("height") or 0) > (video.get("width") or 0) > 0
         self.cols = YT_FULL_COLS if video and (full or portrait) else YT_COLS
         if video:
-            # 灰色にしてから縮める (yuv のままだと、奇数の幅で pad が失敗する)。実寸の枠に合わせて (LCD 全体なら、枠を
-            # 覆うように広げてはみ出た所を切り、6x2 文字なら枠に収めて) から、すき間込みのドットの数に平均して縮める
             vr, vw = os.pipe()
-            gray, box = yt_geometry(self.cols)
-            fit = (("transpose=1," if portrait else "") +
-                   "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (box + box)
-                   if self.cols == YT_FULL_COLS else
-                   "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:-1:-1" % (box + box))
-            vf = "fps=%d,format=gray,%s,scale=%d:%d:flags=area" % ((fps, fit) + gray)
+            vf = yt_filter(self.cols, portrait, fps)
             cmd += ["-map", "%d:v:0" % (len(srcs) - 1)] + skip + ["-vf", vf, "-f", "rawvideo", "pipe:%d" % vw]
             fds.append(vw)
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, pass_fds=fds)

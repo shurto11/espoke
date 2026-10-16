@@ -1,6 +1,6 @@
 /*
  * espoke — microSD の MP3 を Bluetooth イヤホンで鳴らし、Discord のメッセージをやりとりする。Spotify と YouTube も
- * 中継を通して聞ける (YouTube は LCD に小さな白黒の動画も出す)。LCD でゲームも遊べる
+ * 中継を通して聞ける (YouTube は LCD に小さな白黒の動画も出す)。microSD の動画も LCD で見られる。LCD でゲームも遊べる
  *
  * 対応ボード: Raspberry Pi Pico WH
  * FQBN: rp2040:rp2040:rpipicow:ipbtstack=ipv4btcble
@@ -12,7 +12,7 @@
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
  *      BOOTSEL を押しても再生を始める
  *   4. LCD1602A の画面はホームから選ぶ。ホームの1行目は月日と時刻 (NTP で合わせた日本時間)、2行目で
- *      SW2 / SW3 で Music / Spotify / YouTube / Discord / Mario / System を選び、SW4 で開く
+ *      SW2 / SW3 で Music / Spotify / YouTube / Movie / Discord / Mario / System を選び、SW4 で開く
  *      (Spotify と YouTube は Wi-Fi につながっているときだけ出る)。
  *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
@@ -49,6 +49,11 @@
  *      中継を YOUTUBE_FULL=0 にすると、横長の動画は左の 6x2 文字に出て、右に題名と 経過/長さ が出る
  *   8. ホームの Mario は、マリオのような横スクロールのゲーム。上の段が空中、下の段が地面で、右の旗まで進む。
  *      曲を流したまま遊べる。SW2 ← / SW3 → / SW4 ジャンプ / SW1 一時停止 (一時停止中はホームへ)
+ *   9. ホームの Movie は、microSD の動画を YouTube と同じ LCD 全体の白黒の動画で見る。Pico は mp4 を読めないので、
+ *      PC で tools/movie_convert.py が .lcv (コマと MP3) にしたものを読む。Wi-Fi は要らず、イヤホンがつながっていなければ
+ *      動画だけ進める (つながっていれば音も鳴らす)。ほかの画面に移ると一時停止
+ *        一覧: 1行目に題名 (開いている動画なら左端に ▶)、2行目に長さと番号。SW2 / SW3 で選び、SW4 で鳴らす。SW1 でホームへ
+ *        再生中: SW1 長押し 再生 / 一時停止 / SW2 10 秒戻る / SW3 10 秒進む / SW4 白黒の入れ替え / SW1 一覧へ
  *
  * 音声フォーマット:
  *   MP3 (Layer III)。Pico 上で libmad (BackgroundAudio ライブラリ同梱) でデコードする。
@@ -320,11 +325,12 @@ static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
-// LCD の画面。ホームで Music / Spotify / YouTube / Discord / Mario / System を選んで開き、Discord ではさらに Receive (受信) か
-// Send (送信) を選ぶ。SW1 (か GP15) で前の画面に戻る。Mario はゲーム
-enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY, PAGE_GAME, PAGE_YOUTUBE };
+// LCD の画面。ホームで Music / Spotify / YouTube / Movie / Discord / Mario / System を選んで開き、Discord ではさらに
+// Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15) で前の画面に戻る。Mario はゲーム
+enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY, PAGE_GAME, PAGE_YOUTUBE,
+            PAGE_MOVIE };
 static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify", "mario",
-                                         "youtube"};  // シリアルに出す名前
+                                         "youtube", "movie"};  // シリアルに出す名前
 static int    page = PAGE_MUSIC;           // 起動中は Music の画面に状態を出し、setup() の最後でホームにする
 static int    pageBeforeMsg = -1;          // 着信で Receive の画面に切り替える前の画面。戻るときはここへ
 static String mainLines[2];                // Music の画面の内容。他の画面を見ている間も更新しておく
@@ -339,7 +345,8 @@ struct MenuItem {
   int         page;
 };
 static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Spotify", PAGE_SPOTIFY}, {"YouTube", PAGE_YOUTUBE},
-                                     {"Discord", PAGE_DISCORD}, {"Mario", PAGE_GAME}, {"System", PAGE_SYSTEM}};
+                                     {"Movie", PAGE_MOVIE}, {"Discord", PAGE_DISCORD}, {"Mario", PAGE_GAME},
+                                     {"System", PAGE_SYSTEM}};
 static const MenuItem DISCORD_MENU[] = {{"Receive", PAGE_MSG}, {"Send", PAGE_INPUT}};
 static const int HOME_COUNT = sizeof(HOME_MENU) / sizeof(HOME_MENU[0]);
 static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
@@ -525,6 +532,60 @@ static YtMark   ytMarks[YT_MARKS];
 static size_t   ytMarkHead = 0;
 static unsigned long lastYtTick = 0;
 
+// 動画 (ホームの Movie)。PC で tools/movie_convert.py が mp4 などを .lcv にして microSD に置いたものを、YouTube と同じく
+// LCD 全体 (80x16 ドット) の白黒のコマで出す。Wi-Fi も中継も使わない。イヤホンがつながっていれば音 (MP3) も鳴らし、
+// コマは YouTube と同じく、その時刻の音をイヤホンへ送り出すときに出す (ytMarks を使い回し、offset に動画の時刻 (ms) を入れる)。
+// つながっていなければ動画だけを millis() の時計で進める。
+// .lcv は 512 バイトのヘッダ、コマ (recSize バイトずつ、一定の間隔)、MP3 (固定ビットレート) の順
+struct LcvHeader {
+  char     magic[4];     // "LCV1"
+  uint16_t version;
+  uint16_t recSize;      // コマ 1 つの大きさ (128)。中身は 絵の数 (1 バイト)、マス (32 バイト)、絵 (8 バイト x 絵の数)
+  uint32_t frames;       // コマの数。k 番目のコマは k * 1000 / fps ms から
+  uint16_t fps;
+  uint8_t  cols;         // 何文字幅のコマか。LCD 全体 (LCD_COLS) だけを読む
+  uint8_t  reserved;
+  uint32_t frameOffset;  // コマの頭の位置
+  uint32_t audioOffset;  // MP3 の頭の位置。MP3 はファイルの終わりまで
+  uint32_t audioSize;    // 0 なら音の無い動画
+  uint16_t kbps;         // MP3 のビットレート (固定)。飛ぶときに、時刻から位置を求める
+  uint16_t reserved2;
+  uint32_t durationMs;
+  char     title[64];    // 題名 (LCD の文字コード。終わりは 0)
+};
+static_assert(sizeof(LcvHeader) == 100, "LcvHeader must match tools/movie_convert.py");
+static const size_t   MV_REC = 1 + 2 * LCD_COLS + 8 * 8;  // コマ 1 つで読む量 (絵の数、マス、絵 8 つ)
+static const size_t   MV_MAX = 100;                       // 一覧に載せる動画の数 (パスを RAM に持つ)
+static const uint32_t MV_SEEK_MS = 10000;                 // 再生中の SW2 / SW3 で戻る / 進む長さ
+static std::vector<String> mvFiles;                       // .lcv のパス (SD の曲と一緒に探す。フォルダ・ファイル名の順)
+static int      mvRaw = 0;                                // 変換していない動画 (.mp4 など) の数。.lcv が無いときに知らせる
+enum MvView { MV_LIST, MV_NOW };                          // 動画の一覧 → 再生中。SW1 で戻る
+static int      mvView = MV_LIST;
+static int      mvSel = 0;                                // 一覧で選んでいる番号
+static Marquee  mvMarq = {0, 0};                          // 収まらない題名 (一覧と、再生中の文字の見え方の1行目) を流す位置
+static unsigned long lastMvScroll = 0;
+static int      mvInfoAt = -1;                            // ヘッダを読んで題名と長さを覚えている動画 (mvInfo())。-1 なら無し
+static String   mvInfoTitle = "";
+static uint32_t mvInfoDur = 0;
+static bool     mvInfoOk = false;                         // .lcv として読めた
+static int      mvCur = -1;                               // 開いている (鳴らしているか一時停止している) 動画。-1 なら無し
+static String   mvCurPath = "";                           // そのパス。SD を読み直したときに探し直す
+static String   mvTitle = "";
+static uint32_t mvDur = 0;                                // 長さ (ms)
+static uint32_t mvPos = 0;                                // 今の時刻 (ms)。一時停止中は止めた所
+static bool     mvRun = false;                            // 鳴らしている (一時停止していない)。Movie の画面を離れると一時停止にする
+static uint32_t mvGen = 0;                                // 動画を開くたびに増やす。鳴らしている間に別の動画にしたら playMovie() が抜ける
+static bool     mvSeekReq = false;                        // 鳴らしている間に SW2 / SW3 で mvPos を動かした。playMovie() が飛ぶ
+static bool     mvAudio = false;                          // イヤホンへ音を鳴らしている。時計はその音 (ytMarks)。無ければ millis()
+static uint32_t mvAudioMs = 0;                            // 音を鳴らし始めた時刻 (ms)
+static uint32_t mvWritten = 0;                            // そこからイヤホンに書いたフレームの数 (44100Hz。音の後の無音も)
+static uint32_t mvBaseMs = 0;                             // 音が無いときの時計は mvBaseMs + (millis() - mvBaseAt)
+static unsigned long mvBaseAt = 0;
+static bool     mvHaveFrame = false;                      // 今の動画のコマを出した (ytShown にある)
+static int32_t  mvShownK = -1;                            // 出しているコマの番号。-1 なら次に必ず読む
+static uint32_t mvShownCount = 0;                         // 出したコマの数 ("movie" で出す)
+static String   mvNote = "";                              // 読めなくなったときの理由。再生中の見え方の2行目に出す
+
 // ゲーム (ホームの Mario)。横スクロールのアクションで、LCD の 2 行を 上の段 (空中) と 下の段 (地面) にして、
 // 1 文字を 1 マスとして動かす。コースは 1 列 (1 マス幅) ごとに、地面か穴か・土管・上の段のもの を持つ
 static const unsigned long GAME_TICK_MS = 50;  // 1 コマ。動きはすべてコマで数える
@@ -686,8 +747,8 @@ static void setupLCD() {
 static const uint8_t SHUFFLE_MARK[8] = {0x02, 0x1F, 0x02, 0x00, 0x08, 0x1F, 0x08, 0x00};
 
 // 自作文字を LCD に作る。棒の 1〜7 段を自作文字 0〜6 (下から h 行を塗る)、シャッフルの印 (⇄) を 7 にする。
-// 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない曲選択の画面 (Music と Spotify) では、
-// 6 を再生中の印 (▶) にする。ゲームと YouTube の動画の画面では、8 つともその絵 (gameSlots) にする (lcdCharsWanted())。
+// 8 段は LCD に元からある全面黒 (0xFF)。自作文字は 8 つしか無いので、棒を出さない曲選択の画面 (Music と Spotify) と動画の一覧では、
+// 6 を再生中の印 (▶) にする。ゲームと YouTube・Movie の動画の画面では、8 つともその絵 (gameSlots) にする (lcdCharsWanted())。
 // lcdResync() のたびに作り直すので、LiquidCrystal_I2C を通さず 1 文字分ずつまとめて送る (8 文字で 30ms ほど)
 static void createLcdChars() {
   static const uint8_t PLAY_MARK[8] = {0x10, 0x18, 0x1C, 0x1E, 0x1C, 0x18, 0x10, 0x00};
@@ -710,8 +771,11 @@ static void createLcdChars() {
 
 // 今の画面に要る自作文字の組
 static int lcdCharsWanted() {
-  if (page == PAGE_GAME || ytVideoOn()) return CHARS_GAME;
-  if ((spPage() && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS)) return CHARS_PLAY;
+  if (page == PAGE_GAME || ytVideoOn() || mvVideoOn()) return CHARS_GAME;
+  if ((spPage() && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS) ||
+      (page == PAGE_MOVIE && mvView == MV_LIST)) {
+    return CHARS_PLAY;
+  }
   return CHARS_BARS;
 }
 
@@ -1387,6 +1451,21 @@ static void drawPage() {
         drawRow(1, spListLine());
       }
       break;
+    case PAGE_MOVIE:
+      if (mvView == MV_NOW && mvVideoOn()) {
+        gameShownValid = false;  // 全部書き直す (自作文字は lcdResync() が gameSlots に作り直した)
+        ytRender();
+      } else if (mvView == MV_NOW) {
+        drawRow(0, marqText(mvMarq, mvTitle, LCD_COLS));
+        drawRow(1, mvNowLine());
+      } else if (mvFiles.empty()) {
+        drawRow(0, "Movie");
+        drawRow(1, !sdReady ? String("no card") : mvRaw ? "convert " + String(mvRaw) + " mp4" : String("no movie"));
+      } else {
+        drawRow(0, mvListTop());
+        drawRow(1, mvListLine());
+      }
+      break;
     case PAGE_DISCORD:
       drawRow(0, menuTitle(DISCORD_MENU[discordSel].title));
       drawRow(1, pageSummary(DISCORD_MENU[discordSel].page));
@@ -1512,6 +1591,7 @@ static void openPage(int p) {
 static void goBack() {
   if (spPage()) onSpotifyKey(KEY_BACK);
   else if (page == PAGE_MUSIC) onMusicKey(KEY_BACK);
+  else if (page == PAGE_MOVIE) onMovieKey(KEY_BACK);
   else if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
   else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
   else if (page == PAGE_GAME) gameBack();
@@ -1534,6 +1614,10 @@ static void onKey(int id) {
   }
   if (page == PAGE_MUSIC) {
     onMusicKey(id);
+    return;
+  }
+  if (page == PAGE_MOVIE) {
+    onMovieKey(id);
     return;
   }
   if (page == PAGE_GAME) {
@@ -1563,6 +1647,7 @@ static void onKey(int id) {
         int p = home ? HOME_MENU[sel].page : DISCORD_MENU[sel].page;
         if (p == PAGE_SPOTIFY || p == PAGE_YOUTUBE) spotifyOn(p);
         else if (p == PAGE_MUSIC) musicOpen();
+        else if (p == PAGE_MOVIE) movieOpen();
         else openPage(p);
       }
       break;
@@ -1738,15 +1823,16 @@ static void onMusicKey(int id) {
 }
 
 // 長押しのある役目か。SW1 はどの画面でも。Music と Spotify では、曲選択の SW4 (シャッフルで鳴らす) と、
-// 一覧と曲選択の SW3 (再生中の画面へ)
+// 一覧と曲選択の SW3 (再生中の画面へ)。Movie では一覧の SW3
 static bool keyHasHold(int id) {
   if (id == KEY_BACK) return true;
-  bool lists = (spPage() && spView != SP_NOW) || (page == PAGE_MUSIC && muView != MU_NOW);
+  bool lists = (spPage() && spView != SP_NOW) || (page == PAGE_MUSIC && muView != MU_NOW) ||
+               (page == PAGE_MOVIE && mvView == MV_LIST);
   bool tracks = (spPage() && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
   return (id == KEY_ENTER && tracks) || (id == KEY_DASH && lists);
 }
 
-// 長押し。SW1 は、Music と Spotify では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る。
+// 長押し。SW1 は、Music と Spotify と Movie では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る。
 // SW4 は曲選択の画面で、選んでいる曲に関係なくシャッフルで鳴らす。
 // SW3 は一覧と曲選択の画面で、再生中の画面へ移る
 static void onHold(int id) {
@@ -1769,12 +1855,18 @@ static void onHold(int id) {
       muShowNow();
       drawPage();
     }
+    if (page == PAGE_MOVIE && mvView == MV_LIST && mvCur >= 0) {
+      mvShowNow();
+      drawPage();
+    }
     return;
   }
   if (spPage()) {
     // まだ何も鳴らしていなければ、一覧で選んでいるものを鳴らす
     if (!spActive && !spPaused && spState != "paused") spPlay(spSel);
     else spTogglePause();
+  } else if (page == PAGE_MOVIE) {
+    mvPlayPause();
   } else if (page == PAGE_MUSIC && !autoPlay && muView != MU_NOW && albumCount()) {
     // 止まっていれば、一覧か曲選択で見ているアルバムを鳴らし始める
     musicPlay(muView == MU_TRACKS ? muTrackAlbum : muSel, "pause");
@@ -1877,12 +1969,13 @@ static void pollButton() {
   if (spPage() && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
   if (spPage() && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
   if (page == PAGE_MUSIC && millis() - lastMuScroll >= MSG_SCROLL_MS) scrollMusic();
+  if (page == PAGE_MOVIE && millis() - lastMvScroll >= MSG_SCROLL_MS) scrollMovie();
   // ゲームは開いている間だけ進める。着信などで画面が変わったら一時停止にしておく
   if (page == PAGE_GAME) gameUpdate();
   else if (gameBusy()) gamePause();
-  // Music と Spotify と YouTube (曲名や棒や動画は変わるたびに書いている)、Send (押したときに書いている)、流している本文、
-  // ゲーム (コマごとに書いている) は、描き直す間隔を空ける
-  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && !spPage() && page != PAGE_GAME &&
+  // Music と Spotify と YouTube と Movie (曲名や棒や動画は変わるたびに書いている)、Send (押したときに書いている)、
+  // 流している本文、ゲーム (コマごとに書いている) は、描き直す間隔を空ける
+  bool live = page != PAGE_MUSIC && page != PAGE_INPUT && !spPage() && page != PAGE_MOVIE && page != PAGE_GAME &&
               !(page == PAGE_MSG && msgCount);
   if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
 }
@@ -2899,7 +2992,7 @@ static void togglePause() {
 // 再生中にコマンドやボタンで中断されたかを見る。中断がなければ PLAY_NONE
 static PlayResult pollAbort() {
   pollButton();
-  if (spMode) return PLAY_STOP;  // ホームで Spotify か YouTube を開いた
+  if (spMode || mvRun) return PLAY_STOP;  // ホームで Spotify か YouTube を開いた、Movie で動画を鳴らし始めた
   pollRelay();
   // enter で送ると決めた文は、曲の途中でも待たずに送る。TLS の握手の間 (4〜8 秒) は無音になり、その後は続きから鳴る
   if (relayOutbox.length() && WiFi.status() == WL_CONNECTED) {
@@ -2960,18 +3053,33 @@ static PlayResult pollAbort() {
 
 // ---------------- microSD ----------------
 
-static bool isMp3(const String &name) {
-  // macOS がコピー時に作る "._曲名.mp3" は中身が MP3 ではないので除く
-  if (name.startsWith("._")) return false;
-  String lower = name;
-  lower.toLowerCase();
-  return lower.endsWith(".mp3");
+// 拡張子 (小文字)。macOS がコピー時に作る "._曲名.mp3" などは中身が違うので、拡張子が無いものとして除く
+static String fileExt(const String &name) {
+  int dot = name.lastIndexOf('.');
+  if (name.startsWith("._") || dot < 0) return String();
+  String ext = name.substring(dot);
+  ext.toLowerCase();
+  return ext;
 }
 
+static bool isMp3(const String &name) {
+  return fileExt(name) == ".mp3";
+}
+
+// 変換していない動画。Movie で見られるのは tools/movie_convert.py で .lcv にしたものだけなので、数だけ数えて知らせる
+static bool isRawVideo(const String &name) {
+  const String ext = fileExt(name);
+  for (const char *e : {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi"}) {
+    if (ext == e) return true;
+  }
+  return false;
+}
+
+// フォルダの中の MP3 (sdTracks) と動画 (mvFiles) を探す
 static void scanSdDir(const String &dir, int depth) {
   File d = SD.open(dir);
   if (!d) return;
-  while (sdTracks.size() < SD_MAX_TRACKS) {
+  while (true) {
     File e = d.openNextFile();
     if (!e) break;
     String name = e.name();
@@ -2979,7 +3087,11 @@ static void scanSdDir(const String &dir, int depth) {
     if (e.isDirectory()) {
       if (depth + 1 < SD_MAX_DEPTH && name != "System Volume Information") scanSdDir(path, depth + 1);
     } else if (isMp3(name)) {
-      sdTracks.push_back(path);
+      if (sdTracks.size() < SD_MAX_TRACKS) sdTracks.push_back(path);
+    } else if (fileExt(name) == ".lcv") {
+      if (mvFiles.size() < MV_MAX) mvFiles.push_back(path);
+    } else if (isRawVideo(name)) {
+      mvRaw++;
     }
     e.close();
   }
@@ -3028,18 +3140,25 @@ static bool sameFolder(const String &a, const String &b) {
   return sa == b.lastIndexOf('/') && strncasecmp(a.c_str(), b.c_str(), sa) == 0;
 }
 
-// カードを (挿し直されていても) 初期化し直し、MP3 の一覧とアルバム (フォルダ) の一覧を作り直す
+// カードを (挿し直されていても) 初期化し直し、MP3 の一覧とアルバム (フォルダ) の一覧、動画の一覧を作り直す
 static bool setupSD() {
+  const unsigned long t0 = millis();
   sdStale = false;
   sdBegin();
+  const unsigned long t1 = millis();
   sdTracks.clear();
   sdAlbums.clear();
+  mvFiles.clear();
+  mvRaw = 0;
+  mvInfoAt = -1;
   if (sdReady) {
     scanSdDir("/", 0);
-    // アルバムのフォルダごとに、曲番号順に並ぶよう、フォルダ・ファイル名の順に並べる
-    std::sort(sdTracks.begin(), sdTracks.end(), [](const String &a, const String &b) {
+    // アルバムのフォルダごとに、曲番号順に並ぶよう、フォルダ・ファイル名の順に並べる (動画も同じ順に)
+    auto byPath = [](const String &a, const String &b) {
       return comparePath(a, b) < 0;
-    });
+    };
+    std::sort(sdTracks.begin(), sdTracks.end(), byPath);
+    std::sort(mvFiles.begin(), mvFiles.end(), byPath);
     for (size_t i = 0; i < sdTracks.size(); i++) {
       if (i == 0 || !sameFolder(sdTracks[i - 1], sdTracks[i])) sdAlbums.push_back(i);
     }
@@ -3050,12 +3169,21 @@ static bool setupSD() {
   if (muPlayAlbum >= albumCount()) muPlayAlbum = 0;
   if (muTrackAlbum >= albumCount()) muTrackAlbum = 0;
   if (muTrackSel >= albumSize(muTrackAlbum)) muTrackSel = 0;
+  if (mvSel >= (int)mvFiles.size()) mvSel = 0;
+  // 開いている動画は、パスで探し直す (無くなっていれば閉じる)
+  if (mvCur >= 0) {
+    auto it = std::find(mvFiles.begin(), mvFiles.end(), mvCurPath);
+    if (it == mvFiles.end()) mvClose();
+    else mvCur = it - mvFiles.begin();
+  }
   if (!sdReady) {
     Serial.println("SD: no card");
     return false;
   }
-  Serial.printf("SD: %u tracks in %u folders%s\n", (unsigned)sdTracks.size(), (unsigned)sdAlbums.size(),
-                sdTracks.size() >= SD_MAX_TRACKS ? " (limit reached)" : "");
+  Serial.printf("SD: %u tracks in %u folders%s, %u movies (%d videos not converted), init %lu ms, scan %lu ms\n",
+                (unsigned)sdTracks.size(), (unsigned)sdAlbums.size(),
+                sdTracks.size() >= SD_MAX_TRACKS ? " (limit reached)" : "", (unsigned)mvFiles.size(), mvRaw,
+                t1 - t0, millis() - t1);
   return !sdTracks.empty();
 }
 
@@ -3760,6 +3888,7 @@ static void spotifyOn(int service) {
   spService = service;
   autoPlay = false;
   paused = false;
+  mvClose();  // SD を手放すので、開いていた動画も閉じる
   spLists.clear();
   spSel = 0;
   spPlaying = spPlayingTrack = spTrackList = -1;
@@ -3785,13 +3914,15 @@ static void spotifyOff() {
   openPage(PAGE_HOME);
 }
 
-// /spotify につなぐ前に、SD の曲の一覧と SD のライブラリを手放してヒープを空ける (SD から流す前に読み直す)
+// /spotify につなぐ前に、SD の曲と動画の一覧と SD のライブラリを手放してヒープを空ける (SD から流す前に読み直す)
 static void spotifyPrepare() {
   if (sdStale) return;
   sdTracks.clear();
   sdTracks.shrink_to_fit();
   sdAlbums.clear();
   sdAlbums.shrink_to_fit();
+  mvFiles.clear();
+  mvFiles.shrink_to_fit();
   SD.end();
   sdStale = true;
 }
@@ -4340,6 +4471,492 @@ static void spotifyCommand(const String &cmd) {
                      PAGE_NAMES[spService], PAGE_NAMES[spService], spService == PAGE_YOUTUBE ? "|invert" : "");
 }
 
+// ---------------- 動画 (Movie) ----------------
+//
+// PC で tools/movie_convert.py が mp4 などを .lcv (LCD 全体の白黒のコマと MP3) にしたものを、microSD から読んで出す。
+// コマの出し方は YouTube と同じ (ytShown に読んで ytRender())。音はイヤホンがつながっていれば SD の曲と同じく libmad で
+// 鳴らし、コマはその時刻の音をイヤホンへ送り出すときに出す。つながっていなければ動画だけを millis() で進める。
+// 途中でつながったり切れたりしても、その時刻から続ける
+
+// .lcv のヘッダを読んで確かめる。読めなければ false
+static bool lcvRead(File &f, LcvHeader &h) {
+  if (!f || f.read((uint8_t *)&h, sizeof(h)) != sizeof(h)) return false;
+  h.title[sizeof(h.title) - 1] = 0;
+  return memcmp(h.magic, "LCV1", 4) == 0 && h.recSize >= MV_REC && h.frames > 0 && h.fps >= 1 && h.fps <= 30 &&
+         h.cols == LCD_COLS && h.kbps > 0 && (uint64_t)h.audioOffset + h.audioSize <= f.size();
+}
+
+// i 番目の動画のヘッダを読んで、題名と長さを覚えておく (一覧で選ぶ動画が変わったときだけ SD を読む)。
+// 題名が無ければファイル名 (LCD に出せない字は化ける)
+static void mvInfo(int i) {
+  if (i == mvInfoAt || i < 0 || i >= (int)mvFiles.size()) return;
+  mvInfoAt = i;
+  LcvHeader h;
+  File f = SD.open(mvFiles[i], FILE_READ);
+  mvInfoOk = lcvRead(f, h);
+  f.close();
+  mvInfoTitle = mvInfoOk && h.title[0] ? String(h.title) : trackTitle(mvFiles[i]);
+  mvInfoDur = mvInfoOk ? h.durationMs : 0;
+}
+
+// 再生中の画面を、動画の見え方 (LCD 全体に動画) にしているか。一時停止中と、最初のコマを出すまでは文字だけ
+static bool mvVideoOn() {
+  return page == PAGE_MOVIE && mvView == MV_NOW && mvRun && mvHaveFrame && !mvNote.length();
+}
+
+// 一覧の1行目。選んでいる動画の題名 (開いている動画なら左端に ▶)。Music の曲選択と同じ見た目
+static String mvListTop() {
+  mvInfo(mvSel);
+  return pickTop(mvMarq, mvInfoTitle, mvSel == mvCur, false);
+}
+
+// 一覧の2行目。左に長さ、右に 番号/動画の数。.lcv として読めなければ bad file
+static String mvNumber() {
+  return String(mvSel + 1) + "/" + String(mvFiles.size());
+}
+
+static String mvListLine() {
+  mvInfo(mvSel);
+  const size_t width = LCD_COLS - mvNumber().length() - 1;
+  String left = mvInfoOk ? ytClock(mvInfoDur / 1000) : String("bad file");
+  while (left.length() < width) left += ' ';
+  return left.substring(0, width) + " " + mvNumber();
+}
+
+// 経過 / 長さ。width 桁に収まらなければ経過だけ
+static String mvTimeText(size_t width) {
+  String t = ytClock(mvPos / 1000);
+  const String d = ytClock(mvDur / 1000);
+  if (t.length() + 1 + d.length() <= width) t += "/" + d;
+  return t;
+}
+
+// 再生中の見え方で、文字だけのときの2行目。一時停止中は pause と 経過 / 長さ
+static String mvNowLine() {
+  if (mvNote.length()) return mvNote;
+  if (!mvRun) return "pause " + mvTimeText(LCD_COLS - 6);
+  return "loading...";
+}
+
+static void mvResetScroll() {
+  marqReset(mvMarq);
+  lastMvScroll = millis();
+}
+
+static void mvShowNow() {
+  mvView = MV_NOW;
+  mvResetScroll();
+}
+
+// 一覧に移り、i 番目を選んでおく
+static void mvShowList(int i) {
+  mvView = MV_LIST;
+  mvSel = (i >= 0 && i < (int)mvFiles.size()) ? i : 0;
+  mvResetScroll();
+}
+
+// 収まらない題名を1文字ずつ流す (一覧の1行目と、再生中の文字の見え方の1行目)
+static void scrollMovie() {
+  lastMvScroll = millis();
+  if (mvView == MV_NOW) {
+    if (!mvVideoOn() && marqStep(mvMarq, mvTitle.length(), LCD_COLS)) drawRow(0, marqText(mvMarq, mvTitle, LCD_COLS));
+    return;
+  }
+  if (mvFiles.empty()) return;
+  mvInfo(mvSel);
+  if (marqStep(mvMarq, mvInfoTitle.length(), pickTopWidth(mvSel == mvCur, false))) drawRow(0, mvListTop());
+}
+
+// ホームから Movie を開く。開いている動画があれば再生中の見え方 (一時停止している)、無ければ一覧から。
+// Spotify モードで手放した SD と、カードか動画が無かったとき (PC で変換して挿し直したところ) は、ここで読み直す。
+// 毎回は読み直さない (フォルダを探すのに、37 曲のカードで 1.5 秒かかった)。曲を流している間は、流しているファイルが
+// 読めなくなるので読み直さない
+static void movieOpen() {
+  if (sdStale || (!autoPlay && (!sdReady || mvFiles.empty()))) setupSD();
+  if (mvCur >= 0) mvShowNow();
+  else mvShowList(mvSel);
+  openPage(PAGE_MOVIE);
+}
+
+// 開いている動画を閉じる
+static void mvClose() {
+  mvCur = -1;
+  mvCurPath = "";
+  mvRun = false;
+  mvSeekReq = false;
+  mvHaveFrame = false;
+  mvPos = 0;
+}
+
+// 鳴らす / 一時停止する。鳴らすときは Music を止める (再生ループの中なら pollAbort() が抜ける)。loop() が playMovie() を呼ぶ
+static void mvSetRun(bool run) {
+  if (mvCur < 0 || run == mvRun) return;
+  mvRun = run;
+  if (run) {
+    autoPlay = false;
+    paused = false;
+  }
+  Serial.printf("movie: %s at %s\n", run ? "play" : "paused", ytClock(mvPos / 1000).c_str());
+}
+
+// i 番目の動画を頭から鳴らし、再生中の見え方に移る。.lcv として読めなければ一覧のまま (2行目に bad file と出る)
+static void mvPlay(int i) {
+  if (i < 0 || i >= (int)mvFiles.size()) return;
+  mvShowList(i);
+  mvInfo(i);
+  if (mvInfoOk) {
+    mvClose();
+    mvGen++;
+    mvCur = i;
+    mvCurPath = mvFiles[i];
+    mvTitle = mvInfoTitle;
+    mvDur = mvInfoDur;
+    mvShownK = -1;
+    mvNote = "";
+    mvSetRun(true);
+    mvShowNow();
+  }
+  if (page == PAGE_MOVIE) drawPage();
+}
+
+// SW1 長押し。開いている動画なら一時停止 / 再開、無ければ一覧で選んでいる動画を鳴らす
+static void mvPlayPause() {
+  if (mvCur < 0) {
+    if (!mvFiles.empty()) mvPlay(mvSel);
+    return;
+  }
+  mvNote = "";
+  mvSetRun(!mvRun);
+  if (page == PAGE_MOVIE) drawPage();
+}
+
+// 再生中の SW2 / SW3。今の所から delta ms 動かす (頭から、終わりの 1 秒前まで)。鳴らしていれば playMovie() が飛ぶ
+static void mvSeek(int32_t delta) {
+  if (mvCur < 0) return;
+  const int64_t last = mvDur > 1000 ? mvDur - 1000 : 0;
+  mvPos = (uint32_t)std::max<int64_t>(0, std::min<int64_t>((int64_t)mvPos + delta, last));
+  mvSeekReq = mvRun;
+  mvShownK = -1;
+  Serial.printf("movie: seek to %s\n", ytClock(mvPos / 1000).c_str());
+  if (!mvRun && page == PAGE_MOVIE) drawPage();  // 一時停止中の 経過 を書き直す
+}
+
+// Movie の画面のスイッチ。一覧で動画を選んで鳴らし、再生中は 10 秒ずつ戻る / 進む。SW1 で一覧へ、一覧からはホームへ
+// (ホームなどほかの画面に移ると一時停止になる)。長押しは onHold()
+static void onMovieKey(int id) {
+  if (mvView == MV_NOW) {
+    switch (id) {
+      case KEY_BACK:  // 一覧へ (鳴らし続ける)。開いている動画を選んでおく
+        mvShowList(mvCur >= 0 ? mvCur : mvSel);
+        drawPage();
+        break;
+      case KEY_DOT:
+        mvSeek(-(int32_t)MV_SEEK_MS);
+        break;
+      case KEY_DASH:
+        mvSeek(MV_SEEK_MS);
+        break;
+      case KEY_ENTER:  // 白黒を入れ替える (LCD の色で見やすい方にする。YouTube と共通)
+        ytInvert = !ytInvert;
+        Serial.printf("movie: invert=%d\n", ytInvert);
+        drawPage();
+        break;
+    }
+    return;
+  }
+  if (id == KEY_BACK) {
+    openPage(PAGE_HOME);
+    return;
+  }
+  if (mvFiles.empty()) return;
+  if (id == KEY_ENTER) {
+    // 開いている動画なら続きを (一時停止していれば再開して)、ほかの動画なら頭から鳴らす
+    if (mvSel != mvCur) {
+      mvPlay(mvSel);
+      return;
+    }
+    mvNote = "";
+    mvSetRun(true);
+    mvShowNow();
+  } else {
+    mvSel = stepSel(mvSel, mvFiles.size(), id);
+    mvResetScroll();
+  }
+  drawPage();
+}
+
+// 時刻 mvPos のコマを出す。コマが変わったときだけ SD から読む。読めなければ false
+static bool mvShowFrame(File &vf, const LcvHeader &h) {
+  const int32_t k = (int32_t)std::min<uint64_t>((uint64_t)mvPos * h.fps / 1000, h.frames - 1);
+  if (k == mvShownK) return true;
+  uint8_t rec[MV_REC];
+  if (!vf.seek(h.frameOffset + (uint32_t)k * h.recSize) || vf.read(rec, sizeof(rec)) != sizeof(rec)) return false;
+  mvShownK = k;
+  ytShown.offset = 0;
+  ytShown.ms = (uint32_t)((uint64_t)k * 1000 / h.fps);
+  ytShown.cols = LCD_COLS;
+  ytShown.n = std::min<uint8_t>(rec[0], 8);
+  memcpy(ytShown.cells, rec + 1, 2 * LCD_COLS);
+  memcpy(ytShown.glyphs, rec + 1 + 2 * LCD_COLS, ytShown.n * 8);
+  mvShownCount++;
+  const bool first = !mvHaveFrame;
+  mvHaveFrame = true;
+  if (page != PAGE_MOVIE || mvView != MV_NOW) return true;
+  if (first) drawPage();  // 文字だけの見え方から動画の見え方へ (自作文字も作り直す)
+  else if (mvVideoOn()) ytRender();
+  return true;
+}
+
+// 音を ms の所から鳴らし始める (初めと、飛んだときと、イヤホンがつながったとき)。MP3 は固定ビットレートなので、
+// 時刻から位置が決まる (フレームの途中に入っても、libmad が次のフレームで合わせる)。A2DP のバッファに残っている前の音
+// (0.4 秒ほど) を鳴らし終えるまでは、時計は ms で止まる
+static void mvAudioStart(File &af, const LcvHeader &h, uint32_t ms) {
+  if (mvAudio) mp3End(&mp3);
+  af.seek(h.audioOffset + (uint32_t)std::min<uint64_t>((uint64_t)ms * h.kbps / 8, h.audioSize));
+  mp3Start(&mp3, &af);
+  mvAudio = true;
+  mvAudioMs = ms;
+  mvWritten = 0;
+  for (YtMark &k : ytMarks) k = {barFrames, ms};
+}
+
+// 音をやめ、ms から millis() の時計で進める (イヤホンが切れたとき)
+static void mvAudioStop(uint32_t ms) {
+  if (mvAudio) mp3End(&mp3);
+  mvAudio = false;
+  mvBaseMs = ms;
+  mvBaseAt = millis();
+}
+
+// 動画の今の時刻 (ms)。音を鳴らしていれば、今イヤホンへ送り出している音の時刻 (YouTube の ytTick() と同じく
+// ytMarks から)。鳴らしていなければ millis() で
+static uint32_t mvClock() {
+  if (!mvAudio) return mvBaseMs + (millis() - mvBaseAt);
+  const uint32_t now = a2dpNowFrame();
+  const YtMark *cur = nullptr;
+  for (const YtMark &k : ytMarks) {
+    if ((int32_t)(k.frame - now) <= 0 && (!cur || (int32_t)(k.frame - cur->frame) > 0)) cur = &k;
+  }
+  return cur ? cur->offset : mvAudioMs;
+}
+
+// MP3 の 1 フレームをデコードしてイヤホンに書き、その終わりの時刻を ytMarks に記録する。MP3 を読み終えたら
+// (か読めなければ)、動画の終わりまでは同じ長さの無音を書いて時計を進める。eof は読み終えたか、rateMul は引き伸ばす倍率
+static void mvAudioFrame(bool &eof, uint32_t &rateMul) {
+  static const int16_t ZERO[64] = {};  // 無音 32 フレーム (ステレオ)
+  if (!eof && mp3Decode(&mp3)) {
+    struct mad_pcm &pcm = mp3.synth.pcm;
+    rateMul = pcm.samplerate ? (uint32_t)A2DP_RATE / pcm.samplerate : 0;
+    if (rateMul == 0 || rateMul > 4 || rateMul * pcm.samplerate != (uint32_t)A2DP_RATE) {
+      Serial.printf("movie: unsupported %uHz\n", pcm.samplerate);
+      rateMul = 1;
+      eof = true;
+      return;
+    }
+    if (pcm.channels == 1) {
+      for (size_t i = 0; i < pcm.length; i++) pcm.samplesX[i][1] = pcm.samplesX[i][0];
+    }
+    writePcm(&pcm.samplesX[0][0], pcm.length, 2, rateMul);
+    mvWritten += pcm.length * rateMul;
+  } else {
+    eof = true;
+    for (int i = 0; i < 1152 / 32; i++) writePcm(ZERO, 32, 2, 1);
+    mvWritten += 1152;
+  }
+  YtMark &k = ytMarks[ytMarkHead];
+  ytMarkHead = (ytMarkHead + 1) % YT_MARKS;
+  k = {barFrames, mvAudioMs + (uint32_t)((uint64_t)mvWritten * 1000 / A2DP_RATE)};
+}
+
+// カードが応答しなくなったとき、初期化し直して 2 つとも開き直す (音の方は読めていた所へ進める。sdReopen() と同じ)
+static bool mvReopen(File &vf, File &af, const char *why) {
+  vf.close();
+  if (!sdReopen(af, mvCurPath, why)) return false;
+  vf = SD.open(mvCurPath, FILE_READ);
+  return (bool)vf;
+}
+
+// 開いている動画 (mvCur) を mvPos から鳴らす。Movie の画面を開いていて、一時停止していない間ここで回る
+// (ほかの画面に移ったら一時停止にして返す)。終わったら一覧の次の動画へ (最後の動画なら閉じて一覧へ)
+static void playMovie() {
+  LcvHeader h;
+  File vf = SD.open(mvCurPath, FILE_READ);  // コマを読む
+  File af = SD.open(mvCurPath, FILE_READ);  // 音を読む
+  if (!lcvRead(vf, h) || !af) {
+    vf.close();
+    af.close();
+    mvNote = "open error";
+    mvRun = false;
+    Serial.printf("movie: cannot open %s\n", mvCurPath.c_str());
+    drawPage();
+    return;
+  }
+  // SD から流すときと同じく、Wi-Fi は省電力にする (常時受信だと Bluetooth と無線を取り合って音が途切れる)
+  if (WiFi.status() == WL_CONNECTED) WiFi.defaultLowPowerMode();
+  Serial.printf("movie: %s from %s (%lu frames at %u fps, audio %luKB, earphone %s)\n", mvCurPath.c_str(),
+                ytClock(mvPos / 1000).c_str(), (unsigned long)h.frames, h.fps, (unsigned long)(h.audioSize / 1024),
+                a2dp.connected() ? "on" : "off");
+
+  mvAudio = false;
+  mvAudioStop(mvPos);
+  mvSeekReq = false;
+  mvShownK = -1;
+  const uint32_t gen = mvGen;
+  bool eof = false, done = false, failed = false;
+  uint32_t rateMul = 1;
+  int reopens = 0;
+  uint32_t underflows = 0;
+  uint32_t at = mvPos;  // 最後に出した時刻 (ログ用。stop で閉じると mvPos は 0 に戻る)
+  unsigned long lastCheck = 0;
+  const unsigned long started = millis();
+  a2dp.getUnderflow();
+
+  while (mvRun && page == PAGE_MOVIE && !spMode) {
+    pollButton();
+    pollRelay();  // Discord のメッセージが届くと Receive の画面に変わり、一時停止になる
+    String cmd = nextCommand();
+    if (cmd.length() && !movieCommand(cmd)) {
+      if (cmd.startsWith("vol")) setVolume(cmd);
+      else if (cmd.startsWith("wifi")) setWiFi(cmd);
+      else if (cmd.startsWith("lcd")) lcdCommand(cmd);
+      else if (cmd.startsWith("sw ")) swCommand(cmd);
+      else if (cmd == "status") printStatus();
+      else Serial.println("動画の再生中に使えるのは movie [番号|invert|off] / pause / next / prev / stop / vol / wifi / lcd /"
+                          " sw / status");
+    }
+    if (!mvRun || page != PAGE_MOVIE || spMode || mvCur < 0 || mvGen != gen) break;
+
+    // イヤホンがつながった / 切れた。飛んだ。どれも今の時刻から続ける
+    const bool bt = a2dp.connected();
+    if (mvSeekReq || bt != mvAudio) {
+      if (bt != mvAudio) {
+        Serial.printf("movie: earphone %s at %s\n", bt ? "on" : "off", ytClock(mvPos / 1000).c_str());
+        // つながったばかりの A2DP のバッファには前の音が残っていることがあるので、無音で埋めてから鳴らす
+        // (feedSilence() の説明。時計は埋めた無音を鳴らし終えるまで止まる)
+        if (bt) feedSilence();
+      }
+      mvSeekReq = false;
+      if (bt) {
+        mvAudioStart(af, h, mvPos);
+        eof = false;
+      } else {
+        mvAudioStop(mvPos);
+      }
+    }
+
+    // 音は、MP3 の1フレームを書く空きと pcmChunk の端数を書き出す空きがあるときに 1 フレーム進める (playSd() と同じ)
+    bool wrote = false;
+    if (mvAudio && (size_t)a2dp.availableForWrite() >= 1152 * 4 * rateMul + sizeof(pcmChunk)) {
+      const bool wasEof = eof;
+      mvAudioFrame(eof, rateMul);
+      wrote = true;
+      if (eof && !wasEof && mp3.readError && reopens < SD_REOPEN_MAX) {
+        // 途中で読めなくなった。カードを初期化し直して続きから読む (デコーダには読めた分が残っている)
+        reopens++;
+        if (mvReopen(vf, af, "read error")) {
+          mp3.readError = false;
+          eof = false;
+        }
+      }
+    }
+
+    mvPos = at = mvClock();
+    if (mvPos >= mvDur) {
+      done = true;
+      break;
+    }
+    if (!mvShowFrame(vf, h) && !(reopens++ < SD_REOPEN_MAX && mvReopen(vf, af, "frame read error"))) {
+      failed = true;
+      break;
+    }
+
+    if (millis() - lastCheck >= 500) {
+      lastCheck = millis();
+      if (mvAudio && a2dp.getUnderflow() && millis() - started >= 1000) {
+        underflows++;
+        Serial.printf("underflow at %s\n", ytClock(mvPos / 1000).c_str());
+      }
+    }
+    if (!wrote) delay(1);
+  }
+
+  if (mvAudio) mp3End(&mp3);
+  mvAudio = false;
+  vf.close();
+  af.close();
+  Serial.printf("movie: stopped at %s, frames shown %lu, underflow %lu times, sd reopen %d times\n",
+                ytClock(at / 1000).c_str(), (unsigned long)mvShownCount, (unsigned long)underflows, reopens);
+  if (mvGen != gen) return;  // 別の動画にした。loop() が次の playMovie() で鳴らす
+  if (failed) {
+    mvNote = "sd error";
+    mvRun = false;
+    if (page == PAGE_MOVIE) drawPage();
+  } else if (done) {
+    // 一覧の次の動画へ。最後の動画なら閉じて一覧へ (次の動画が読めなければ、そこで止まって一覧に bad file と出る)
+    const int next = mvCur + 1;
+    mvClose();
+    mvShowList(next < (int)mvFiles.size() ? next : next - 1);
+    if (next < (int)mvFiles.size()) mvPlay(next);
+    else if (page == PAGE_MOVIE) drawPage();
+  } else if (mvRun) {
+    mvSetRun(false);  // ほかの画面に移った
+  }
+}
+
+// "movie" で一覧と様子をシリアルに出す。flush は LCD に描くのに止まった最長の時間 (出すたびに戻す)
+static void moviePrint() {
+  for (size_t i = 0; i < mvFiles.size(); i++) {
+    Serial.printf("%c%3u %s\n", (int)i == mvCur ? '>' : ' ', (unsigned)(i + 1), mvFiles[i].c_str());
+  }
+  Serial.printf("movie: %u files (%d videos not converted), cur=%d run=%d at %s/%s audio=%d frames shown %lu "
+                "flush %lu us invert %d note=\"%s\"\n",
+                (unsigned)mvFiles.size(), mvRaw, mvCur + 1, mvRun, ytClock(mvPos / 1000).c_str(),
+                ytClock(mvDur / 1000).c_str(), mvAudio, (unsigned long)mvShownCount, (unsigned long)gameFlushMaxUs,
+                ytInvert, mvNote.c_str());
+  gameFlushMaxUs = 0;
+}
+
+// "movie" で Movie の画面を開く (開いていれば一覧と様子を出す)。"movie 3" で 3 番目を頭から鳴らす。"movie invert" で
+// 動画の白黒を入れ替え、"movie off" で動画を閉じてホームへ。Movie の画面では pause (再生 / 一時停止)・next / prev
+// (10 秒進む / 戻る)・stop (閉じる) も受け付ける。受け付けたら true
+static bool movieCommand(const String &cmd) {
+  if (cmd.startsWith("movie")) {
+    String arg = cmd.substring(5);
+    arg.trim();
+    if (spMode) {
+      Serial.printf("movie: %s モードを抜けてから\n", PAGE_NAMES[spService]);
+    } else if (arg == "off") {
+      mvClose();
+      openPage(PAGE_HOME);
+    } else if (arg == "invert") {
+      ytInvert = !ytInvert;
+      Serial.printf("movie: invert=%d\n", ytInvert);
+      if (page == PAGE_MOVIE) drawPage();
+    } else if (arg.length()) {
+      if (page != PAGE_MOVIE) movieOpen();
+      mvPlay(arg.toInt() - 1);
+    } else if (page != PAGE_MOVIE) {
+      movieOpen();
+    } else {
+      moviePrint();
+    }
+    return true;
+  }
+  if (page != PAGE_MOVIE || spMode) return false;
+  if (cmd == "pause") {
+    mvPlayPause();
+  } else if (cmd == "next" || cmd == "prev") {
+    mvSeek(cmd == "next" ? (int32_t)MV_SEEK_MS : -(int32_t)MV_SEEK_MS);
+  } else if (cmd == "stop") {
+    mvClose();
+    mvShowList(mvSel);
+    drawPage();
+  } else {
+    return false;
+  }
+  return true;
+}
+
 // ---------------- コマンド ----------------
 
 static void startAutoPlay(Step step) {
@@ -4362,7 +4979,8 @@ static void printSdTracks() {
 
 static const char *HELP =
     "commands: sd / pause / next / prev / rand / stop / list / now / shuffle / vol [0-100|+|-] /"
-    " wifi on|off|fast|save / bt / scan / relay [1|2] / spotify [n|off] / youtube [n|off|invert] / status /"
+    " wifi on|off|fast|save / bt / scan / relay [1|2] / spotify [n|off] / youtube [n|off|invert] /"
+    " movie [n|off|invert] / status /"
     " lcd [chars|resync on|off] /"
     " sw <1-4> [ms] / game [lcd|level n]";
 
@@ -4389,6 +5007,7 @@ static void handleCommand(String cmd) {
     gameCommand(cmd);
     return;
   }
+  if (movieCommand(cmd)) return;  // "movie" と、Movie の画面での pause / next / prev / stop
   if (spMode) {
     spotifyCommand(cmd);
     return;
@@ -4555,6 +5174,15 @@ void loop() {
     if (relayOpen && spWs) playSpotify();
     else feedSilence();
     return;
+  }
+
+  // 動画 (Movie)。鳴らしている間は、Movie の画面を開いているあいだ playMovie() の中で回る (ほかの画面に移ると一時停止)
+  if (mvRun) {
+    if (page == PAGE_MOVIE) {
+      playMovie();
+      return;
+    }
+    mvSetRun(false);
   }
 
   // 止まっているときの BOOTSEL は連続再生の開始。再生中は pollAbort() が
