@@ -143,6 +143,19 @@ poly([(1, LS_B), (1, 12)], V5_C)
 poly([(2, LS_B), (2, 11), (1, 11)], SDA_C)
 poly([(3, LS_B), (3, 10), (1, 10)], SCL_C)
 poly([(1, 9), (1, 1), (2, 1)], GND_C)
+
+# ---- GPS（M5Stack Unit GPS v1.1 = AT6668 + MAX2659）----
+# 本体は基板に載せず、Grove（HY2.0-4P）→ メスのジャンパワイヤの変換ケーブルで GPS 用ピン（1×4）につなぐ。
+# GPS 用ピンは Pico の 6番（GP4 = UART1 TX）・7番（GP5 = UART1 RX）ピンの真下、行16 に立てる。
+# 左から GND・5V・GP4・GP5 で、Grove の線の並び（黄・白・赤・黒）を右から並べた順になる。
+GPS_C = "#d0367a"
+GPS_Y = 16
+GPS_HDR = {5: "GND", 6: "5V", 7: "GP4", 8: "GP5"}
+poly([(7, 19), (7, GPS_Y)], GPS_C)                      # GP4（TX）→ 白 → GPS の入力
+poly([(8, 19), (8, GPS_Y)], GPS_C)                      # GP5（RX）← 黄 ← GPS の出力
+poly([(4, 19), (4, GPS_Y), (5, GPS_Y)], GND_C)          # Pico 3番ピン GND
+poly([(1, LS_B), (1, 15), (6, 15), (6, GPS_Y)], V5_C)   # レベルシフタの 5V から（レベルシフタの下を通る）
+
 # 残りの 2 本は裏の被覆線にする。両端はピンや部品の足のランドに直接はんだ付けする。
 # 5V: x=1 は 3.3V が使うので、基板の左端（穴の外側）を通す
 # 3.3V（microSD 側）: 設置済みの GND の線の上を越える
@@ -162,7 +175,7 @@ left = ["GP0", "GP1", "GND", "GP2", "GP3", "GP4", "GP5", "GND", "GP6", "GP7",
 right = {21: "GP16", 22: "GP17", 23: "GND", 24: "GP18", 25: "GP19", 26: "GP20", 27: "GP21",
          28: "GND", 29: "GP22", 30: "RUN", 31: "GP26", 32: "GP27", 33: "GND", 34: "GP28",
          35: "VREF", 36: "3V3", 37: "EN", 38: "GND", 39: "VSYS", 40: "VBUS"}  # 35=ADC_VREF, 37=3V3_EN
-used = {1, 2, 14, 15, 16, 17, 18, 21, 23, 24, 25, 26, 36, 40}
+used = {1, 2, 3, 6, 7, 14, 15, 16, 17, 18, 21, 23, 24, 25, 26, 36, 40}
 
 def pin_x(n):
     return n + 1 if n <= 20 else 42 - n   # 1番 = (2,19)、40番 = (2,26)
@@ -277,7 +290,7 @@ for y, names, down in ((LS_T, LS_TOP, True), (LS_B, LS_BOT, False)):
         tx, ty, rot = (x - 2.5, hy(y) + 9, 90) if down else (x + 2.5, hy(y) - 9, -90)
         add(f'<text transform="translate({tx},{ty}) rotate({rot})" font-size="7" fill="{"#1d3f8a" if BACK else "#fff"}" '
             f'font-weight="bold">{n}</text>')
-label(hx(LS_X[-1]) + SIDE * 17, hy(15.5) + 4, "← レベルシフタ" if SIDE > 0 else "レベルシフタ →",
+label(hx(LS_X[-1]) + SIDE * 17, hy(14.5) + 4, "← レベルシフタ" if SIDE > 0 else "レベルシフタ →",
       "#1d3f8a", 9.5, "start" if SIDE > 0 else "end")
 
 # LCD 用ピン（1×4）。ピン名は基板の外側に書く
@@ -287,6 +300,15 @@ for y, n in HDR.items():
         f'<circle cx="{x}" cy="{hy(y)}" r="2.5" fill="#d9b44a"/>')
     label(x - 9 * SIDE, hy(y) + 3, n, "#222", 7.5, "end" if SIDE > 0 else "start")
 label(hx(4) + SIDE * 10, hy(10.5) + 4, "← LCD 用ピン" if SIDE > 0 else "LCD 用ピン →",
+      "#222", 9.5, "start" if SIDE > 0 else "end")
+
+# GPS 用ピン（1×4）。ピン名はピンの上に書く
+for gx, n in GPS_HDR.items():
+    x = hx(gx)
+    add(f'<rect x="{x - 5}" y="{hy(GPS_Y) - 5}" width="10" height="10" fill="#222" stroke="#000"/>'
+        f'<circle cx="{x}" cy="{hy(GPS_Y)}" r="2.5" fill="#d9b44a"/>')
+    label(x, hy(GPS_Y) - 9, n, "#222", 7.5, halo=True)
+label(hx(8) + SIDE * 12, hy(GPS_Y) + 3.5, "← GPS 用ピン" if SIDE > 0 else "GPS 用ピン →",
       "#222", 9.5, "start" if SIDE > 0 else "end")
 
 # ---- タクトスイッチ（12mm 角、足は 2×5 穴）----
@@ -329,6 +351,10 @@ rows_ += [
     (SD_C, "microSD  Pico 26番 GP20→CS、25番 GP19→CMD、24番 GP18→CLK、21番 GP16→DAT0（Pico の下の行22〜24・26）"),
     (GND_C, "microSD VSS  Pico 23番ピン GND → 行25（Pico の下）→ x=33 → VSS。パスコンの GND 側もこの線"),
     (SD_C, "microSD  DAT2・CS・CMD・DAT0・DAT1 は 10kΩ で行14（3.3V）へ。VDD–VSS 間に 10μF と 0.1μF"),
+    (GPS_C, "GPS TX  Pico 6番ピン GP4（UART1 TX）→ 真下の GPS 用ピン GP4 → Grove の白（GPS の入力）"),
+    (GPS_C, "GPS RX  Pico 7番ピン GP5（UART1 RX）← 真下の GPS 用ピン GP5 ← Grove の黄（GPS の出力）"),
+    (GND_C, "GPS GND  Pico 3番ピン GND → x=4 → 行16 → GPS 用ピン GND（Grove の黒）"),
+    (V5_C, "GPS 5V  レベルシフタ 5V (1,13) → x=1 → 行15 → x=6 → GPS 用ピン 5V（Grove の赤）"),
 ]
 for i, (c, t) in enumerate(rows_):
     yy = ly + 22 + i * 21
@@ -343,6 +369,8 @@ notes = [
     "・点線の四角は反対側（表）にある部品の輪郭。はんだ付けするのは丸い足とピン",
     "・白い縁取りの 2 本は被覆線。3.3V は設置済みの GND の線の上を越え、5V は基板の端（x=1 の外側）を通る",
     "・ほかの線どうしの交差はないので、スズメッキ線でよい",
+    "・GPS 用ピンの 5V は、レベルシフタの 5V の足 (1,13) から x=1 を行15 まで伸ばして引く（表ではレベルシフタの下）",
+    "・(1,16) は空けておく。上の (1,17) は 3.3V なので、はんだがつながると 5V と 3.3V がショートする",
 ] if BACK else [
     "・スイッチ4個・Pico・その配線（GND を含む）は設置済み。この図ではそこを変えない",
     "・スイッチは対角の2本（左下と右上）だけを使う。GPIO は INPUT_PULLUP、押すと LOW",
@@ -355,6 +383,10 @@ notes = [
     "・LCD 用ピンは上から VCC・SDA・SCL・GND。バックパックの並び（GND・VCC・SDA・SCL）と違うので、名前どうしをつなぐ",
     "・CK-40 は 1〜8番ピン（1×8）だけピンヘッダを付ける。FG・CD の穴の下は配線が通るので、ピンを付けない",
     "・CK-40 の差し込み口は基板の上端から少しはみ出す（カードを押し込みやすい）",
+    "・GPS は M5Stack Unit GPS v1.1（AT6668 + MAX2659）。基板には載せず、Grove → メスのジャンパワイヤの変換ケーブルでつなぐ",
+    "・GPS 用ピンは左から GND（黒）・5V（赤）・GP4（白）・GP5（黄）。Grove の線の並び（黄・白・赤・黒）を右から並べた順",
+    "・Unit の RX（黄）・TX（白）は Pico から見た名前。黄が GPS の出力で GP5（RX）へ、白が GPS の入力で GP4（TX）から",
+    "・GPS の UART は 3.3V（Unit の中の LDO が 5V から作る）なので、レベル変換は要らない。既定は 115200bps 8N1、NMEA",
 ]
 for i, t in enumerate(notes):
     add(f'<text x="{OX - 20}" y="{ly2 + 22 + i * 21}" font-size="12.5" fill="#333">{t}</text>')

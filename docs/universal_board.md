@@ -4,7 +4,7 @@ espoke の部品（Pico WH・表示切り替えスイッチ・LCD 用のレベ�
 **ユニバーサル基板**にはんだ付けしてまとめる手順です。
 電子工作が初めてでも迷わないように、道具の準備から動作確認まで順番に書いています。
 
-> スイッチ 4 個（GP10〜13）と microSD（CK-40）まで載せた最新の配置は、
+> スイッチ 4 個（GP10〜13）と microSD（CK-40）、GPS 用ピン（GP4・GP5）まで載せた最新の配置は、
 > [`board_layout.svg`](board_layout.svg)（表）と [`board_layout_back.svg`](board_layout_back.svg)（裏）にあります。
 > 生成スクリプトは `tools/gen_board_layout.py`。この手順書は、スイッチ 1 個の最小構成で説明します。
 
