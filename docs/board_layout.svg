@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="890" height="1499" viewBox="0 0 890 1499" font-family="Noto Sans CJK JP, Noto Sans JP, sans-serif">
-<rect width="890" height="1499" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="890" height="1520" viewBox="0 0 890 1520" font-family="Noto Sans CJK JP, Noto Sans JP, sans-serif">
+<rect width="890" height="1520" fill="#ffffff"/>
 <text x="40" y="32" font-size="20" font-weight="bold" fill="#222">espoke ユニバーサル基板 配置図（36×27穴）</text>
 <text x="40" y="54" font-size="13" fill="#555">部品面（表）から見た図。座標は (x=列, y=行)、左下が (1,1)。1マス = 2.54mm</text>
 <rect x="42.4" y="72.4" width="805.2" height="607.2" rx="6" fill="#e9dcc0" stroke="#b39c6b" stroke-width="2"/>
@@ -1396,6 +1396,7 @@
 <text x="40" y="1384" font-size="12.5" fill="#333">・CK-40 の差し込み口は基板の上端から少しはみ出す（カードを押し込みやすい）</text>
 <text x="40" y="1405" font-size="12.5" fill="#333">・GPS は M5Stack Unit GPS v1.1（AT6668 + MAX2659）。基板には載せず、Grove → メスのジャンパワイヤの変換ケーブルでつなぐ</text>
 <text x="40" y="1426" font-size="12.5" fill="#333">・GPS 用ピンは左から GND（黒）・5V（赤）・GP4（白）・GP5（黄）。Grove の線の並び（黄・白・赤・黒）を右から並べた順</text>
-<text x="40" y="1447" font-size="12.5" fill="#333">・Unit の RX（黄）・TX（白）は Pico から見た名前。黄が GPS の出力で GP5（RX）へ、白が GPS の入力で GP4（TX）から</text>
-<text x="40" y="1468" font-size="12.5" fill="#333">・GPS の UART は 3.3V（Unit の中の LDO が 5V から作る）なので、レベル変換は要らない。既定は 115200bps 8N1、NMEA</text>
+<text x="40" y="1447" font-size="12.5" fill="#333">・GPS の GND は 3番ピン (4,19) から x=4 を下ろす。真上の 4番ピン (5,19) は GP2 なので、まっすぐ引かない（GND が浮いて GPS が動かない）</text>
+<text x="40" y="1468" font-size="12.5" fill="#333">・Unit の RX（黄）・TX（白）は Pico から見た名前。黄が GPS の出力で GP5（RX）へ、白が GPS の入力で GP4（TX）から</text>
+<text x="40" y="1489" font-size="12.5" fill="#333">・GPS の UART は 3.3V（Unit の中の LDO が 5V から作る）なので、レベル変換は要らない。既定は 115200bps 8N1、NMEA</text>
 </svg>

@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="890" height="1331" viewBox="0 0 890 1331" font-family="Noto Sans CJK JP, Noto Sans JP, sans-serif">
-<rect width="890" height="1331" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="890" height="1352" viewBox="0 0 890 1352" font-family="Noto Sans CJK JP, Noto Sans JP, sans-serif">
+<rect width="890" height="1352" fill="#ffffff"/>
 <text x="40" y="32" font-size="20" font-weight="bold" fill="#222">espoke ユニバーサル基板 配置図（36×27穴）</text>
 <text x="40" y="54" font-size="13" fill="#b03030" font-weight="bold">はんだ面（裏）から見た図。表の図と左右が反対で、x=1 は右端。座標は表の図と同じ番号</text>
 <rect x="42.4" y="72.4" width="805.2" height="607.2" rx="6" fill="#e9dcc0" stroke="#b39c6b" stroke-width="2"/>
@@ -1388,4 +1388,5 @@
 <text x="40" y="1258" font-size="12.5" fill="#333">・ほかの線どうしの交差はないので、スズメッキ線でよい</text>
 <text x="40" y="1279" font-size="12.5" fill="#333">・GPS 用ピンの 5V は、レベルシフタの 5V の足 (1,13) から x=1 を行15 まで伸ばして引く（表ではレベルシフタの下）</text>
 <text x="40" y="1300" font-size="12.5" fill="#333">・(1,16) は空けておく。上の (1,17) は 3.3V なので、はんだがつながると 5V と 3.3V がショートする</text>
+<text x="40" y="1321" font-size="12.5" fill="#333">・GPS の GND は 3番ピン (4,19) から。GPS 用ピン GND (5,16) の真上の 4番ピン (5,19) は GP2 なので、まっすぐ引かない</text>
 </svg>
