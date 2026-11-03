@@ -10,6 +10,9 @@ Discord の決めたサーバー (かチャンネル) に書き込まれた発�
 Bot を入れられないサーバーでは --notify にする。同じ PC で公式の Discord アプリを動かし、
 その出すデスクトップ通知を受け取る。送るのは webhook (下の「--notify」の節)。
 
+ポケベル (espoke) どうしのチャットも中継する。Pico の Chat の画面で打った文を、つないでいるほかの Pico に流し、
+tailnet の中だけに開けた地図のページの右に出す (下の「チャット」の節)。
+
 Spotify は、同じ PC で動かす go-librespot (非公式の Spotify Connect クライアント) の音を MP3 にして
 Pico へ流す。Pico は SD の曲と同じく libmad で鳴らす。プレイリストの一覧や曲送りは go-librespot の
 API を呼ぶ (Spotify の Web API や開発者アプリは使わない)。使い方は下の「Spotify」の節。
@@ -48,6 +51,7 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     YOUTUBE_FPS         LCD に出す動画の 1 秒あたりのコマ数。既定 6 (Pico の音が途切れるなら下げる)
     YOUTUBE_FULL        0 なら、横長の動画は LCD 全体ではなく左の 6x2 文字に収める (右に題名と時間が出る)
     GPS_FILE            Pico から届いた GPS の位置を足していくファイル。既定 ~/espoke/gps.jsonl (消さずに増える)
+    CHAT_FILE           ポケベルどうしのチャットを足していくファイル。既定 ~/espoke/chat.jsonl (消さずに増える)
     MAP_PORT            地図のページのポート。既定 8020
     MAP_ADDR            地図のページを待つアドレス。既定 0.0.0.0。どこで待っても、tailnet (100.64.0.0/10) と
                         この PC 自身以外からは 403 を返す
@@ -62,6 +66,8 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     GET  /stream?after=<id>  after より新しい発言を1行ずつ流し続ける (X-Key ヘッダが要る)
     POST /stream?after=<id>  本文 (UTF-8) を Discord に送ってから、GET と同じく流す (X-Key ヘッダが要る)。
                              送った結果は X-Sent ヘッダ ("ok" か理由)。--no-discord なら差出人 espoke の発言として流し返す
+    POST /stream?after=<id>&to=chat
+                             本文をポケベルどうしのチャットに入れてから、GET と同じく流す
     POST /post               本文 (UTF-8) を差出人 test の発言として流す。試験用 (X-Key ヘッダが要る)
     GET  /spotify?win=<n>    WebSocket。Spotify の音と操作をやりとりする (X-Key ヘッダが要る。下の「Spotify」の節)
     GET  /youtube?win=<n>    WebSocket。YouTube の音と動画と操作をやりとりする (X-Key ヘッダが要る。下の「YouTube」の節)
@@ -70,16 +76,27 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
 サーバー全体を受け取るときは、本文の頭に "#チャンネル名 " を付ける。
 ID は Discord のメッセージ ID (snowflake) で、時間とともに増えるので、Pico は最後に
 受け取った ID を after に付けてつなぎ直せば取りこぼさない。
+ポケベルどうしのチャットは、ID の頭に C (つないでいる Pico 自身が送った文なら c) を付けた同じ形の行で、
+名前は送った Pico の名前。ID は Discord と同じ並びの数なので、after には C を除いて付ける。
+
+Pico は X-Pager ヘッダで自分の名前 (arduino_secrets.h の PAGER_NAME) を知らせてくる (/stream と /spotify と /youtube)。
+GPS の位置とチャットは、この名前で分ける。無ければ espoke。
 
 /stream の流れを受けている間、Pico は同じ接続で GPS の位置を 1 分ごとに 1 行送ってくる:
     G <時刻 (UNIX 秒、GPS の UTC)> <緯度> <経度> <km/h> <衛星の数> <HDOP> LF
 これが届くのは Funnel の TCP 転送 (10000 番、TLS はこの中継で受ける) でつないだときだけ。位置は GPS_FILE に足し、
 tailnet の中だけに開けた地図のページ (http://<この PC の tailnet の IP>:MAP_PORT/) に出す。
-Pi 5 では fbservo で全画面に開く。
+Pi 5 では fbservo で全画面に開く。左が地図 (Pico ごとに色を分けた今の位置と通った道)、右がチャット。
 
 空行は2つの意味で送る。つないだ直後は、溜まっていた分のあとに1つ送り、「つなぐ前から
 あった分はここまで」と知らせる (Pico は起動直後の古い発言で着信を知らせないようにする)。
 その後は何もない間 HEARTBEAT 秒ごとに送り、Pico が「つながっているが新着がない」と分かるようにする。
+
+チャット:
+    Pico の Chat の画面で打った文は POST /stream?to=chat で届く。CHAT_FILE に足し、直近を Discord の発言と同じ置き場
+    (STORE) に入れて、つないでいる Pico 全部に流す (送った Pico にも流し返す。Pico はそれを着信として知らせない)。
+    STORE は Discord とチャットを別々に KEEP 件ずつ持つので、Discord の発言が多くてもチャットは押し出されない。
+    地図のページは /feed.json でチャットも読む。チャットは Discord には送らない。
 
 --notify:
     Bot を使えないときは、公式の Discord アプリを画面なし (Xvfb) で動かしておき、この中継が D-Bus の
@@ -452,29 +469,36 @@ def make_line(msg_id, when, author, text, channel=None):
 # ---------------- 発言の置き場 ----------------
 
 class Store:
-    """直近 KEEP 件の発言を ID 順に持つ。新着が来たら配信中のスレッドを起こす"""
+    """直近の発言を ID 順に持つ。Discord の発言とポケベルどうしのチャット (kind "chat") を、種類ごとに KEEP 件まで
+    (Discord の発言が多くても、チャットが押し出されないように)。新着が来たら配信中のスレッドを起こす"""
 
     def __init__(self):
-        self.cond = threading.Condition()
+        self.cond = threading.Condition()  # RLock なので、取ったまま next_id と add を呼べる
         self.ids = []
-        self.lines = []
+        self.items = []   # (行, 種類, チャットを送った Pico の名前 (Discord は None))
 
-    def add(self, msg_id, line):
+    def add(self, msg_id, line, kind="discord", pager=None):
         with self.cond:
             if msg_id in self.ids:
                 return  # 起動時の履歴の読み込みと on_message が重なったとき
             i = bisect.bisect(self.ids, msg_id)
             self.ids.insert(i, msg_id)
-            self.lines.insert(i, line)
-            del self.ids[:-KEEP], self.lines[:-KEEP]
+            self.items.insert(i, (line, kind, pager))
+            same = [j for j, item in enumerate(self.items) if item[1] == kind]
+            for j in reversed(same[:-KEEP]):
+                del self.ids[j], self.items[j]
             self.cond.notify_all()
 
     def since(self, after):
-        """after より新しい (ID, 行) の並び。after が None なら直近 BACKLOG 件。cond を取ってから呼ぶ"""
+        """after より新しい (ID, 行, 種類, 名前) の並び。after が None なら種類ごとに直近 BACKLOG 件 (Pico は
+        Discord とチャットを BACKLOG 件ずつ持つ)。cond を取ってから呼ぶ"""
+        rows = [(msg_id,) + item for msg_id, item in zip(self.ids, self.items)]
         if after is None:
-            return list(zip(self.ids, self.lines))[-BACKLOG:]
-        i = bisect.bisect(self.ids, after)
-        return list(zip(self.ids[i:], self.lines[i:]))
+            by_kind = {}
+            for r in rows:
+                by_kind.setdefault(r[2], []).append(r)
+            return sorted((r for rs in by_kind.values() for r in rs[-BACKLOG:]), key=lambda r: r[0])
+        return rows[bisect.bisect(self.ids, after):]
 
     def next_id(self):
         """試験用の発言に付ける ID。Discord の ID と同じく時刻から作り、今ある最大より大きくする"""
@@ -500,6 +524,89 @@ def send_test(text):
 
 # Pico から来た文を送る関数。結果 ("ok" か、LCD に出す短い理由) を返す。run_discord が差し替える
 SEND = send_test
+
+
+# ---------------- ポケベルどうしのチャット ----------------
+
+PAGER_DEFAULT = "espoke"  # X-Pager ヘッダの無い Pico (と、名前を記録する前の GPS の点) の名前
+CHAT_SHOWN = 100          # 地図のページを開いたときに渡す、チャットの直近の数
+
+
+def pager_name(headers):
+    """Pico の名前 (X-Pager ヘッダ)。LCD の名前の欄 (NAME_MAX バイト) に収まる英数字にする"""
+    name = re.sub(r"[^0-9A-Za-z_.\- ]", "", unicodedata.normalize("NFKC", headers.get("X-Pager", "")))
+    return name.strip()[:NAME_MAX].strip() or PAGER_DEFAULT
+
+
+class Pagers:
+    """GPS の点かチャットで見かけた Pico の名前と、最初に見かけた時刻。地図のページはこの順に色を割り当てる"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.first = {}
+
+    def seen(self, name, t):
+        with self.lock:
+            if t < self.first.get(name, float("inf")):
+                self.first[name] = t
+
+    def names(self):
+        with self.lock:
+            return sorted(self.first, key=lambda n: (self.first[n], n))
+
+
+PAGERS = Pagers()
+
+
+class ChatLog:
+    """ポケベルどうしのチャット。CHAT_FILE に 1 行 1 件の JSON で足していく (消さない)。
+    直近 KEEP 件を STORE にも入れて、/stream で Pico に流す。地図のページには /feed.json で届いた順に渡す"""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.msgs = []   # [時刻 (UNIX 秒), 名前, 本文]
+        recent = collections.deque(maxlen=KEEP)
+        try:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        c = json.loads(line)
+                        self.msgs.append([c["t"], c["pager"], c["text"]])
+                        recent.append(c)
+                        PAGERS.seen(c["pager"], c["t"])
+                    except (ValueError, KeyError, TypeError):
+                        pass
+        except FileNotFoundError:
+            pass
+        for c in recent:   # 中継を立ち上げ直しても、つなぎ直した Pico に同じ ID で渡す
+            STORE.add(c["id"], self._line(c["id"], c["t"], c["pager"], c["text"]), "chat", c["pager"])
+
+    @staticmethod
+    def _line(msg_id, t, pager, text):
+        return make_line(msg_id, datetime.datetime.fromtimestamp(t, JST), pager, text)
+
+    def add(self, pager, text):
+        t = int(time.time())
+        with STORE.cond:   # ID を決めてから入れるまでに、ほかの発言が割り込まないように
+            msg_id = STORE.next_id()
+            STORE.add(msg_id, self._line(msg_id, t, pager, text), "chat", pager)
+        with self.lock:
+            self.msgs.append([t, pager, text])
+            with open(self.path, "a") as f:
+                f.write(json.dumps({"id": msg_id, "t": t, "pager": pager, "text": text}, ensure_ascii=False) + "\n")
+        PAGERS.seen(pager, t)
+        sys.stderr.write("chat: from %s (%d chars)\n" % (pager, len(text)))   # 本文はログに残さない
+        return "ok"
+
+    def since(self, n):
+        """n 件目からあと (最初は直近 CHAT_SHOWN 件) と、今の件数"""
+        with self.lock:
+            start = n if n else max(0, len(self.msgs) - CHAT_SHOWN)
+            return self.msgs[start:], len(self.msgs)
+
+
+CHAT = None  # main() が作る
 
 
 # ---------------- Spotify ----------------
@@ -543,9 +650,10 @@ class StreamSession:
     音 (A) より、それ以外のフレーム (曲名や状態) を先に送る (音を送り続けると、状態の知らせがなかなか割り込めない)。
     wlock は書く順番をそろえる。cond は数と状態を守る"""
 
-    def __init__(self, sock, win):
+    def __init__(self, sock, win, pager=PAGER_DEFAULT):
         self.sock = sock
         self.win = win
+        self.pager = pager  # Pico の名前 (X-Pager)。G フレームの位置をこの名前で記録する
         self.cond = threading.Condition()
         self.sent = 0       # 送ったバイト数の累計 (フレームの頭も数える)
         self.acked = 0      # Pico が読んだと知らせてきた累計
@@ -876,7 +984,7 @@ class Spotify:
                 s.ack(int(arg))
             return
         if kind == b"G":   # GPS の位置 (/stream と同じ形の行。ログには出さない)
-            upstream_line(data.decode("ascii", "replace"))
+            upstream_line(data.decode("ascii", "replace"), s.pager)
             return
         sys.stderr.write("spotify: %s\n" % data.decode("ascii", "replace"))
         if kind in (b"K", b"R", b"P", b"U", b"N", b"B"):
@@ -1013,7 +1121,7 @@ class Spotify:
 
     def serve(self, handler, win):
         """Pico との WebSocket が開いてから閉じるまで"""
-        s = StreamSession(handler.connection, win)
+        s = StreamSession(handler.connection, win, pager_name(handler.headers))
         with self.lock:
             old, self.session = self.session, s
         if old:
@@ -1608,7 +1716,7 @@ class YouTube:
                 s.ack(int(arg))
             return
         if kind == b"G":   # GPS の位置 (/stream と同じ形の行。ログには出さない)
-            upstream_line(data.decode("ascii", "replace"))
+            upstream_line(data.decode("ascii", "replace"), s.pager)
             return
         sys.stderr.write("youtube: %s\n" % data.decode("ascii", "replace"))
         if kind in (b"K", b"R", b"P", b"U", b"N", b"B"):
@@ -1725,7 +1833,7 @@ class YouTube:
 
     def serve(self, handler, win):
         """Pico との WebSocket が開いてから閉じるまで"""
-        s = StreamSession(handler.connection, win)
+        s = StreamSession(handler.connection, win, pager_name(handler.headers))
         with self.lock:
             old, self.session = self.session, s
         if old:
@@ -1825,44 +1933,51 @@ def youtube_test(url, cookies, deno, kbps, fps, full):
 # 位置は個人の情報なので、Funnel (外) には出さない。
 
 class GpsTrack:
-    """届いた位置を古い順に持ち、GPS_FILE に 1 行 1 点の JSON で足していく (消さない)"""
+    """届いた位置を届いた順に持ち、GPS_FILE に 1 行 1 点の JSON で足していく (消さない)。
+    Pico が何台あっても 1 つのファイルで、点ごとに Pico の名前を持つ (名前の無い古い点は PAGER_DEFAULT)"""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        self.points = []   # [t, lat, lon, km/h, 衛星の数]
+        self.points = []   # [t, lat, lon, km/h, 衛星の数, 名前]
+        self.last = {}     # 名前 → その Pico の最後の点の時刻
         try:
             with open(path) as f:
                 for line in f:
                     try:
                         p = json.loads(line)
-                        self.points.append([p["t"], p["lat"], p["lon"], p.get("kmh", 0), p.get("sat", 0)])
-                    except (ValueError, KeyError):
+                        name = p.get("pager", PAGER_DEFAULT)
+                        self.points.append([p["t"], p["lat"], p["lon"], p.get("kmh", 0), p.get("sat", 0), name])
+                        self.last[name] = max(self.last.get(name, 0), p["t"])
+                        PAGERS.seen(name, p["t"])
+                    except (ValueError, KeyError, TypeError):
                         pass
         except FileNotFoundError:
             pass
 
-    def add(self, t, lat, lon, kmh, sat, hdop):
+    def add(self, pager, t, lat, lon, kmh, sat, hdop):
         with self.lock:
-            if self.points and t <= self.points[-1][0]:
+            if t <= self.last.get(pager, 0):
                 return False   # つなぎ直したときの送り直しなど
-            self.points.append([t, lat, lon, kmh, sat])
+            self.last[pager] = t
+            self.points.append([t, lat, lon, kmh, sat, pager])
             with open(self.path, "a") as f:
                 f.write(json.dumps({"t": t, "lat": lat, "lon": lon, "kmh": kmh, "sat": sat, "hdop": hdop,
-                                    "recv": int(time.time())}) + "\n")
-            return True
+                                    "pager": pager, "recv": int(time.time())}) + "\n")
+        PAGERS.seen(pager, t)
+        return True
 
-    def since(self, t):
+    def since(self, n):
+        """n 点目からあと (届いた順) と、今の点の数。地図のページは前回の数を渡して、新しい点だけを読む"""
         with self.lock:
-            i = bisect.bisect(self.points, [t, float("inf")])
-            return self.points[i:]
+            return self.points[n:], len(self.points)
 
 
 GPS = None  # main() が作る
 
 
-def upstream_line(line):
-    """Pico から届いた 1 行。"G <時刻 (UNIX 秒、GPS の UTC)> <緯度> <経度> <km/h> <衛星の数> <HDOP>" """
+def upstream_line(line, pager):
+    """Pico (名前は pager) から届いた 1 行。"G <時刻 (UNIX 秒、GPS の UTC)> <緯度> <経度> <km/h> <衛星の数> <HDOP>" """
     f = line.split()
     if len(f) == 7 and f[0] == "G" and GPS:
         try:
@@ -1871,14 +1986,14 @@ def upstream_line(line):
             t = 0
         if t > 1600000000 and -90 <= lat <= 90 and -180 <= lon <= 180:
             # 位置そのものはログに残さない
-            if GPS.add(t, round(lat, 6), round(lon, 6), round(kmh, 1), sat, hdop):
-                sys.stderr.write("gps: point at %s (%d sats)\n"
-                                 % (datetime.datetime.fromtimestamp(t, JST).strftime("%H:%M:%S"), sat))
+            if GPS.add(pager, t, round(lat, 6), round(lon, 6), round(kmh, 1), sat, hdop):
+                sys.stderr.write("gps: %s point at %s (%d sats)\n"
+                                 % (pager, datetime.datetime.fromtimestamp(t, JST).strftime("%H:%M:%S"), sat))
             return
     sys.stderr.write("upstream: bad line (%d bytes)\n" % len(line))
 
 
-def read_upstream(sock, io_lock, done):
+def read_upstream(sock, io_lock, done, pager):
     """/stream の接続で Pico が送ってくる行を読む。Funnel の TCP 転送 (10000 番、TLS はこの中継) でつないだときだけ
     届く。8443 番は tailscaled の HTTP のプロキシが間にいて、要求のあとに送られたバイトを渡さない。
     書く側 (_stream) と同じ io_lock を取り、届いているときだけ待たずに読む (Spotify の StreamSession.read と同じ)"""
@@ -1910,83 +2025,192 @@ def read_upstream(sock, io_lock, done):
             line, buf = buf.split(b"\n", 1)
             line = line.decode("ascii", "replace").strip()
             if line:
-                upstream_line(line)
+                upstream_line(line, pager)
         if len(buf) > 1024:
             buf = b""
 
 
-# 地図のページ。Pi 5 の fbservo (Servo) で全画面に出す。Servo は SVG を描けないので、線と印は Canvas で描く (preferCanvas)。
+# 地図のページ。Pi 5 の fbservo (Servo) で全画面に出す。左が地図、右がポケベルどうしのチャット。
+# Servo は SVG を描けないので、線と印は Canvas で描く (preferCanvas)。チャットはスクロールさせずに下から積む。
 # 地図の絵は OpenStreetMap のタイル (利用の決まり https://operations.osmfoundation.org/policies/tiles/ に従い、
 # 帰属表示を出し、まとめて取りにいかない)
 MAP_HTML = """<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>espoke</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  html, body { margin: 0; height: 100%; background: #ddd; }
-  #map { position: absolute; inset: 0; }
-  #info { position: absolute; z-index: 1000; left: 12px; top: 12px; padding: 8px 14px; border-radius: 6px;
-          background: rgba(255, 255, 255, .92); color: #222; font: 22px sans-serif; }
-  #info.stale { color: #b03030; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #ddd; color: #222; font-family: sans-serif; }
+  #map { position: absolute; left: 0; top: 0; bottom: 0; right: 400px; }
+  #side { position: absolute; right: 0; top: 0; bottom: 0; width: 400px; overflow: hidden;
+          background: #eceae6; border-left: 1px solid #aaa; }
+  /* 上に Pico ごとの様子。チャットは下から積み、あふれた古い分は上の様子の裏に隠れる (スクロールを使わない) */
+  #pagers { position: absolute; left: 0; right: 0; top: 0; z-index: 2; padding: 6px 12px 8px;
+            background: #fff; border-bottom: 1px solid #bbb; }
+  .pager { font-size: 18px; line-height: 30px; white-space: nowrap; overflow: hidden; }
+  .pager .stale { color: #b03030; }
+  .sub { color: #555; font-size: 16px; }
+  .dot { display: inline-block; width: 14px; height: 14px; border-radius: 7px; margin-right: 8px; }
+  #err { color: #b03030; font-size: 16px; }
+  #chat { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 12px 10px; }
+  .day { text-align: center; color: #666; font-size: 15px; margin: 12px 0 0; }
+  .msg { margin: 8px 0 0; padding: 5px 10px 6px; background: #fff; border-left: 6px solid #888; border-radius: 4px; }
+  .head { font-size: 15px; color: #666; }
+  .name { font-weight: bold; margin-right: 8px; }
+  .text { font-size: 22px; line-height: 1.3; word-wrap: break-word; }
+  .none { color: #666; font-size: 18px; padding: 8px 0; }
+  @media (max-width: 700px) {   /* スマホで見るときは、地図の下にチャット */
+    #map { right: 0; bottom: 45%; }
+    #side { left: 0; top: 55%; width: auto; border-left: 0; border-top: 1px solid #aaa; }
+  }
 </style>
 </head>
 <body>
 <div id="map"></div>
-<div id="info">位置を読み込み中</div>
+<div id="side">
+  <div id="chat"><div class="none">チャットを読み込み中</div></div>
+  <div id="pagers"><div id="rows"></div><div id="err"></div></div>
+</div>
 <script>
+const VERSION = '__VERSION__';  // 中継が新しいページに替わったら読み直す
 const ZOOM = +(new URLSearchParams(location.search).get('z') || 16);
 const GAP = 10 * 60;     // これより間が空いた点どうしは線でつながない (別の外出)
 const STALE = 5 * 60;    // 最後の位置がこれより古ければ、印を灰色にする (電源が切れた・電波が無いなど)
-const POLL = 30 * 1000;
+const POLL = 5 * 1000;
+const CHAT_KEEP = 100;   // ページに残しておくチャットの数 (見えるのは下の十数件)
+const COLORS = ['#1f6fd1', '#e0670b', '#2e9d4f', '#9b3fc0'];   // Pico ごとの色。中継が最初に見かけた順
 const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([36.2, 138.25], 5);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
-const marker = L.circleMarker([0, 0], { radius: 10, color: '#fff', weight: 3, fillColor: '#1f6fd1', fillOpacity: 1 });
-let line = null, last = null, since = 0, placed = false;
+const pagers = {};   // 名前 → { color, line, last, marker, shown }
+let gpsNext = 0, chatNext = 0, loaded = false, lastDay = '', rowsHtml = '', errText = '', fitKey = '', fitCount = 0;
 
-function addPoints(points) {   // [t, lat, lon, km/h, 衛星の数]
-  for (const p of points) {
-    if (!line || (last && p[0] - last[0] > GAP)) {
-      line = L.polyline([], { color: '#d0367a', weight: 5, opacity: 0.85 }).addTo(map);
-    }
-    line.addLatLng([p[1], p[2]]);
-    last = p;
+function pager(name) {
+  if (!pagers[name]) {
+    const color = COLORS[Object.keys(pagers).length % COLORS.length];
+    pagers[name] = { color: color, line: null, last: null, shown: '',
+      marker: L.circleMarker([0, 0], { radius: 10, color: '#fff', weight: 3, fillColor: color, fillOpacity: 1 }) };
   }
+  return pagers[name];
 }
 
 function two(n) { return String(n).padStart(2, '0'); }
+function jst(t) { return new Date((t + 9 * 3600) * 1000); }   // getUTC* で日本時間を読む (Intl に頼らない)
+function hm(d) { return two(d.getUTCHours()) + ':' + two(d.getUTCMinutes()); }
+function md(d) { return (d.getUTCMonth() + 1) + '/' + d.getUTCDate(); }
+function ago(s) {
+  const m = Math.max(0, Math.floor(s / 60));
+  return m < 1 ? 'いま' : m < 60 ? m + '分前' : m < 1440 ? Math.floor(m / 60) + '時間前' : Math.floor(m / 1440) + '日前';
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
 
-function show(now) {
-  const info = document.getElementById('info');
-  if (!last) { info.textContent = '位置はまだ届いていません'; return; }
-  const d = new Date((last[0] + 9 * 3600) * 1000);   // 日本時間 (Intl に頼らない)
-  const age = Math.max(0, Math.floor((now - last[0]) / 60));
-  const stale = now - last[0] > STALE;
-  info.textContent = (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' ' + two(d.getUTCHours()) + ':' +
-    two(d.getUTCMinutes()) + '（' + (age ? age + ' 分前' : 'いま') + '）  ' + Math.round(last[3]) + ' km/h  衛星 ' + last[4];
-  info.className = stale ? 'stale' : '';
-  marker.setStyle({ fillColor: stale ? '#888' : '#1f6fd1' });
-  marker.setLatLng([last[1], last[2]]).addTo(map);
-  map.setView([last[1], last[2]], placed ? map.getZoom() : ZOOM);
-  placed = true;
+function addPoints(points) {   // [t, lat, lon, km/h, 衛星の数, 名前]
+  for (const p of points) {
+    const g = pager(p[5]);
+    if (!g.line || (g.last && p[0] - g.last[0] > GAP)) {
+      g.line = L.polyline([], { color: g.color, weight: 5, opacity: 0.75 }).addTo(map);
+    }
+    g.line.addLatLng([p[1], p[2]]);
+    g.last = p;
+  }
+}
+
+function addChat(msgs) {   // [時刻, 名前, 本文]
+  const box = document.getElementById('chat');
+  if (msgs.length || !loaded) box.querySelectorAll('.none').forEach(e => e.remove());
+  for (const m of msgs) {
+    const d = jst(m[0]);
+    if (md(d) !== lastDay) {
+      lastDay = md(d);
+      const day = document.createElement('div');
+      day.className = 'day';
+      day.textContent = lastDay;
+      box.appendChild(day);
+    }
+    const g = pager(m[1]);
+    const div = document.createElement('div');
+    div.className = 'msg';
+    div.style.borderLeftColor = g.color;
+    div.innerHTML = '<div class="head"><span class="name" style="color:' + g.color + '">' + esc(m[1]) +
+      '</span>' + hm(d) + '</div><div class="text"></div>';
+    div.lastChild.textContent = m[2];
+    box.appendChild(div);
+  }
+  while (box.querySelectorAll('.msg').length > CHAT_KEEP) box.removeChild(box.firstChild);
+  if (!box.children.length) box.innerHTML = '<div class="none">チャットはまだありません</div>';
+}
+
+// 上の欄に Pico ごとの最後の位置の時刻と速さを出し、地図の印を動かす。変わったときだけ書き換える
+// (fbservo は 1 回描くのに 0.1 秒ほどかかるので、5 秒ごとに読むたびには描かせない)
+function showPagers(now) {
+  let html = '';
+  const fresh = [], all = [];
+  for (const name of Object.keys(pagers)) {
+    const g = pagers[name];
+    let state = '<span class="sub">位置はまだ届いていません</span>';
+    if (g.last) {
+      const stale = now - g.last[0] > STALE;
+      const d = jst(g.last[0]);
+      // 400px に収まるよう、日付は今日でなければ出し、衛星の数は出さない
+      state = '<span class="' + (stale ? 'stale' : '') + '">' + (md(d) === md(jst(now)) ? '' : md(d) + ' ') +
+        hm(d) + ' (' + ago(now - g.last[0]) + ')</span>  <span class="sub">' + Math.round(g.last[3]) + ' km/h</span>';
+      const shown = g.last[1] + ',' + g.last[2] + ',' + stale;
+      if (shown !== g.shown) {
+        g.marker.setStyle({ fillColor: stale ? '#888' : g.color });
+        g.marker.setLatLng([g.last[1], g.last[2]]).addTo(map);
+        g.shown = shown;
+      }
+      all.push([g.last[1], g.last[2]]);
+      if (!stale) fresh.push([g.last[1], g.last[2]]);
+    }
+    html += '<div class="pager"><span class="dot" style="background:' + g.color + '"></span><b>' + esc(name) +
+      '</b>  ' + state + '</div>';
+  }
+  if (!html) html = '<div class="pager sub">位置はまだ届いていません</div>';
+  if (html !== rowsHtml) {
+    document.getElementById('rows').innerHTML = html;
+    rowsHtml = html;
+  }
+  // 位置が新しい Pico が全部入るように地図を合わせる (どれも古ければ全部)。1 台なら真ん中にする
+  const pts = fresh.length ? fresh : all;
+  const key = JSON.stringify(pts);
+  if (pts.length && key !== fitKey) {
+    if (pts.length === 1) map.setView(pts[0], fitCount === 1 ? map.getZoom() : ZOOM);
+    else map.fitBounds(pts, { padding: [60, 60], maxZoom: ZOOM });
+    fitKey = key;
+    fitCount = pts.length;
+  }
+}
+
+function showError(text) {
+  if (text !== errText) document.getElementById('err').textContent = errText = text;
 }
 
 async function poll() {
   try {
-    const r = await fetch('track.json?since=' + since, { cache: 'no-store' });
+    const r = await fetch('feed.json?gps=' + gpsNext + '&chat=' + chatNext, { cache: 'no-store' });
     const j = await r.json();
-    if (j.points.length) {
-      addPoints(j.points);
-      since = last[0];
+    if (j.v !== VERSION || j.gps < gpsNext || j.chat < chatNext) {   // 中継が替わった・ファイルが替わった
+      location.reload();
+      return;
     }
-    show(j.now);
+    for (const name of j.pagers) pager(name);   // 中継が最初に見かけた順に色を決める
+    addPoints(j.points);
+    addChat(j.msgs);
+    loaded = true;
+    gpsNext = j.gps;
+    chatNext = j.chat;
+    showPagers(j.now);
+    showError('');
   } catch (e) {
-    document.getElementById('info').textContent = '中継から読めない: ' + e;
+    showError('中継から読めない: ' + e);
   }
 }
 poll();
@@ -1995,6 +2219,7 @@ setInterval(poll, POLL);
 </body>
 </html>
 """
+MAP_VERSION = hashlib.sha1(MAP_HTML.encode()).hexdigest()[:10]
 
 
 # 地図のページを見せてよい相手。tailnet (Tailscale の IP) と、この PC 自身
@@ -2002,7 +2227,8 @@ MAP_ALLOW = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0:
 
 
 class MapHandler(BaseHTTPRequestHandler):
-    """tailnet の中だけに見せる地図のサーバー。/ が地図のページ、/track.json?since=<t> が t より新しい点。
+    """tailnet の中だけに見せる地図のサーバー。/ が地図とチャットのページ、
+    /feed.json?gps=<n>&chat=<m> が n 点目からあとの位置と m 件目からあとのチャット。
     起動したときに tailscaled がまだ動いていなくても待てるよう、全部のアドレスで待ち、tailnet の外からは断る"""
 
     def log_message(self, fmt, *args):
@@ -2029,12 +2255,14 @@ class MapHandler(BaseHTTPRequestHandler):
             return self.send_error(403)
         url = urllib.parse.urlparse(self.path)
         if url.path == "/":
-            return self._send(MAP_HTML, "text/html; charset=utf-8")
-        if url.path == "/track.json":
-            since = urllib.parse.parse_qs(url.query).get("since", ["0"])[0]
-            points = GPS.since(int(since) if since.isdigit() else 0)
-            return self._send(json.dumps({"now": int(time.time()), "points": points}, separators=(",", ":")),
-                              "application/json")
+            return self._send(MAP_HTML.replace("__VERSION__", MAP_VERSION), "text/html; charset=utf-8")
+        if url.path == "/feed.json":
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+            points, gps_next = GPS.since(int(q["gps"]) if q.get("gps", "").isdigit() else 0)
+            msgs, chat_next = CHAT.since(int(q["chat"]) if q.get("chat", "").isdigit() else 0)
+            return self._send(json.dumps({"v": MAP_VERSION, "now": int(time.time()), "pagers": PAGERS.names(),
+                                          "gps": gps_next, "points": points, "chat": chat_next, "msgs": msgs},
+                                         separators=(",", ":")), "application/json")
         self.send_error(404)
 
 
@@ -2113,18 +2341,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length") or 0)
         text = self.rfile.read(n).decode("utf-8", "replace")
+        to_chat = urllib.parse.parse_qs(url.query).get("to", [""])[0] == "chat"
         if url.path == "/post":
+            if to_chat:   # X-Pager の名前の Pico がチャットに書いたことにする
+                return self._text(CHAT.add(pager_name(self.headers), text.strip()[:SEND_MAX]) + "\n")
             add_message(STORE.next_id(), datetime.datetime.now(JST), "test", text)
             return self._text("ok\n")
         # Pico から送る文。Pico はつなぐたびに TLS の握手 (4〜8 秒) をするので、
-        # 送るのと受け取り直すのを1回の接続で済ませる。結果はヘッダで返す
+        # 送るのと受け取り直すのを1回の接続で済ませる。結果はヘッダで返す。
+        # to=chat ならポケベルどうしのチャットに入れる (Discord には送らない)
         text = text.strip()[:SEND_MAX]
-        sent = SEND(text) if text else "empty"
-        sys.stderr.write("send %r: %s\n" % (text, sent))
+        if to_chat:
+            sent = CHAT.add(pager_name(self.headers), text) if text else "empty"
+        else:
+            sent = SEND(text) if text else "empty"
+            sys.stderr.write("send %r: %s\n" % (text, sent))
         self._stream(stream_after(url), sent)
 
     def _stream(self, after, sent=None):
-        sys.stderr.write("stream start after=%s\n" % after)
+        pager = pager_name(self.headers)
+        sys.stderr.write("stream start %s after=%s\n" % (pager, after))
         self.connection.settimeout(STREAM_TIMEOUT)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=shift_jis")
@@ -2136,18 +2372,23 @@ class Handler(BaseHTTPRequestHandler):
         # Pico が流れの途中で送ってくる行 (GPS の位置) を別のスレッドで読む。TLS の読み書きは io_lock で順番にする
         io_lock = threading.Lock()
         done = threading.Event()
-        threading.Thread(target=read_upstream, args=(self.connection, io_lock, done), daemon=True).start()
+        threading.Thread(target=read_upstream, args=(self.connection, io_lock, done, pager), daemon=True).start()
 
         def write(data):
             with io_lock:
                 self.wfile.write(data)
+
+        def lines(items):
+            # チャットの行は ID の頭に C を付ける。この Pico 自身が送った文なら c (Pico は着信として知らせない)
+            return b"".join(line if kind != "chat" else (b"c" if who == pager else b"C") + line
+                            for _, line, kind, who in items)
 
         sent = 0
         try:
             # 溜まっていた分のあとに空行を1つ送る。Pico はここまでを「前からあった分」として扱う
             with STORE.cond:
                 items = STORE.since(after)
-            write(b"".join(line for _, line in items) + b"\n")
+            write(lines(items) + b"\n")
             if items:
                 after = items[-1][0]
                 sent += len(items)
@@ -2158,7 +2399,7 @@ class Handler(BaseHTTPRequestHandler):
                         STORE.cond.wait(HEARTBEAT)
                         items = STORE.since(after)
                 if items:
-                    write(b"".join(line for _, line in items))
+                    write(lines(items))
                     after = items[-1][0]
                     sent += len(items)
                 else:
@@ -2509,14 +2750,16 @@ def main():
         print("youtube: %s kbps の MP3 と、%d コマ/秒の LCD の動画 (%s) にして流す"
               % (yt_kbps, yt_fps, "LCD 全体" if yt_full else "横長の動画は左の 6x2 文字"))
 
-    # GPS の位置。地図のサーバーは tailnet の IP だけで待つ (Funnel にも LAN にも出さない)
-    global GPS
+    # GPS の位置とチャット。地図のサーバーは tailnet の中だけに見せる (Funnel にも LAN にも出さない)
+    global GPS, CHAT
     GPS = GpsTrack(os.path.expanduser(os.environ.get("GPS_FILE", "~/espoke/gps.jsonl")))
+    CHAT = ChatLog(os.path.expanduser(os.environ.get("CHAT_FILE", "~/espoke/chat.jsonl")))
     map_port = int(os.environ.get("MAP_PORT", MAP_PORT))
     map_server = ThreadingHTTPServer((os.environ.get("MAP_ADDR", "0.0.0.0"), map_port), MapHandler)
     threading.Thread(target=map_server.serve_forever, daemon=True).start()
-    print("gps: %s (%d 点)。地図 (tailnet の中だけ): http://%s:%d/"
-          % (GPS.path, len(GPS.points), tailnet_ip() or "<この PC の tailnet の IP>", map_port))
+    print("gps: %s (%d 点)、chat: %s (%d 件)。地図 (tailnet の中だけ): http://%s:%d/"
+          % (GPS.path, len(GPS.points), CHAT.path, len(CHAT.msgs), tailnet_ip() or "<この PC の tailnet の IP>",
+             map_port))
 
     # Funnel が 127.0.0.1 へ中継してくるので、外には直接開けない
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

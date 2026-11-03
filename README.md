@@ -16,6 +16,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 - **LCD でマリオのような横スクロールのゲームを遊ぶ**（ホームの Mario。曲を流しながらでも遊べる）
 - **microSD に入れた動画を LCD で見る**（ホームの Movie。YouTube と同じ白黒の動画。Wi-Fi もイヤホンも無くてよい。mp4 は PC で変換しておく）
 - **GPS で今いる場所を、家の Raspberry Pi 5 の画面の地図（OpenStreetMap）に出す**（位置は 1 分ごとに中継へ送る。8.11 節）
+- **2 台の espoke どうしでモールスの文をやりとりする**（ホームの Chat。やりとりは Pi 5 の画面の地図の右にも出る。7.11 節）
 
 ## 構成
 
@@ -408,14 +409,15 @@ volume: 80%
 1. Wi-Fi に接続
 2. microSD の MP3 を探して曲の一覧を作る。Bluetooth イヤホンには、**System の画面で SW4 を押したときだけ**つなぐ（7.5 節）
 3. **microSD の MP3 を順に流し続ける**。Music の画面でアルバム（SD のフォルダ）→ 曲を選んで鳴らす。SW1 長押し、BOOTSEL、シリアルの `sd` などでも始める（7.6 節）
-4. LCD の画面は**ホームから選ぶ**。SW2 / SW3 で Music・Spotify・YouTube・Movie・Discord・Mario・System を選び、SW4 で開く。SW1 で前の画面に戻る（7.5 節）
+4. LCD の画面は**ホームから選ぶ**。SW2 / SW3 で Music・Spotify・YouTube・Movie・Discord・Chat・Mario・System を選び、SW4 で開く。SW1 で前の画面に戻る（7.5 節）
 5. **Music の画面は Spotify と同じく、アルバムの一覧 → 曲選択 → 再生中 の順に進む**。再生中の画面では SW1〜SW4 で再生を操作する（SW1 長押しで再生 / 一時停止・前の曲・次の曲・シャッフルの入り切り）。曲名と状態も出る（7.5 節）
 6. **Discord のメッセージを受け取る**。届いたら Receive の画面に切り替えて出す（8 章）
 7. **Send の画面でモールスで打った文を Discord に送る**。空白のあとで enter（空の enter を2回続ける）を押すと送る（7.5 節）
-8. System の画面で Wi-Fi と Bluetooth の接続の様子を見る（7.5 節）
-9. **Mario の画面で、マリオのような横スクロールのゲームを遊ぶ**。SW2 / SW3 で左右、SW4 でジャンプ（7.8 節）
-10. **YouTube の画面で、自分のアカウントの動画を選んで見る**。音はイヤホン、LCD 全体に 80x16 ドットの白黒の動画（7.9 節）
-11. **Movie の画面で、microSD の動画を YouTube と同じ見え方で見る**。Wi-Fi は要らず、イヤホンが無ければ動画だけ進む。mp4 は PC で `.lcv` に変換しておく（7.10 節）
+8. **Chat の画面で、もう1台の espoke（ポケベル）とやりとりする**。打ち方は Discord の Send と同じ。やりとりは家の Pi 5 の地図の右にも出る（7.11 節）
+9. System の画面で Wi-Fi と Bluetooth の接続の様子を見る（7.5 節）
+10. **Mario の画面で、マリオのような横スクロールのゲームを遊ぶ**。SW2 / SW3 で左右、SW4 でジャンプ（7.8 節）
+11. **YouTube の画面で、自分のアカウントの動画を選んで見る**。音はイヤホン、LCD 全体に 80x16 ドットの白黒の動画（7.9 節）
+12. **Movie の画面で、microSD の動画を YouTube と同じ見え方で見る**。Wi-Fi は要らず、イヤホンが無ければ動画だけ進む。mp4 は PC で `.lcv` に変換しておく（7.10 節）
 
 ### 7.1 設定ファイル
 
@@ -439,9 +441,17 @@ $EDITOR espoke/arduino_secrets.h
 #define RELAY_PORT 8443
 #define RELAY_KEY  "your-relay-key"
 
+// このポケベルの名前（英数字 10 文字まで）。Chat の差出人と、GPS の位置の持ち主になる（7.11 節）。書かなければ espoke
+#define PAGER_NAME "espoke"
+
 // 予備の入口（任意）。RELAY_HOST につなげないときに試す（8.10 節）
 #define RELAY_HOST2 "ubuntubook.tailxxxx.ts.net"
 ```
+
+**2 台目を作るときは `PAGER_NAME` を別の名前にしてから書き込む。** 同じ名前だと、中継は 2 台を 1 台とみなし、
+相手の Chat を自分の発言として扱い（着信として知らせない）、GPS の道も 1 本につながってしまう。
+`arduino_secrets.h` は 1 つなので、どちらかを書き込む前に `PAGER_NAME` を書き換える。
+名前はシリアルの `status` の `name=` で確かめられる。
 
 `RELAY_HOST` を書かなければ Discord も Spotify も YouTube も使わず、GPS の位置も送らない。Discord・Spotify・YouTube はどれも同じ `RELAY_HOST` の 10000 番につなぐ（変えるなら `#define SPOTIFY_PORT`。7.7 節・8.11 節。`RELAY_PORT` は今は使っていない）。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
 
@@ -497,7 +507,7 @@ $EDITOR espoke/arduino_secrets.h
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
 | `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（8.6 節） |
 | `relay 1` / `relay 2` | つなぎにいく入口を `RELAY_HOST` / `RELAY_HOST2`（予備の入口。8.10 節）にして、つなぎ直す |
-| `status` | Wi-Fi / IP / Bluetooth / 連続再生 / 一時停止 / シャッフル / 音量 / SD の曲数 / 空きヒープの状態を表示 |
+| `status` | Wi-Fi / IP / Bluetooth / 連続再生 / 一時停止 / シャッフル / 音量 / SD の曲数 / 空きヒープの状態を表示。`msgs=3 chat=2 name=espoke` は覚えている Discord と Chat のメッセージの数と、この espoke の名前（`PAGER_NAME`） |
 | `lcd` | LCD の中身を読んでシリアルに出す。自作文字 0〜7 の絵と、2 行に書いてある文字コード（16 進）。再生中でも効く |
 | `lcd chars` | 自作文字（棒と `⇄`）を LCD に作り直す |
 | `lcd resync off` / `lcd resync on` | 描き直すときの LCD の区切りの合わせ直し（と自作文字の作り直し）を止める / 戻す。調べるとき用 |
@@ -554,7 +564,7 @@ BOOTSEL ボタンは状況で意味が変わる。
 
 ### 7.5 画面とスイッチ（ホームと SW1〜SW4）
 
-LCD の画面は**ホーム**から選んで開く。ホームにあるのは Music・Spotify・YouTube・Movie・Discord・Mario・System の7つ。
+LCD の画面は**ホーム**から選んで開く。ホームにあるのは Music・Spotify・YouTube・Movie・Discord・Chat・Mario・System の8つ。
 **Spotify と YouTube は Wi-Fi につながっているときだけ出る**（つながっていなければ飛ばす）。
 
 ```
@@ -564,6 +574,8 @@ LCD の画面は**ホーム**から選んで開く。ホームにあるのは Mu
         ├─ Movie ──── 一覧 ── 再生中             microSD の動画を選んで見る（7.10 節）
         ├─ Discord ─┬─ Receive   受け取ったメッセージを見る
         │           └─ Send      モールスで打って送る
+        ├─ Chat ────┬─ Receive   もう1台の espoke とのやりとりを見る（7.11 節）
+        │           └─ Send      モールスで打って、もう1台へ送る
         ├─ Mario      横スクロールのゲーム（7.8 節）
         └─ System     Wi-Fi / Bluetooth（イヤホンにつなぐ）/ GPS / 稼働時間と空きヒープ
 ```
@@ -571,8 +583,9 @@ LCD の画面は**ホーム**から選んで開く。ホームにあるのは Mu
 - ホームの**1行目は月日と時刻**（`10/13      14:05` のように、左に月日・右に時:分。日本時間）。
   時計は Wi-Fi につないだあと NTP で合わせる（中継を使うときは、中継につなぐときに合わせる）。合わせるまでは `--/--      --:--` と出る
 - ホームの2行目に、選んでいる項目の名前が `←` `→` に挟まれて出る。**SW2 で左、SW3 で右**に動かし（端まで行くと反対の端に回る）、**SW4 で開く**
-- Discord を開くと Receive（受信）と Send（送信）を選ぶ画面になる。こちらは1行目に `←` 項目 `→`、2行目にその今の様子（Receive なら最新の発言者と時刻、Send なら打ちかけの文）が出る
-- **SW1 で前（1つ上）の画面に戻る**（Receive・Send → Discord、Discord・System → ホーム。Music と Spotify と YouTube は 再生中 → 曲選択 → 一覧 → ホーム。Movie は 再生中 → 一覧 → ホーム。Mario は 遊んでいる途中 → 一時停止 → ホーム）。
+- Discord を開くと Receive（受信）と Send（送信）を選ぶ画面になる。こちらは1行目に `←` 項目 `→`、2行目にその今の様子（Receive なら最新の発言者と時刻、Send なら打ちかけの文）が出る。
+  Chat も同じ形で、受け取ったメッセージと打ちかけの文は Discord とは別に持つ（7.11 節）
+- **SW1 で前（1つ上）の画面に戻る**（Receive・Send → Discord か Chat、Discord・Chat・System → ホーム。Music と Spotify と YouTube は 再生中 → 曲選択 → 一覧 → ホーム。Movie は 再生中 → 一覧 → ホーム。Mario は 遊んでいる途中 → 一時停止 → ホーム）。
   Send の画面だけは SW1 が backspace なので、**長押し（0.6 秒）で戻る**
 - **電源を入れると、1 秒ほどでホームが出る**（LCD のライブラリの初期化が 1 秒待つ）。Bluetooth・SD・Wi-Fi の準備はそのあとで、様子は Music の再生中の画面に出る。
   Wi-Fi はつながるのを待たずにつなぎ始め、つながると `WiFi ok` と出る。シリアルがつながるのも待たないので、PC でログを見るときは、つながる前の分は出ない
@@ -598,7 +611,7 @@ GP15 にタクトスイッチを足すと、押すたびに前の画面に戻る
 | 画面 | 1行目 | 2行目 |
 |---|---|---|
 | ホーム | 月日と時刻（`MM/DD`・`HH:MM`） | `←` 選んでいる項目 `→` |
-| Discord | `←` 選んでいる項目 `→` | 選んでいる項目の今の様子 |
+| Discord・Chat | `←` 選んでいる項目 `→` | 選んでいる項目の今の様子 |
 | Music（一覧） | `←` アルバム名 `→`（収まらなければ矢印の間で流す）。先頭は全曲の `All tracks`、カードの一番上の曲は `(root)` | 番号 / 総数（鳴らしているものは後ろに `playing` か `pause`）。カードや MP3 が無ければ `no card` / `no mp3` |
 | Music（曲選択） | 鳴っている曲なら左端に `▶`、曲名（ファイル名から拡張子を除いたもの）。シャッフル中は右端に `⇄` の印 | 左にその曲のフォルダ名、右に アルバムの中の番号 / 曲の数。曲名もフォルダ名も、収まらなければ左へ流す |
 | Music（再生中） | 曲名 / 状態（収まらなければ左へ流す）。シャッフル中は右端に `⇄` の印 | 再生中は帯域ごとの音の大きさの棒（下の説明）。一時停止中や止まっているときは進み具合や状態（一時停止中は後ろに `pause`） |
@@ -610,7 +623,7 @@ GP15 にタクトスイッチを足すと、押すたびに前の画面に戻る
 | YouTube（再生中） | 2 行とも LCD 全体が動画（80x16 ドット）。一時停止中と、最初のコマが出るまでは、Spotify と同じく文字だけ（1 行目に題名） | 一時停止中は `pause 0:12/0:45`（経過 / 長さ）、届くのを待つ間は `buffering...`（棒は出さない）。中継を `YOUTUBE_FULL=0` にすると、横長の動画は左の 6 文字に出て、1 桁空けて 1 行目に題名、2 行目に `1:23/4:56`・`pause`・`buffering`（シャッフル中は右端に `⇄`） |
 | Movie（一覧） | 開いている動画なら左端に `▶`、題名（収まらなければ左へ流す） | 左に長さ、右に 番号 / 本数。読めないファイルは `bad file`。`.lcv` が無ければ `no movie`（変換していない mp4 があれば `convert 3 mp4`）、カードが無ければ `no card` |
 | Movie（再生中） | 2 行とも LCD 全体が動画（80x16 ドット）。一時停止中と、最初のコマが出るまでは文字だけ（1 行目に題名） | 一時停止中は `pause 0:12/0:45`（経過 / 長さ。収まらなければ経過だけ）。SD が読めなくなったら `sd error` |
-| Receive | Discord の発言者の名前と時刻（`HH:MM`） | 本文。16 文字を超えると流れる（8.6 節）。まだ無ければ中継とのつながり具合 |
+| Receive | 発言者の名前と時刻（`HH:MM`）。Chat では自分の発言も自分の名前で出る | 本文。16 文字を超えると流れる（8.6 節）。まだ無ければ中継とのつながり具合（1 行目は Discord なら `MSG --`、Chat なら `CHAT --`） |
 | Send | モールスで入力した文章 | 入力中の符号と、確定したときの文字。送ったあとは送った結果 |
 | Mario | 遊んでいる間は、上の段（空中）。タイトル・一時停止・GAME OVER などは文字（7.8 節） | 遊んでいる間は、下の段（地面）。一時停止中は 残り人数・コインの枚数・スコア |
 | System（Wi-Fi） | 電波強度（dBm） | IP アドレス（`WIFI_SSID2` を書いたときは、つないでいる Wi-Fi の名前）。つながっていないときは、つなぎにいっている Wi-Fi の名前 |
@@ -630,8 +643,8 @@ Music 以外の画面を見ている間も曲名や状態は裏で更新して�
 Movie の一覧も同じ。Mario の画面では、8 つともゲームの絵に作り替える（7.8 節）。YouTube と Movie の再生中の画面では、8 つとも動画の絵に作り替える（7.9 節）。
 手元の LCD は、この合わせ直しで自作文字が壊れる（偶数番の文字に、隣の奇数番の中身が写る。棒の7段目が `⇄` になる）。`lcd` で中身を読み出して確かめた。
 そのため、合わせ直すたびに自作文字を作り直している（約 30ms）。
-Discord のメッセージが届くと、どの画面を見ていても Receive の画面に切り替わる。
-このときだけ、SW1（か GP15）で、Discord ではなく元の画面に戻る。
+Discord か Chat のメッセージが届くと、どの画面を見ていても、その Receive の画面に切り替わる（Chat で自分が送った文は切り替えない）。
+このときだけ、SW1（か GP15）で、Discord や Chat ではなく元の画面に戻る。
 スイッチは再生中も効き、音は途切れない。
 
 SW1〜SW4（GP10〜13）の役目は、開いている画面で変わる。
@@ -639,7 +652,7 @@ SW1〜SW4（GP10〜13）の役目は、開いている画面で変わる。
 | 画面 | SW1 | SW1 長押し | SW2 | SW3 | SW4 |
 |---|---|---|---|---|---|
 | ホーム | （何もしない） | （何もしない） | ← | → | 開く |
-| Discord | 戻る | 戻る | ← | → | 開く |
+| Discord・Chat | 戻る | 戻る | ← | → | 開く |
 | Music（一覧） | ホームへ | 再生 / 一時停止（止まっていれば、選んでいるアルバムを鳴らす） | ← | →（**長押しで再生中の画面へ**） | 曲選択へ |
 | Music（曲選択） | 一覧へ | 再生 / 一時停止（止まっていれば、見ているアルバムを鳴らす） | 前の曲 | 次の曲（**長押しで再生中の画面へ**） | 選んだ曲から鳴らす（**長押しで、そのアルバムをシャッフルで鳴らす**） |
 | Music（再生中） | 曲選択へ（鳴らし続ける） | 再生 / 一時停止 | 前の曲 | 次の曲（シャッフル中はランダム） | シャッフルの入り切り |
@@ -667,12 +680,12 @@ SW1〜SW4（GP10〜13）の役目は、開いている画面で変わる。
   見つからない相手を探し続けると、Bluetooth と Wi-Fi が無線を取り合って Wi-Fi がほとんど通らなくなる（NTP や中継の TLS が失敗する）ため
 - イヤホンがつながっていないまま再生を始めると、Music の画面に `no earphone` `System > BT` と出て、つながるまで待つ
 - Receive を開くと、最新のメッセージから出る
-- Send の enter は、符号があれば文字に確定し、無ければ空白を入れる。**空白のあとでもう一度押すと、文を Discord に送る**。
+- Send の enter は、符号があれば文字に確定し、無ければ空白を入れる。**空白のあとでもう一度押すと、文を Discord に送る**（Chat の Send なら、もう1台の espoke へ）。
   つまり最後の文字を確定してから enter を2回押すと送れる（`HI` なら `....` enter `..` enter enter enter）。
   64 文字いっぱいで空白が入らないときは、1回で送る
 - 送っている間（4〜8 秒）は2行目に `sending...` と出て、ほかの操作は止まる。再生中なら音もその間だけ止まり、送り終えると続きから鳴る。
   送れたら文が消えて `sent`、送れなければ文は残って `send: <理由>` と出る（8.6 節）。残った文はそのまま enter を押せば送り直せる。
-  打ちかけの文は、画面を離れても残る（Discord の画面の Send の2行目に出る）
+  打ちかけの文は、画面を離れても残る（Discord・Chat の画面の Send の2行目に出る。Discord と Chat で別々）
 
 ### 7.6 microSD から聞く
 
@@ -857,7 +870,7 @@ _M_g___P__  _|__  下の段: マリオ・クリボー・土管・穴（地面の
 
 - 一時停止の画面は1行目に `PAUSE  WORLD 1-1`、2行目に残りの人数・コインの枚数・スコア
 - ホームへ戻っても続きは残っている。もう一度 Mario を開くと一時停止の画面から続けられる
-- 遊んでいる間に Discord のメッセージが届くと、ほかの画面と同じく Receive に切り替わる。ゲームは一時停止になり、SW1 で戻ると一時停止の画面が出る
+- 遊んでいる間に Discord か Chat のメッセージが届くと、ほかの画面と同じく Receive に切り替わる。ゲームは一時停止になり、SW1 で戻ると一時停止の画面が出る
 - **曲を流したまま遊べる**（Music で鳴らしてからホームへ戻り、Mario を開く）。ゲームの間は SW1〜SW4 をゲームに使うので、曲の操作は BOOTSEL（次の曲）かシリアルでする
 
 作り:
@@ -1047,6 +1060,34 @@ Pico: .lcv ─┬─ コマ (今の時刻のもの) ──> 自作文字 ──>
   一覧へ戻っても鳴らし続けること（`▶` が付く）、ホームへ戻ると一時停止になること、最後まで行くと閉じて一覧に戻ること、白黒の入れ替えを確かめた。
   **イヤホンをつないで音と動画が合うかは、まだ確かめていない**
 
+### 7.11 もう1台の espoke とやりとりする（Chat）
+
+2 台の espoke（ポケベル）が同じ中継（dynabook の `discord_relay.py`）につないでいれば、Chat の画面でモールスの文をやりとりできる。
+やりとりは、家の Pi 5 の画面の地図の右にも出る（8.11 節）。
+
+```
+espoke A ──┐  Funnel の 10000 番（Discord と同じ /stream の接続）
+           ├── dynabook: discord_relay.py ──> ~/espoke/chat.jsonl（足していくだけで消さない）
+espoke B ──┘                  │ tailnet の中だけ
+                               ▼
+                    Pi 5: 左に地図（A と B の位置と通った道）、右にチャット
+```
+
+- 2 台は `PAGER_NAME` で見分ける（7.1 節）。Receive の 1 行目に出る名前もこれ。**2 台目は必ず別の名前にする**
+- 打ち方は Discord の Send と同じ（7.5 節）。送ると、中継はチャットに入れて、つないでいる espoke 全部に流す。
+  相手の espoke は Chat の Receive に切り替わる。送った espoke にも戻ってくるので、Chat の Receive は自分の発言も含めたやりとりになる（自分の発言では画面を切り替えない）
+- Discord とは混ざらない。Chat の文は Discord に送らず、Discord の発言は Chat に出ない。覚えておくのは、どちらも直近 8 件ずつ
+- 受け取れるのは Discord と同じく、中継の `/stream` につないでいる間だけ。**Spotify・YouTube モードの間は届かない**（モードを抜けてつなぎ直すと、その間の分が届く）
+- 相手がつないでいなくても送れる。中継が直近 20 件を覚えていて、相手がつなぎ直したときに渡す（着信として知らせる）。
+  相手が電源を入れ直したときは、直近 8 件が Receive に入るだけで、着信としては知らせない（Discord と同じ）
+- 打てるのはモールスの英数字（A〜Z、0〜9）と空白だけ
+
+espoke が 1 台しか無くても、PC から別の espoke が送ったことにして試せる（`X-Pager` が差出人の名前）。
+
+```bash
+curl -H "X-Key: $KEY" -H "X-Pager: test" --data-binary 'HELLO' "$URL/post?to=chat"
+```
+
 ## 8. tools/discord_relay.py — Discord と Spotify と YouTube の中継
 
 Discord の決めたサーバー（か1つのチャンネル）の発言を、espoke の LCD に出す。
@@ -1055,6 +1096,7 @@ Spotify モードでは、go-librespot の音を MP3 にして流す（8.7 節�
 YouTube モードでは、yt-dlp と ffmpeg で動画の音と LCD 用の動画を作って流す（8.9 節）。
 Bot を入れられないサーバーでは、dynabook で動かす Discord アプリの通知から受け取る（8.8 節）。
 Funnel の入口が dynabook へつながらなくなったときのために、別の PC に予備の入口を置いている（8.10 節）。
+espoke どうしのチャット（7.11 節）も中継し、GPS の位置とあわせて Pi 5 の地図のページに出す（8.11 節）。
 
 ### 8.1 経路
 
@@ -1224,12 +1266,15 @@ journalctl --user -u espoke-relay -f      # 届いた発言は "msg ..." と出�
 |---|---|
 | `GET /stream?after=<ID>` | `after` より新しい発言を送り、接続を閉じずに新着を流し続ける。`after` が無ければ直近 8 件から |
 | `POST /stream?after=<ID>` | 本文（UTF-8）を Discord に送ってから、`GET /stream` と同じく流す。送った結果は `X-Sent` ヘッダ（下の表） |
+| `POST /stream?after=<ID>&to=chat` | 本文を espoke どうしのチャットに入れてから（Discord には送らない）、`GET /stream` と同じく流す |
 | `POST /post` | 本文（UTF-8）を差出人 `test` の発言として流す。Discord を使わずに試すとき |
+| `POST /post?to=chat` | 本文を、`X-Pager` の名前の espoke がチャットに書いたことにする（7.11 節） |
 | `GET /spotify?win=<n>` | WebSocket に切り替えて、Spotify の音と操作をやりとりする（8.7 節）。`SPOTIFY_PIPE` が無ければ 404 |
 | `GET /youtube?win=<n>` | WebSocket に切り替えて、YouTube の音と動画と操作をやりとりする（8.9 節）。`YOUTUBE_COOKIES` が無ければ 404 |
 | `GET /` | 動いているかの確認 |
 
 `/stream` と `/post` と `/spotify` と `/youtube` には `X-Key: <RELAY_KEY>` ヘッダが要る（無いか違えば 403）。
+espoke は `X-Pager: <PAGER_NAME>` ヘッダで自分の名前も送る。中継はチャットと GPS の位置をこの名前で分ける（無ければ `espoke`）。
 
 `POST /stream` は espoke が文を送るときに使う。Pico はつなぐたびに TLS の握手（4〜8 秒）をするので、
 送る用の接続を別に張らず、**送るのと受け取り直すのを1回の接続で済ませる**。
@@ -1253,6 +1298,9 @@ journalctl --user -u espoke-relay -f      # 届いた発言は "msg ..." と出�
 
 - ID は Discord のメッセージ ID（snowflake）。時間とともに増えるので、Pico は最後に受け取った ID を `after` に付けてつなぎ直せば、切れていた間の分も受け取れる。
   中継を立ち上げ直しても、起動時に各チャンネルの履歴を読み、新しいものから 8 件を持ち直す
+- チャット（7.11 節）の行は、ID の頭に `C` が付く（`C1567091513131794432 TAB 17:22 TAB alice TAB HELLO`）。
+  その接続の espoke 自身が送った文なら `c`。ID は Discord の ID と同じ並びの数（時刻から作る）なので、`after` には `C` を除いて付ける。
+  中継は Discord の発言とチャットを別々に直近 20 件ずつ持つ（Discord の発言が多くてもチャットが押し出されない）。`after` 無しでつなぐと、それぞれ直近 8 件を送る
 - 名前は 10 バイト、本文は 200 バイトで切る。時刻は日本時間
 - サーバー全体を受け取るときは、本文の頭に `#チャンネル名 ` を付ける（例: `#ｻﾞﾂﾀﾞﾝ ｷｮｳﾊｱﾒ`）。LCD の1行目は名前と時刻でいっぱいなので、流れる2行目に入れる。
   チャンネル名は 8 バイトで切り、頭の絵文字や区切り（`💬｜雑談` の `💬｜`）は落とす
@@ -1294,8 +1342,10 @@ curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head 
 - シリアルには `relay: <ID> <時刻> <名前>` と出る（名前は半角カナのバイト列なので化ける）。
   `status` には `relay=1 (no message) msgs=3` のように、つながり具合と覚えている件数が出る
 - `wifi off` にすると中継も切る
+- Chat（7.11 節）のメッセージも同じ流れで届く。行の頭の `C` / `c` で Chat の方に入れる
 - Send の画面で送ると決めたら（7.5 節）、つながっていても**中継につなぎ直し、`POST /stream` で文を送る**。返事の流れをそのまま受け取り続けるので、送ったあとに受け取り直す握手は要らない。
-  曲の途中でも待たずに送る（その間は無音）。シリアルには `send: ok` のように結果が出る
+  曲の途中でも待たずに送る（その間は無音）。シリアルには `send: ok`（Chat なら `send (chat): ok`）のように結果が出る。
+  Chat の Send からは `POST /stream?to=chat` で送る
 
 送った結果は、Send の画面の2行目に出る。
 
@@ -1714,18 +1764,19 @@ journalctl --user -u espoke-gateway -f   # 接続ごとに「tls: 85 s, to pico 
 - `spotify_probe.py --path /youtube --connect <IPv4> https://ubuntubook.<tailnet>.ts.net:10000` で、一覧が届き、動画が 1 秒あたり 15.9KB（128kbps に足りる）で流れ、コマは遅れなかった
 - Pico が dynabook で失敗したあと ubuntubook に 4.4 秒でつながり、Discord のメッセージと YouTube の一覧が届いた
 
-### 8.11 GPS の位置と地図（Raspberry Pi 5）
+### 8.11 GPS の位置と地図とチャット（Raspberry Pi 5）
 
 espoke の GPS で測った位置を 1 分ごとに中継へ送り、家の Raspberry Pi 5（`raspi`）の画面に、OpenStreetMap の地図と通った道を出す。
+画面の**左が地図、右が espoke どうしのチャット**（7.11 節）。espoke が 2 台なら、2 台の位置と道を色分けして出す。
 
 ```
    GPS ─UART─ Pico ── Wi-Fi（家か、スマホのテザリング）── インターネット
                                                              │ Funnel 10000（TCP のまま。TLS は中継が受ける）
                                                              ▼
-                          dynabook: discord_relay.py ──> ~/espoke/gps.jsonl（足していくだけで消さない）
+                          dynabook: discord_relay.py ──> ~/espoke/gps.jsonl と chat.jsonl（足していくだけで消さない）
                                                              │ tailnet の中だけ（dynabook の 100.x.x.x:8020）
                                                              ▼
-                          Pi 5: fbservo で地図のページを全画面に出す
+                          Pi 5: fbservo で地図とチャットのページを全画面に出す
 ```
 
 GPS は M5Stack Unit GPS v1.1（AT6668 + MAX2659）。基板の GPS 用ピン（GP4・GP5）に Grove の変換ケーブルでつなぐ（[docs/board_layout.svg](docs/board_layout.svg)）。
@@ -1752,15 +1803,22 @@ GPS は M5Stack Unit GPS v1.1（AT6668 + MAX2659）。基板の GPS 用ピン（
 
 **中継**
 
-- 届いた位置を `GPS_FILE`（既定 `~/espoke/gps.jsonl`）に 1 行 1 点の JSON で足していく。消さない（1 分ごとなら 1 日 100KB ほど）
+- 届いた位置を `GPS_FILE`（既定 `~/espoke/gps.jsonl`）に 1 行 1 点の JSON で足していく。消さない（1 分ごとなら 1 台 1 日 100KB ほど）。
+  点ごとに espoke の名前（`pager`。7.1 節の `PAGER_NAME`）を持つ。名前の無い古い点は `espoke` のものとみなす
+- チャットは `CHAT_FILE`（既定 `~/espoke/chat.jsonl`）に同じく足していく（`{"id", "t", "pager", "text"}`）。本文はログに書かない
 - 地図のページは **tailnet の中からだけ**見られる（`MAP_PORT`、既定 8020）。dynabook の起動直後に tailscaled がまだ動いていなくても待てるよう、全部のアドレスで待ち、tailnet（`100.64.0.0/10`）とこの PC 自身以外からは 403 を返す。位置は個人の情報なので、Funnel にも LAN にも出さない。ログにも位置は書かない
-  - `GET /` 地図のページ
-  - `GET /track.json?since=<UNIX 秒>` それより新しい点（`{"now": 中継の今の時刻, "points": [[時刻, 緯度, 経度, km/h, 衛星の数], ...]}`）
+  - `GET /` 地図とチャットのページ
+  - `GET /feed.json?gps=<n>&chat=<m>` n 点目からあとの位置と、m 件目からあとのチャット（どちらも届いた順。`chat=0` なら直近 100 件）。
+    `{"v": ページの版, "now": 中継の今の時刻, "pagers": [名前, ...], "gps": 点の数, "points": [[時刻, 緯度, 経度, km/h, 衛星の数, 名前], ...], "chat": 件数, "msgs": [[時刻, 名前, 本文], ...]}`。
+    `pagers` は中継が最初に見かけた順で、ページはこの順に色（青・橙・緑・紫）を割り当てる
 - 地図のページは Leaflet（1.9.4、unpkg から読む）で、地図の絵は OpenStreetMap のタイル（`tile.openstreetmap.org`）。
   [タイルの利用の決まり](https://operations.osmfoundation.org/policies/tiles/)に従い、右下に帰属を出し、まとめて取りにいかない（地図を見ている分だけ読む）
-  - 今いる場所に青い丸、通った道を赤紫の線で描く。10 分より間が空いた点どうしは線でつながない（別の外出）
-  - 最後の位置が 5 分より古ければ、丸を灰色、左上の文字を赤にする（電源が切れた・電波が無いなど）
-  - 30 秒ごとに新しい点を読み、今いる場所を真ん中にする。拡大の度合いは `?z=15` のように変えられる（既定 16）
+  - espoke ごとに、今いる場所に丸、通った道に線を、その espoke の色で描く。10 分より間が空いた点どうしは線でつながない（別の外出）
+  - 右の上に espoke ごとの最後の位置の時刻（今日でなければ日付も）・何分前か・速さを出す。最後の位置が 5 分より古ければ、丸を灰色、時刻を赤にする（電源が切れた・電波が無いなど）
+  - 右の残りがチャット。下に新しい発言を足していき、上にあふれた古い発言は隠れる（fbservo でスクロールさせないため。ページに残すのは 100 件）。日付が変わると `11/3` のような区切りが入る
+  - 5 秒ごとに新しい点とチャットを読む。地図は、位置が新しい espoke が全部入るように合わせる（1 台なら真ん中にする。どれも古ければ全部）。拡大の度合いは `?z=15` のように変えられる（既定 16。2 台が離れていればそれより引く）
+  - 中継を新しいページに入れ替えると（`v` が変わると）、ページは自分で読み直す。Pi 5 の fbservo を起動し直さなくてよい
+  - 幅 700px より狭い画面（tailnet の中のスマホなど）では、地図の下にチャットを出す
   - **線と丸は Canvas で描く**（`preferCanvas`）。fbservo の Servo は SVG を描けず、Leaflet の既定（SVG）では線と丸が出ないうえ、JavaScript が途中で止まる
 
 **Pi 5（`raspi`）**
@@ -1771,11 +1829,18 @@ GPS は M5Stack Unit GPS v1.1（AT6668 + MAX2659）。基板の GPS 用ピン（
 - **fbservo は 32bpp のフレームバッファにしか描けない**が、Pi 5 の `/dev/fb0` は既定で 16bpp。
   `/boot/firmware/cmdline.txt` に `video=HDMI-A-1:1024x768-32@60` を足して 32bpp にした（解像度はつないだモニターの最大）
 - **Pi 5 の GPU（v3d）では Servo の GL のコンテキストが作れない**（`ContextCreationFailed(BadMatch)`）。`LIBGL_ALWAYS_SOFTWARE=1` で Mesa のソフトウェアの描画（llvmpipe）を使わせる。
-  1024×768 で 1 回の描画は 90〜160ms（30 秒ごとに描き直すだけなので十分）
+  1024×768 で 1 回の描画は 45〜290ms。ページは 5 秒ごとに読むが、中身が変わったときだけ書き換えるので、描き直すのは位置かチャットが届いたときと、「何分前」が変わるとき（1 分ごと）だけ
 - 電源を入れたら地図が出るように、tty1 に自動でログインし、`~/.profile` から `~/espoke-map.sh` を呼ぶ。
   `~/espoke-map.sh` は、ページが開けるようになるまで（起動直後は Tailscale がまだつながっていない）待ってから `fbservo --full http://100.85.213.75:8020/` を開く。
   落ちたら 5 秒後に開き直し、Q で閉じたらシェルに戻る。自動ログインは `sudo sh ~/espoke-map-setup.sh` で入れる（`getty@tty1` の `--autologin`）
-- fbservo は終わるときに自分の描いた絵を消す。`FBSERVO_FB` でファイルに描かせて確かめるときは、動いている間に写す
+- fbservo は終わるときに自分の描いた絵を消す。`FBSERVO_FB` でファイルに描かせて確かめるときは、動いている間に写す。
+  地図を出している fbservo とは別に、Pi 5 の上で試しに描かせるには、ファイルを先に fb0 と同じ大きさにし、プロフィールを分け、端末（pty）から動かす（端末が無いと何も描かない）:
+  ```bash
+  truncate -s $((4096*768)) /tmp/test.fb
+  XDG_DATA_HOME=/tmp/fbt XDG_RUNTIME_DIR=/tmp/fbt LIBGL_ALWAYS_SOFTWARE=1 FBSERVO_FB=/tmp/test.fb FBSERVO_VSYNC=0 \
+    timeout 60 script -qfc "$HOME/fbservo/target/release/fbservo --full http://100.85.213.75:8020/" /dev/null
+  # 動いている間に別の端末で: cp /tmp/test.fb x.fb → ffmpeg -f rawvideo -pix_fmt bgra -s 1024x768 -i x.fb x.png
+  ```
 - 2026-11-03 に、Pi 5 の SD カードのファイルシステムが壊れていた（ext4 のエラー 80 件。`/usr/share/glvnd` がディレクトリでなく別のファイルになり、EGL が Mesa を見つけられなかった）。
   fsck で直し、壊れていた 125 個のパッケージを入れ直した（`~/repair-packages.sh`）。また壊れるようなら、SD カードを替えて OS を入れ直す
 

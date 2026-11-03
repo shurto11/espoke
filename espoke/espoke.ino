@@ -12,11 +12,11 @@
  *   3. シリアルに "sd" と打つと、microSD の MP3 をパス順に流し続ける
  *      BOOTSEL を押しても再生を始める
  *   4. LCD1602A の画面はホームから選ぶ。ホームの1行目は月日と時刻 (NTP で合わせた日本時間)、2行目で
- *      SW2 / SW3 で Music / Spotify / YouTube / Movie / Discord / Mario / System を選び、SW4 で開く
+ *      SW2 / SW3 で Music / Spotify / YouTube / Movie / Discord / Chat / Mario / System を選び、SW4 で開く
  *      (Spotify と YouTube は Wi-Fi につながっているときだけ出る)。
- *      Discord ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
+ *      Discord と Chat ではさらに Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15 のスイッチ) で前の画面に戻る
  *   5. SW1〜SW4 (GP10〜13) の役目は開いている画面で変わる。SW1 はどこでも戻る (Send だけは長押しで戻る)
- *      ホーム・Discord: SW2 ← / SW3 → / SW4 開く
+ *      ホーム・Discord・Chat: SW2 ← / SW3 → / SW4 開く
  *      Music: Spotify と同じく アルバムの一覧 → 曲選択 → 再生中 の順に進む。アルバムは SD のフォルダで、一覧の先頭は全曲
  *        一覧: SW2 / SW3 でアルバムを選び、SW4 で曲選択へ。SW1 でホームへ
  *        曲選択: 1行目に曲名 (鳴っている曲なら左端に ▶)、2行目にフォルダ名と番号。SW2 / SW3 で曲を選び、
@@ -34,6 +34,9 @@
  *      届いたら Receive の画面に切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
  *      変換して送ってくるので、そのまま LCD に書ける。Send の画面で打った文は、同じ中継を通して Discord に送る
  *      RELAY_HOST につなげなければ、RELAY_HOST2 (別の PC の tools/relay_gateway.py。同じ中継へ渡す) を試す
+ *      Chat は、同じ中継につないでいるポケベル (別の espoke) どうしのチャット。Discord と同じ流れで受け取り、
+ *      Send で打った文は Discord ではなく、ほかのポケベルと Pi 5 の地図のページ (8.11 節) に届く。
+ *      自分の名前は arduino_secrets.h の PAGER_NAME (中継は GPS の位置もこの名前で分ける)
  *   7. ホームで Spotify を開くと Spotify モードになる。中継が、同じ PC で動かす go-librespot の音を MP3 にして
  *      WebSocket で流してくるので、SD の曲と同じく libmad でデコードしてイヤホンで鳴らす。モードの間は
  *      Spotify の画面だけを使い、Discord は受け取らない (届いた発言は、モードを抜けてつなぎ直すと届く)
@@ -92,6 +95,10 @@
 // 予備の入口 (別の PC の tools/relay_gateway.py)。RELAY_HOST につなげないときに試す。空なら使わない
 #ifndef RELAY_HOST2
 #define RELAY_HOST2 ""
+#endif
+// このポケベルの名前 (英数字 10 文字まで)。中継はチャットと GPS の位置をこの名前で分ける。2 台目は別の名前にする
+#ifndef PAGER_NAME
+#define PAGER_NAME "espoke"
 #endif
 #ifndef RELAY_PORT
 #define RELAY_PORT 8443  // 使っていない (古い arduino_secrets.h のため)。Discord の流れも SPOTIFY_PORT につなぐ
@@ -156,8 +163,8 @@ static const size_t  SD_MAX_TRACKS = 300;  // 曲のパスは RAM に持つの�
 static const int     SD_MAX_DEPTH  = 5;    // フォルダを潜る深さ
 static const int     SD_REOPEN_MAX = 3;    // 1曲の途中で読めなくなったとき、カードを初期化し直して続ける回数
 
-// Discord のメッセージ
-static const size_t        MSG_MAX         = 8;    // 覚えておく数。中継は起動直後に直近のこの数だけ送ってくる
+// Discord とチャットのメッセージ
+static const size_t        MSG_MAX         = 8;    // 覚えておく数 (Discord とチャットで別々に)。中継は起動直後に直近のこの数だけ送ってくる
 static const unsigned long MSG_SCROLL_MS   = 300;  // 16 文字に収まらない本文を1文字ずつ流す間隔
 static const int           MSG_SCROLL_HOLD = 5;    // 本文の頭と末尾で止める長さ (MSG_SCROLL_MS 何回分か)
 
@@ -218,9 +225,9 @@ public:
   }
 };
 
-// Discord のメッセージ1件。名前と本文は LCD の文字コード (英数字と半角カナ) のバイト列
+// Discord かチャットのメッセージ1件。名前と本文は LCD の文字コード (英数字と半角カナ) のバイト列
 struct Msg {
-  String id;      // Discord のメッセージ ID。つなぎ直すとき、ここより後を送ってもらう
+  String id;      // メッセージ ID (チャットも Discord と同じ並びの数)。つなぎ直すとき、ここより後を送ってもらう
   String time;    // "HH:MM"
   String author;  // 10 バイトまで
   String text;    // 200 バイトまで
@@ -332,33 +339,35 @@ static Mp3Decoder          mp3;
 
 static String serialLine = "";             // 受信途中のコマンド
 
-// LCD の画面。ホームで Music / Spotify / YouTube / Movie / Discord / Mario / System を選んで開き、Discord ではさらに
-// Receive (受信) か Send (送信) を選ぶ。SW1 (か GP15) で前の画面に戻る。Mario はゲーム
+// LCD の画面。ホームで Music / Spotify / YouTube / Movie / Discord / Chat / Mario / System を選んで開き、Discord と Chat
+// ではさらに Receive (受信) か Send (送信) を選ぶ (Receive と Send の画面は共通で、box でどちらのものかを分ける)。
+// SW1 (か GP15) で前の画面に戻る。Mario はゲーム
 enum Page { PAGE_HOME, PAGE_MUSIC, PAGE_DISCORD, PAGE_MSG, PAGE_INPUT, PAGE_SYSTEM, PAGE_SPOTIFY, PAGE_GAME, PAGE_YOUTUBE,
-            PAGE_MOVIE };
+            PAGE_MOVIE, PAGE_CHAT };
 static const char *const PAGE_NAMES[] = {"home", "music", "discord", "receive", "send", "system", "spotify", "mario",
-                                         "youtube", "movie"};  // シリアルに出す名前
+                                         "youtube", "movie", "chat"};  // シリアルに出す名前
 static int    page = PAGE_MUSIC;           // 起動中は Music の画面に状態を出し、setup() の最後でホームにする
 static int    pageBeforeMsg = -1;          // 着信で Receive の画面に切り替える前の画面。戻るときはここへ
+static int    boxBeforeMsg = 0;            // そのときの box (Send の画面だったなら、どちらの Send か)
 static String mainLines[2];                // Music の画面の内容。他の画面を見ている間も更新しておく
 static unsigned long lastPageDraw = 0;
 // 画面を描き直す間隔。中身が刻々と変わる画面は 1 秒ごと、それ以外も、LCD が化けたときに戻すためにこの間隔で
 static const unsigned long PAGE_REDRAW_MS = 1000;
 static const unsigned long PAGE_REFRESH_MS = 5000;
 
-// ホームと Discord の画面で選ぶ項目。SW2 / SW3 で左右に動かし、SW4 で開く
+// ホームと Discord・Chat の画面で選ぶ項目。SW2 / SW3 で左右に動かし、SW4 で開く
 struct MenuItem {
   const char *title;
   int         page;
 };
 static const MenuItem HOME_MENU[] = {{"Music", PAGE_MUSIC}, {"Spotify", PAGE_SPOTIFY}, {"YouTube", PAGE_YOUTUBE},
-                                     {"Movie", PAGE_MOVIE}, {"Discord", PAGE_DISCORD}, {"Mario", PAGE_GAME},
-                                     {"System", PAGE_SYSTEM}};
+                                     {"Movie", PAGE_MOVIE}, {"Discord", PAGE_DISCORD}, {"Chat", PAGE_CHAT},
+                                     {"Mario", PAGE_GAME}, {"System", PAGE_SYSTEM}};
 static const MenuItem DISCORD_MENU[] = {{"Receive", PAGE_MSG}, {"Send", PAGE_INPUT}};
 static const int HOME_COUNT = sizeof(HOME_MENU) / sizeof(HOME_MENU[0]);
 static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
 static int    homeSel = 0;                 // ホームで選んでいる項目
-static int    discordSel = 0;              // Discord の画面で選んでいる項目
+static int    discordSel = 0;              // Discord・Chat の画面で選んでいる項目 (Receive か Send)
 // System の画面で見るもの。SW2 / SW3 で切り替える
 enum SysView { SYS_WIFI, SYS_BT, SYS_GPS, SYS_INFO, SYS_COUNT };
 static int    sysView = SYS_WIFI;
@@ -459,8 +468,18 @@ static const Morse MORSE_TABLE[] = {
 static const size_t MAX_CODE = 6;          // 1文字の符号は最長5つ (数字)
 static const size_t MAX_TEXT = 64;
 static String morseCode = "";              // 入力中の符号 ("-" と ".")
-static String morseText = "";              // 確定した文章
-static String morseNote = "";              // 送った結果。Send の画面の2行目に、符号を打ち始めるまで出す
+
+// 受け取ったメッセージと打ちかけの文。Discord と、ポケベルどうしのチャット (Chat) で別々に持つ。
+// 中継からは同じ流れ (/stream) で届き、チャットの行は ID の頭に C (自分が送った文なら c) が付いている
+enum Box { BOX_DISCORD, BOX_CHAT, BOX_COUNT };
+struct MsgBox {
+  Msg    msgs[MSG_MAX];  // 古い順に count 件
+  size_t count = 0;
+  String text;           // Send の画面で確定した文章
+  String note;           // 送った結果。Send の画面の2行目に、符号を打ち始めるまで出す
+};
+static MsgBox boxes[BOX_COUNT];
+static int    box = BOX_DISCORD;           // 開いている Receive・Send がどちらのものか
 
 // Discord の中継 (tools/discord_relay.py) から受け取ったメッセージ
 static RelayClient *relay = nullptr;       // 最初につなぐときに作る (TLS のスタック 6.4KB を起動時から取らない)
@@ -475,9 +494,8 @@ static int    relayHostIdx = 0;            // つなぎにいく入口。0 が R
 static unsigned long lastRelayData = 0;    // 最後に何か (空行を含む) 届いた時刻
 static String relayLine = "";              // 受信途中の1行
 static String relayLastId = "";            // 最後に受け取ったメッセージの ID
-static String relayOutbox = "";            // Discord に送る文。次に中継につなぐとき POST で一緒に送る
-static Msg    msgs[MSG_MAX];               // 古い順に msgCount 件
-static size_t msgCount = 0;
+static String relayOutbox = "";            // 送る文。次に中継につなぐとき POST で一緒に送る
+static int    outboxBox = BOX_DISCORD;     // relayOutbox の送り先 (Discord かチャットか)
 static int    msgView = 0;                 // Receive の画面で見ているもの。0 が最新、1 がその1つ前
 static Marquee msgMarq = {0, 0};          // 本文を流している位置
 static unsigned long lastMsgScroll = 0;
@@ -1163,9 +1181,10 @@ static char decodeMorse(const String &code) {
   return 0;
 }
 
-// Receive の画面で見ている1件。msgCount が 0 のときは呼ばない
+// Receive の画面で見ている1件。boxes[box].count が 0 のときは呼ばない
 static const Msg &viewedMsg() {
-  return msgs[msgCount - 1 - msgView];
+  const MsgBox &b = boxes[box];
+  return b.msgs[b.count - 1 - msgView];
 }
 
 // 頭から出し直す。頭で少し止めてから流し始める
@@ -1442,18 +1461,19 @@ static void musicDraw() {
   else drawRow(0, muTrackTop());
 }
 
-// Discord の画面の2行目に、選んでいる項目の今の様子を出す
+// Discord・Chat の画面の2行目に、選んでいる項目の今の様子を出す
 static String pageSummary(int p) {
+  const MsgBox &b = boxes[box];
   switch (p) {
     case PAGE_MSG:
       // 最新の発言者と時刻。まだ無ければ中継とのつながり具合
-      if (!msgCount) return relayStatus;
-      return msgs[msgCount - 1].author + " " + msgs[msgCount - 1].time;
+      if (!b.count) return relayStatus;
+      return b.msgs[b.count - 1].author + " " + b.msgs[b.count - 1].time;
     case PAGE_INPUT:
       // 打ちかけの文 (収まらなければ末尾側)。無ければ送った結果
-      if (morseText.length() > LCD_COLS) return morseText.substring(morseText.length() - LCD_COLS);
-      if (morseText.length()) return morseText;
-      return morseNote.length() ? morseNote : String("morse");
+      if (b.text.length() > LCD_COLS) return b.text.substring(b.text.length() - LCD_COLS);
+      if (b.text.length()) return b.text;
+      return b.note.length() ? b.note : String("morse");
   }
   return "";
 }
@@ -1510,12 +1530,13 @@ static void drawPage() {
       }
       break;
     case PAGE_DISCORD:
+    case PAGE_CHAT:
       drawRow(0, menuTitle(DISCORD_MENU[discordSel].title));
       drawRow(1, pageSummary(DISCORD_MENU[discordSel].page));
       break;
     case PAGE_MSG:
-      if (msgCount == 0) {
-        drawRow(0, "MSG --");
+      if (boxes[box].count == 0) {
+        drawRow(0, box == BOX_CHAT ? "CHAT --" : "MSG --");
         drawRow(1, relayStatus);
       } else {
         // 1行目は左に名前、右端に時刻
@@ -1528,11 +1549,11 @@ static void drawPage() {
       break;
     case PAGE_INPUT: {
       // 1行目は末尾にカーソル代わりの '_' を付け、収まらなければ末尾側を見せる
-      String top = morseText + "_";
+      String top = boxes[box].text + "_";
       if (top.length() > LCD_COLS) top = top.substring(top.length() - LCD_COLS);
       drawRow(0, top);
       // 2行目は左に符号、右端に確定したときの文字。符号が無いときは送った結果
-      String bottom = morseCode.length() ? morseCode : morseNote;
+      String bottom = morseCode.length() ? morseCode : boxes[box].note;
       if (morseCode.length()) {
         char ch = decodeMorse(morseCode);
         while (bottom.length() < LCD_COLS - 3) bottom += ' ';
@@ -1611,16 +1632,19 @@ static void drawPage() {
   }
 }
 
-// 入力した文を Discord に送る。TLS の握手で数秒止まるので、ここでは頼むだけにして loop() か pollAbort() が送る
+// 入力した文を Discord か (Chat の Send なら) チャットに送る。TLS の握手で数秒止まるので、ここでは頼むだけにして
+// loop() か pollAbort() が送る
 static void requestSend() {
+  MsgBox &b = boxes[box];
   if (!RELAY_HOST[0]) {
-    morseNote = "no RELAY_HOST";
+    b.note = "no RELAY_HOST";
   } else if (WiFi.status() != WL_CONNECTED) {
-    morseNote = "send: no wifi";
+    b.note = "send: no wifi";
   } else {
-    relayOutbox = morseText;
+    relayOutbox = b.text;
     relayOutbox.trim();
-    morseNote = "sending...";
+    outboxBox = box;
+    b.note = "sending...";
   }
 }
 
@@ -1628,13 +1652,14 @@ static void requestSend() {
 // 送っていなければ (relayOutbox が空なら) 何もしない
 static void sendDone(const String &result) {
   if (!relayOutbox.length()) return;
-  Serial.printf("send: %s\n", result.c_str());
+  Serial.printf("send%s: %s\n", outboxBox == BOX_CHAT ? " (chat)" : "", result.c_str());
   relayOutbox = "";
+  MsgBox &b = boxes[outboxBox];
   if (result == "ok") {
-    morseText = "";
-    morseNote = "sent";
+    b.text = "";
+    b.note = "sent";
   } else {
-    morseNote = "send: " + result;
+    b.note = "send: " + result;
   }
   if (page == PAGE_INPUT) drawPage();
 }
@@ -1643,6 +1668,8 @@ static void sendDone(const String &result) {
 static void openPage(int p) {
   page = p;
   pageBeforeMsg = -1;
+  if (p == PAGE_DISCORD) box = BOX_DISCORD;
+  if (p == PAGE_CHAT) box = BOX_CHAT;
   if (p == PAGE_MSG) {
     msgView = 0;
     resetMsgScroll();
@@ -1657,8 +1684,10 @@ static void goBack() {
   if (spPage()) onSpotifyKey(KEY_BACK);
   else if (page == PAGE_MUSIC) onMusicKey(KEY_BACK);
   else if (page == PAGE_MOVIE) onMovieKey(KEY_BACK);
-  else if (page == PAGE_MSG && pageBeforeMsg >= 0) openPage(pageBeforeMsg);
-  else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(PAGE_DISCORD);
+  else if (page == PAGE_MSG && pageBeforeMsg >= 0) {
+    box = boxBeforeMsg;
+    openPage(pageBeforeMsg);
+  } else if (page == PAGE_MSG || page == PAGE_INPUT) openPage(box == BOX_CHAT ? PAGE_CHAT : PAGE_DISCORD);
   else if (page == PAGE_GAME) gameBack();
   else if (page != PAGE_HOME) openPage(PAGE_HOME);
 }
@@ -1697,7 +1726,8 @@ static void onKey(int id) {
 
   switch (page) {
     case PAGE_HOME:
-    case PAGE_DISCORD: {
+    case PAGE_DISCORD:
+    case PAGE_CHAT: {
       // SW2 / SW3 で項目を選び、SW4 で開く
       bool home = page == PAGE_HOME;
       int &sel = home ? homeSel : discordSel;
@@ -1720,7 +1750,7 @@ static void onKey(int id) {
     case PAGE_MSG:
       // 曲の 前 / 次 の代わりに、メッセージの 古い方 / 新しい方 を見る
       if (id == KEY_DOT || id == KEY_DASH) {
-        if (id == KEY_DOT && msgView + 1 < (int)msgCount) msgView++;
+        if (id == KEY_DOT && msgView + 1 < (int)boxes[box].count) msgView++;
         if (id == KEY_DASH && msgView > 0) msgView--;
         resetMsgScroll();
         drawPage();
@@ -1943,9 +1973,10 @@ static void onHold(int id) {
   }
 }
 
-// Send の画面のスイッチ。モールスで文を打ち、enter で Discord に送る
+// Send の画面のスイッチ。モールスで文を打ち、enter で Discord (Chat の Send ならチャット) に送る
 static void onMorseKey(int id) {
-  morseNote = "";
+  String &morseText = boxes[box].text;
+  boxes[box].note = "";
   switch (id) {
     case KEY_DASH:
     case KEY_DOT:
@@ -2030,7 +2061,7 @@ static void pollButton() {
     if (buttonStable == LOW) goBack();
   }
 
-  if (page == PAGE_MSG && msgCount && millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
+  if (page == PAGE_MSG && boxes[box].count && millis() - lastMsgScroll >= MSG_SCROLL_MS) scrollMsg();
   if (spPage() && spView == SP_TRACKS && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpTrack();
   if (spPage() && spView == SP_NOW && millis() - lastSpScroll >= MSG_SCROLL_MS) scrollSpNow();
   if (page == PAGE_MUSIC && millis() - lastMuScroll >= MSG_SCROLL_MS) scrollMusic();
@@ -2041,7 +2072,7 @@ static void pollButton() {
   // Music と Spotify と YouTube と Movie (曲名や棒や動画は変わるたびに書いている)、Send (押したときに書いている)、
   // 流している本文、ゲーム (コマごとに書いている) は、描き直す間隔を空ける
   bool live = page != PAGE_MUSIC && page != PAGE_INPUT && !spPage() && page != PAGE_MOVIE && page != PAGE_GAME &&
-              !(page == PAGE_MSG && msgCount);
+              !(page == PAGE_MSG && boxes[box].count);
   if (millis() - lastPageDraw >= (live ? PAGE_REDRAW_MS : PAGE_REFRESH_MS)) drawPage();
 }
 
@@ -3622,16 +3653,18 @@ static void relayConnect() {
   // 送る文があれば POST の本文にする。中継は Discord に送ってから、GET と同じく流し始める。
   // Spotify と YouTube は WebSocket に切り替えてもらう (切り替えは HTTP/1.1 にしかない)
   if (spMode) {
-    relay->printf("GET %s?win=%d HTTP/1.1\r\nHost: %s\r\nX-Key: %s\r\nUpgrade: websocket\r\n"
+    relay->printf("GET %s?win=%d HTTP/1.1\r\nHost: %s\r\nX-Key: %s\r\nX-Pager: %s\r\nUpgrade: websocket\r\n"
                   "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-                  spService == PAGE_YOUTUBE ? "/youtube" : "/spotify", SP_WIN, relayHost(), RELAY_KEY, WS_KEY);
+                  spService == PAGE_YOUTUBE ? "/youtube" : "/spotify", SP_WIN, relayHost(), RELAY_KEY, PAGER_NAME,
+                  WS_KEY);
   } else if (relayOutbox.length()) {
-    relay->printf("POST /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n"
+    relay->printf("POST /stream?after=%s%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\nX-Pager: %s\r\n"
                   "Content-Type: text/plain\r\nContent-Length: %u\r\n\r\n%s",
-                  relayLastId.c_str(), relayHost(), RELAY_KEY, relayOutbox.length(), relayOutbox.c_str());
+                  relayLastId.c_str(), outboxBox == BOX_CHAT ? "&to=chat" : "", relayHost(), RELAY_KEY, PAGER_NAME,
+                  relayOutbox.length(), relayOutbox.c_str());
   } else {
-    relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\n\r\n",
-                  relayLastId.c_str(), relayHost(), RELAY_KEY);
+    relay->printf("GET /stream?after=%s HTTP/1.0\r\nHost: %s\r\nX-Key: %s\r\nX-Pager: %s\r\n\r\n",
+                  relayLastId.c_str(), relayHost(), RELAY_KEY, PAGER_NAME);
   }
   String head = relay->readStringUntil('\n');  // "HTTP/1.0 200 OK" (Spotify は "HTTP/1.1 101 Switching Protocols")
   head.trim();
@@ -3668,8 +3701,8 @@ static void relayConnect() {
   sendDone(sent);
 }
 
-// 中継から届いた1行を処理する。"ID TAB HH:MM TAB 名前 TAB 本文"。空行は生存確認で、
-// つないだ直後の空行は「つなぐ前からあった分はここまで」の印
+// 中継から届いた1行を処理する。"ID TAB HH:MM TAB 名前 TAB 本文"。チャットの行は ID の頭に C が付き、
+// 自分が送った文なら c (着信として知らせない)。空行は生存確認で、つないだ直後の空行は「つなぐ前からあった分はここまで」の印
 static void onRelayLine(const String &line) {
   if (!line.length()) {
     relayQuiet = false;
@@ -3682,33 +3715,43 @@ static void onRelayLine(const String &line) {
     Serial.printf("relay: bad line (%u bytes)\n", line.length());
     return;
   }
+  const bool own = line[0] == 'c';
+  const int to = (own || line[0] == 'C') ? BOX_CHAT : BOX_DISCORD;
+  MsgBox &bx = boxes[to];
 
   // いっぱいなら一番古いものを捨てる
-  if (msgCount == MSG_MAX) {
-    for (size_t i = 1; i < MSG_MAX; i++) msgs[i - 1] = std::move(msgs[i]);
-    msgCount--;
+  if (bx.count == MSG_MAX) {
+    for (size_t i = 1; i < MSG_MAX; i++) bx.msgs[i - 1] = std::move(bx.msgs[i]);
+    bx.count--;
   }
-  Msg &m = msgs[msgCount++];
-  m.id = line.substring(0, a);
+  Msg &m = bx.msgs[bx.count++];
+  m.id = line.substring(to == BOX_CHAT ? 1 : 0, a);
   m.time = line.substring(a + 1, b);
   m.author = line.substring(b + 1, c);
   m.text = line.substring(c + 1);
-  relayLastId = m.id;
+  relayLastId = m.id;  // チャットも Discord と同じ並びの ID なので、どちらでも最後に受け取ったもの
   // 名前と本文は半角カナのバイト列なので、シリアルでは化ける
-  Serial.printf("relay: %s %s %s\n", m.id.c_str(), m.time.c_str(), m.author.c_str());
+  Serial.printf("relay: %s%s %s %s\n", to == BOX_CHAT ? (own ? "chat (own) " : "chat ") : "", m.id.c_str(),
+                m.time.c_str(), m.author.c_str());
 
-  if (relayQuiet) {
-    // 起動前からあった分。表示は切り替えず、Receive の画面の中身だけ新しくしておく。
+  if (relayQuiet || own) {
+    // 起動前からあった分か、自分が送った文。表示は切り替えず、Receive の画面の中身だけ新しくしておく。
     // 古いものを見ていたら同じものを見続け、最新を見ていたら新しく来た方を頭から出す
-    if (msgView > 0) msgView = std::min<int>(msgView + 1, msgCount - 1);
-    else resetMsgScroll();
-    if (page == PAGE_MSG) drawPage();
+    if (box == to) {
+      if (msgView > 0) msgView = std::min<int>(msgView + 1, bx.count - 1);
+      else resetMsgScroll();
+      if (page == PAGE_MSG) drawPage();
+    }
     return;
   }
 
   // 着信。Receive の画面に切り替えて最新を出す。戻るときに元の画面へ戻れるよう覚えておく
-  if (page != PAGE_MSG) pageBeforeMsg = page;
+  if (page != PAGE_MSG || box != to) {
+    pageBeforeMsg = page;
+    boxBeforeMsg = box;
+  }
   page = PAGE_MSG;
+  box = to;
   msgView = 0;
   resetMsgScroll();
   drawPage();
@@ -5221,12 +5264,13 @@ static const char *HELP =
     " sw <1-4> [ms] / game [lcd|level n]";
 
 static void printStatus() {
-  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s, %s) msgs=%u mode=%s gps=%s/%dsat sent=%lu\n",
+  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s, %s) msgs=%u chat=%u name=%s mode=%s gps=%s/%dsat sent=%lu\n",
                 WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
                 a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
                 (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
                 digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
-                morseText.c_str(), relayOpen, relayStatus.c_str(), relayHost(), (unsigned)msgCount, spMode ? PAGE_NAMES[spService] : "-",
+                boxes[box].text.c_str(), relayOpen, relayStatus.c_str(), relayHost(), (unsigned)boxes[BOX_DISCORD].count,
+                (unsigned)boxes[BOX_CHAT].count, PAGER_NAME, spMode ? PAGE_NAMES[spService] : "-",
                 gps.valid ? "fix" : "nofix", gps.sats, (unsigned long)gpsSentCount);
 }
 
