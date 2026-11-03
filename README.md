@@ -25,6 +25,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 | `bt_earphone/` | Bluetooth イヤホンに接続して通知音を鳴らすサンプル |
 | `espoke/` | 本体。microSD の MP3 を Bluetooth イヤホンで再生し、LCD に状態を出す。SW1〜SW4 で再生の操作とモールス入力ができる。Discord のメッセージを受け取って出し、モールスで打った文を送る。Wi-Fi につながっているときは Spotify も鳴らし、YouTube も見られる。microSD の動画も見られる（Movie）。ゲーム（Mario）も遊べる |
 | `sd_test/` | microSD スロット（CK-40）の配線・カード・ファイル一覧・読み書きを確かめるテスト |
+| `gps_test/` | GPS（M5Stack Unit GPS v1.1）の配線・受信・問い合わせの返事を確かめるテスト。受信の様子を LCD にも出すので、モバイルバッテリーで外へ持ち出しても使える |
 | `docs/` | 部品の取り付け手順など |
 | `tools/` | Discord と Spotify と YouTube の中継（PC 側で動かす）とその予備の入口、その Spotify と YouTube の部分を Pico の代わりに試すスクリプト、動画を Movie 用に変換するスクリプト、基板の配置図を作るスクリプト |
 
