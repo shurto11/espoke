@@ -587,6 +587,8 @@ class ChatLog:
         return make_line(msg_id, datetime.datetime.fromtimestamp(t, JST), pager, text)
 
     def add(self, pager, text):
+        # Pico のカナ入力は半角カナで来る。地図のページで読みやすいよう全角にそろえる (LCD へは to_lcd が半角に戻す)
+        text = unicodedata.normalize("NFKC", text)
         t = int(time.time())
         with STORE.cond:   # ID を決めてから入れるまでに、ほかの発言が割り込まないように
             msg_id = STORE.next_id()

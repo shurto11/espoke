@@ -29,6 +29,7 @@
  *      Receive: SW2 古いメッセージ / SW3 新しいメッセージ
  *      Send: モールス信号を打ってアルファベットを入力する
  *        SW1 backspace (長押しで戻る) / SW2 トン / SW3 ツー / SW4 enter (符号を文字に確定。空なら空白、空白のあとなら送信)
+ *        Chat の Send だけは SW4 長押しでカナ入力に切り替わり、ローマ字で打つとその場で半角カナになる
  *      System: SW2 / SW3 で WiFi / Bluetooth / 稼働時間と空きヒープ を切り替える。Bluetooth で SW4 を押すとイヤホンにつなぐ
  *   6. RELAY_HOST の中継 (tools/discord_relay.py) に HTTPS でつなぎ、Discord のメッセージを受け取る。
  *      届いたら Receive の画面に切り替えて出す。中継が LCD の文字コード (英数字と半角カナ) に
@@ -464,8 +465,60 @@ static const Morse MORSE_TABLE[] = {
   {'Z', "--.."},
   {'0', "-----"}, {'1', ".----"}, {'2', "..---"}, {'3', "...--"}, {'4', "....-"},
   {'5', "....."}, {'6', "-...."}, {'7', "--..."}, {'8', "---.."}, {'9', "----."},
+  {'-', "-....-"}, {'.', ".-.-.-"}, {',', "--..--"}, {'?', "..--.."},  // カナ入力では - は長音 ｰ、. は ｡、, は ､
 };
-static const size_t MAX_CODE = 6;          // 1文字の符号は最長5つ (数字)
+static const size_t MAX_CODE = 6;          // 1文字の符号は最長6つ (記号)
+
+// Chat の Send のカナ入力 (SW4 長押しで英字と切り替える)。英字のモールスでローマ字を打つと、その場で半角カナにする。
+// カナは LCD の文字コード (JIS X 0201。濁点 ﾞ と半濁点 ﾟ は別の 1 字)。どの項目も、ほかの項目の頭にはならない。
+// ﾝ (N と NN) は表に無く、romajiConvert() が決める。表は Python で作った
+struct Romaji {
+  const char *roma;
+  const char *kana;
+};
+static const Romaji ROMAJI_TABLE[] = {
+  {"A", "\xB1"}, {"BA", "\xCA\xDE"}, {"BE", "\xCD\xDE"}, {"BI", "\xCB\xDE"}, {"BO", "\xCE\xDE"}, {"BU", "\xCC\xDE"},
+  {"BYA", "\xCB\xDE\xAC"}, {"BYE", "\xCB\xDE\xAA"}, {"BYI", "\xCB\xDE\xA8"}, {"BYO", "\xCB\xDE\xAE"},
+  {"BYU", "\xCB\xDE\xAD"}, {"CA", "\xB6"}, {"CE", "\xBE"}, {"CHA", "\xC1\xAC"}, {"CHE", "\xC1\xAA"}, {"CHI", "\xC1"},
+  {"CHO", "\xC1\xAE"}, {"CHU", "\xC1\xAD"}, {"CI", "\xBC"}, {"CO", "\xBA"}, {"CU", "\xB8"}, {"CYA", "\xC1\xAC"},
+  {"CYE", "\xC1\xAA"}, {"CYI", "\xC1\xA8"}, {"CYO", "\xC1\xAE"}, {"CYU", "\xC1\xAD"}, {"DA", "\xC0\xDE"},
+  {"DE", "\xC3\xDE"}, {"DHA", "\xC3\xDE\xAC"}, {"DHE", "\xC3\xDE\xAA"}, {"DHI", "\xC3\xDE\xA8"},
+  {"DHO", "\xC3\xDE\xAE"}, {"DHU", "\xC3\xDE\xAD"}, {"DI", "\xC1\xDE"}, {"DO", "\xC4\xDE"}, {"DU", "\xC2\xDE"},
+  {"DYA", "\xC1\xDE\xAC"}, {"DYE", "\xC1\xDE\xAA"}, {"DYI", "\xC1\xDE\xA8"}, {"DYO", "\xC1\xDE\xAE"},
+  {"DYU", "\xC1\xDE\xAD"}, {"E", "\xB4"}, {"FA", "\xCC\xA7"}, {"FE", "\xCC\xAA"}, {"FI", "\xCC\xA8"},
+  {"FO", "\xCC\xAB"}, {"FU", "\xCC"}, {"FYA", "\xCC\xAC"}, {"FYO", "\xCC\xAE"}, {"FYU", "\xCC\xAD"},
+  {"GA", "\xB6\xDE"}, {"GE", "\xB9\xDE"}, {"GI", "\xB7\xDE"}, {"GO", "\xBA\xDE"}, {"GU", "\xB8\xDE"},
+  {"GYA", "\xB7\xDE\xAC"}, {"GYE", "\xB7\xDE\xAA"}, {"GYI", "\xB7\xDE\xA8"}, {"GYO", "\xB7\xDE\xAE"},
+  {"GYU", "\xB7\xDE\xAD"}, {"HA", "\xCA"}, {"HE", "\xCD"}, {"HI", "\xCB"}, {"HO", "\xCE"}, {"HU", "\xCC"},
+  {"HYA", "\xCB\xAC"}, {"HYE", "\xCB\xAA"}, {"HYI", "\xCB\xA8"}, {"HYO", "\xCB\xAE"}, {"HYU", "\xCB\xAD"},
+  {"I", "\xB2"}, {"JA", "\xBC\xDE\xAC"}, {"JE", "\xBC\xDE\xAA"}, {"JI", "\xBC\xDE"}, {"JO", "\xBC\xDE\xAE"},
+  {"JU", "\xBC\xDE\xAD"}, {"JYA", "\xBC\xDE\xAC"}, {"JYO", "\xBC\xDE\xAE"}, {"JYU", "\xBC\xDE\xAD"}, {"KA", "\xB6"},
+  {"KE", "\xB9"}, {"KI", "\xB7"}, {"KO", "\xBA"}, {"KU", "\xB8"}, {"KYA", "\xB7\xAC"}, {"KYE", "\xB7\xAA"},
+  {"KYI", "\xB7\xA8"}, {"KYO", "\xB7\xAE"}, {"KYU", "\xB7\xAD"}, {"LA", "\xA7"}, {"LE", "\xAA"}, {"LI", "\xA8"},
+  {"LO", "\xAB"}, {"LTSU", "\xAF"}, {"LTU", "\xAF"}, {"LU", "\xA9"}, {"LYA", "\xAC"}, {"LYO", "\xAE"},
+  {"LYU", "\xAD"}, {"MA", "\xCF"}, {"ME", "\xD2"}, {"MI", "\xD0"}, {"MO", "\xD3"}, {"MU", "\xD1"},
+  {"MYA", "\xD0\xAC"}, {"MYE", "\xD0\xAA"}, {"MYI", "\xD0\xA8"}, {"MYO", "\xD0\xAE"}, {"MYU", "\xD0\xAD"},
+  {"NA", "\xC5"}, {"NE", "\xC8"}, {"NI", "\xC6"}, {"NO", "\xC9"}, {"NU", "\xC7"}, {"NYA", "\xC6\xAC"},
+  {"NYE", "\xC6\xAA"}, {"NYI", "\xC6\xA8"}, {"NYO", "\xC6\xAE"}, {"NYU", "\xC6\xAD"}, {"O", "\xB5"},
+  {"PA", "\xCA\xDF"}, {"PE", "\xCD\xDF"}, {"PI", "\xCB\xDF"}, {"PO", "\xCE\xDF"}, {"PU", "\xCC\xDF"},
+  {"PYA", "\xCB\xDF\xAC"}, {"PYE", "\xCB\xDF\xAA"}, {"PYI", "\xCB\xDF\xA8"}, {"PYO", "\xCB\xDF\xAE"},
+  {"PYU", "\xCB\xDF\xAD"}, {"QA", "\xB8\xA7"}, {"QE", "\xB8\xAA"}, {"QI", "\xB8\xA8"}, {"QO", "\xB8\xAB"},
+  {"QU", "\xB8"}, {"RA", "\xD7"}, {"RE", "\xDA"}, {"RI", "\xD8"}, {"RO", "\xDB"}, {"RU", "\xD9"},
+  {"RYA", "\xD8\xAC"}, {"RYE", "\xD8\xAA"}, {"RYI", "\xD8\xA8"}, {"RYO", "\xD8\xAE"}, {"RYU", "\xD8\xAD"},
+  {"SA", "\xBB"}, {"SE", "\xBE"}, {"SHA", "\xBC\xAC"}, {"SHE", "\xBC\xAA"}, {"SHI", "\xBC"}, {"SHO", "\xBC\xAE"},
+  {"SHU", "\xBC\xAD"}, {"SI", "\xBC"}, {"SO", "\xBF"}, {"SU", "\xBD"}, {"SYA", "\xBC\xAC"}, {"SYE", "\xBC\xAA"},
+  {"SYI", "\xBC\xA8"}, {"SYO", "\xBC\xAE"}, {"SYU", "\xBC\xAD"}, {"TA", "\xC0"}, {"TE", "\xC3"}, {"THA", "\xC3\xAC"},
+  {"THE", "\xC3\xAA"}, {"THI", "\xC3\xA8"}, {"THO", "\xC3\xAE"}, {"THU", "\xC3\xAD"}, {"TI", "\xC1"}, {"TO", "\xC4"},
+  {"TSA", "\xC2\xA7"}, {"TSE", "\xC2\xAA"}, {"TSI", "\xC2\xA8"}, {"TSO", "\xC2\xAB"}, {"TSU", "\xC2"},
+  {"TU", "\xC2"}, {"TYA", "\xC1\xAC"}, {"TYE", "\xC1\xAA"}, {"TYI", "\xC1\xA8"}, {"TYO", "\xC1\xAE"},
+  {"TYU", "\xC1\xAD"}, {"U", "\xB3"}, {"VA", "\xB3\xDE\xA7"}, {"VE", "\xB3\xDE\xAA"}, {"VI", "\xB3\xDE\xA8"},
+  {"VO", "\xB3\xDE\xAB"}, {"VU", "\xB3\xDE"}, {"WA", "\xDC"}, {"WE", "\xB3\xAA"}, {"WI", "\xB3\xA8"}, {"WO", "\xA6"},
+  {"WU", "\xB3"}, {"XA", "\xA7"}, {"XE", "\xAA"}, {"XI", "\xA8"}, {"XN", "\xDD"}, {"XO", "\xAB"}, {"XTSU", "\xAF"},
+  {"XTU", "\xAF"}, {"XU", "\xA9"}, {"XYA", "\xAC"}, {"XYO", "\xAE"}, {"XYU", "\xAD"}, {"YA", "\xD4"},
+  {"YE", "\xB2\xAA"}, {"YI", "\xB2"}, {"YO", "\xD6"}, {"YU", "\xD5"}, {"ZA", "\xBB\xDE"}, {"ZE", "\xBE\xDE"},
+  {"ZI", "\xBC\xDE"}, {"ZO", "\xBF\xDE"}, {"ZU", "\xBD\xDE"}, {"ZYA", "\xBC\xDE\xAC"}, {"ZYE", "\xBC\xDE\xAA"},
+  {"ZYI", "\xBC\xDE\xA8"}, {"ZYO", "\xBC\xDE\xAE"}, {"ZYU", "\xBC\xDE\xAD"}
+};
 static const size_t MAX_TEXT = 64;
 static String morseCode = "";              // 入力中の符号 ("-" と ".")
 
@@ -475,8 +528,10 @@ enum Box { BOX_DISCORD, BOX_CHAT, BOX_COUNT };
 struct MsgBox {
   Msg    msgs[MSG_MAX];  // 古い順に count 件
   size_t count = 0;
-  String text;           // Send の画面で確定した文章
+  String text;           // Send の画面で確定した文章 (LCD の文字コード。カナは半角カナの 1 バイト)
   String note;           // 送った結果。Send の画面の2行目に、符号を打ち始めるまで出す
+  bool   kana = false;   // カナ入力 (Chat だけ。SW4 長押しで切り替える)
+  String roma;           // カナ入力で、まだカナにしていないローマ字 (KY など)
 };
 static MsgBox boxes[BOX_COUNT];
 static int    box = BOX_DISCORD;           // 開いている Receive・Send がどちらのものか
@@ -1181,6 +1236,95 @@ static char decodeMorse(const String &code) {
   return 0;
 }
 
+// カナ入力のときの記号。- は長音 ｰ、. は ｡、, は ､ (LCD の文字コード)。ほかはそのまま
+static char kanaPunct(char ch) {
+  return ch == '-' ? '\xB0' : ch == '.' ? '\xA1' : ch == ',' ? '\xA4' : ch;
+}
+
+// Send の文に足す。MAX_TEXT を超えた分は捨てる
+static void appendText(MsgBox &b, const char *s) {
+  b.text += s;
+  if (b.text.length() > MAX_TEXT) b.text.remove(MAX_TEXT);
+}
+
+// 打ちかけのローマ字 (b.roma) を、決まったところまでカナにして文に足す。flush なら残りも出し切る
+// (N と NN は ﾝ に、カナにならない字は英字のまま)。KK のように同じ子音が続けば ｯ (TCH の T も)。
+// N のあとに母音・Y・N 以外が来れば ﾝ。NN は ﾝ だが、そのあとに母音か Y が来れば 2 つ目の N はその頭にする
+// (KONNICHIHA も KONNNICHIHA も ｺﾝﾆﾁﾊ。ONNA は ｵﾝﾅ。ﾝ のあとに母音を続けるなら XN)
+static void romajiConvert(MsgBox &b, bool flush) {
+  while (b.roma.length()) {
+    const char *r = b.roma.c_str();
+    const size_t n = b.roma.length();
+    const Romaji *exact = nullptr;
+    bool longer = false;  // r で始まる、もっと長い項目がある (続きを待つ)
+    for (const Romaji &e : ROMAJI_TABLE) {
+      if (strncmp(e.roma, r, n) != 0) continue;
+      if (e.roma[n] == 0) exact = &e;
+      else longer = true;
+    }
+    if (exact) {
+      appendText(b, exact->kana);
+      b.roma = "";
+      return;
+    }
+    if (longer && !flush) return;
+    const char c = r[0];
+    if (c == 'N') {
+      if (n == 1 || (n == 2 && r[1] == 'N')) {  // N か NN: 次の字で決まる
+        if (!flush) return;
+        appendText(b, "\xDD");  // ﾝ
+        b.roma = "";
+        return;
+      }
+      appendText(b, "\xDD");
+      const bool nn = r[1] == 'N';
+      const bool head = nn && strchr("AIUEOY", r[2]);  // NNA: 2 つ目の N は NA の頭
+      b.roma.remove(0, nn && !head ? 2 : 1);
+      continue;
+    }
+    if (n >= 2 && (c == r[1] || (c == 'T' && r[1] == 'C'))) {
+      appendText(b, "\xAF");  // ｯ
+    } else {
+      const char one[2] = {c, 0};
+      appendText(b, one);
+    }
+    b.roma.remove(0, 1);
+  }
+}
+
+// カナ入力の入り切り (Chat の Send の SW4 長押し)。打ちかけのローマ字は出し切ってから切り替える
+static void toggleKana() {
+  MsgBox &b = boxes[box];
+  romajiConvert(b, true);
+  b.kana = !b.kana;
+  Serial.printf("kana=%s\n", b.kana ? "on" : "off");
+  drawPage();
+}
+
+// Send の画面の文。打ちかけのローマ字は小文字で後ろに付ける
+static String inputText(const MsgBox &b) {
+  String roma = b.roma;
+  roma.toLowerCase();
+  return b.text + roma;
+}
+
+// LCD の文字コードの文を UTF-8 にする (中継へ送るとき)。半角カナ (0xA1〜0xDF) は U+FF61〜U+FF9F
+static String lcdToUtf8(const String &s) {
+  String out;
+  for (size_t i = 0; i < s.length(); i++) {
+    const uint8_t c = s[i];
+    if (c < 0x80) {
+      out += (char)c;
+    } else if (c >= 0xA1 && c <= 0xDF) {
+      const uint32_t u = 0xFF61 + (c - 0xA1);
+      out += (char)(0xE0 | (u >> 12));
+      out += (char)(0x80 | ((u >> 6) & 0x3F));
+      out += (char)(0x80 | (u & 0x3F));
+    }
+  }
+  return out;
+}
+
 // Receive の画面で見ている1件。boxes[box].count が 0 のときは呼ばない
 static const Msg &viewedMsg() {
   const MsgBox &b = boxes[box];
@@ -1469,11 +1613,13 @@ static String pageSummary(int p) {
       // 最新の発言者と時刻。まだ無ければ中継とのつながり具合
       if (!b.count) return relayStatus;
       return b.msgs[b.count - 1].author + " " + b.msgs[b.count - 1].time;
-    case PAGE_INPUT:
+    case PAGE_INPUT: {
       // 打ちかけの文 (収まらなければ末尾側)。無ければ送った結果
-      if (b.text.length() > LCD_COLS) return b.text.substring(b.text.length() - LCD_COLS);
-      if (b.text.length()) return b.text;
+      const String t = inputText(b);
+      if (t.length() > LCD_COLS) return t.substring(t.length() - LCD_COLS);
+      if (t.length()) return t;
       return b.note.length() ? b.note : String("morse");
+    }
   }
   return "";
 }
@@ -1549,18 +1695,21 @@ static void drawPage() {
       break;
     case PAGE_INPUT: {
       // 1行目は末尾にカーソル代わりの '_' を付け、収まらなければ末尾側を見せる
-      String top = boxes[box].text + "_";
+      const MsgBox &bx = boxes[box];
+      String top = inputText(bx) + "_";
       if (top.length() > LCD_COLS) top = top.substring(top.length() - LCD_COLS);
       drawRow(0, top);
-      // 2行目は左に符号、右端に確定したときの文字。符号が無いときは送った結果
-      String bottom = morseCode.length() ? morseCode : boxes[box].note;
+      // 2行目は左に符号、右に確定したときの文字。符号が無いときは送った結果。カナ入力のときは右端に ｶﾅ
+      String bottom = morseCode.length() ? morseCode : bx.note;
+      String right = bx.kana ? " \xB6\xC5" : "";
       if (morseCode.length()) {
         char ch = decodeMorse(morseCode);
-        while (bottom.length() < LCD_COLS - 3) bottom += ' ';
-        bottom += "= ";
-        bottom += ch ? ch : '?';
+        if (ch && bx.kana) ch = kanaPunct(ch);
+        right = String("= ") + (ch ? ch : '?') + right;
       }
-      drawRow(1, bottom);
+      if (bottom.length() + right.length() > LCD_COLS) bottom.remove(LCD_COLS - right.length());
+      while (bottom.length() + right.length() < LCD_COLS) bottom += ' ';
+      drawRow(1, bottom + right);
       break;
     }
     case PAGE_SYSTEM:
@@ -1641,7 +1790,8 @@ static void requestSend() {
   } else if (WiFi.status() != WL_CONNECTED) {
     b.note = "send: no wifi";
   } else {
-    relayOutbox = b.text;
+    romajiConvert(b, true);
+    relayOutbox = lcdToUtf8(b.text);  // 中継は UTF-8 で読む
     relayOutbox.trim();
     outboxBox = box;
     b.note = "sending...";
@@ -1921,6 +2071,7 @@ static void onMusicKey(int id) {
 // 一覧と曲選択の SW3 (再生中の画面へ)。Movie では一覧の SW3
 static bool keyHasHold(int id) {
   if (id == KEY_BACK) return true;
+  if (id == KEY_ENTER && page == PAGE_INPUT && box == BOX_CHAT) return true;  // カナ入力の入り切り
   bool lists = (spPage() && spView != SP_NOW) || (page == PAGE_MUSIC && muView != MU_NOW) ||
                (page == PAGE_MOVIE && mvView == MV_LIST);
   bool tracks = (spPage() && spView == SP_TRACKS) || (page == PAGE_MUSIC && muView == MU_TRACKS);
@@ -1928,9 +2079,13 @@ static bool keyHasHold(int id) {
 }
 
 // 長押し。SW1 は、Music と Spotify と Movie では再生 / 一時停止、それ以外 (Send など) では前の画面に戻る。
-// SW4 は曲選択の画面で、選んでいる曲に関係なくシャッフルで鳴らす。
+// SW4 は曲選択の画面で、選んでいる曲に関係なくシャッフルで鳴らす。Chat の Send では、英字とカナの入力を切り替える。
 // SW3 は一覧と曲選択の画面で、再生中の画面へ移る
 static void onHold(int id) {
+  if (id == KEY_ENTER && page == PAGE_INPUT) {
+    toggleKana();
+    return;
+  }
   if (id == KEY_ENTER) {
     if (spPage() && spView == SP_TRACKS) spShufflePlay(spTrackList);
     if (page == PAGE_MUSIC && muView == MU_TRACKS && albumCount()) {
@@ -1985,17 +2140,34 @@ static void onMorseKey(int id) {
     case KEY_BACK:
       if (morseCode.length()) {
         morseCode.remove(morseCode.length() - 1);
+      } else if (boxes[box].roma.length()) {
+        boxes[box].roma.remove(boxes[box].roma.length() - 1);
       } else if (morseText.length()) {
         morseText.remove(morseText.length() - 1);
       }
       break;
     case KEY_ENTER:
       if (morseCode.length()) {
+        MsgBox &b = boxes[box];
         char ch = decodeMorse(morseCode);
-        if (ch && morseText.length() < MAX_TEXT) morseText += ch;
-        if (!ch) Serial.printf("unknown code: %s\n", morseCode.c_str());
+        if (!ch) {
+          Serial.printf("unknown code: %s\n", morseCode.c_str());
+        } else if (b.kana && ch >= 'A' && ch <= 'Z') {
+          // カナ入力。ローマ字として溜め、カナになるところまで決める
+          if (morseText.length() + b.roma.length() < MAX_TEXT) {
+            b.roma += ch;
+            romajiConvert(b, false);
+          }
+        } else {
+          romajiConvert(b, true);
+          if (morseText.length() < MAX_TEXT) morseText += b.kana ? kanaPunct(ch) : ch;
+        }
         morseCode = "";
-      } else if (morseText.endsWith(" ") || morseText.length() >= MAX_TEXT) {
+        break;
+      }
+      // 打ちかけのローマ字は、ここで確定する (残った N は ﾝ に)
+      romajiConvert(boxes[box], true);
+      if (morseText.endsWith(" ") || morseText.length() >= MAX_TEXT) {
         // 空の enter を2回続けると (1回目で空白が入る) 送る。いっぱいで空白が入らないときは1回で送る
         requestSend();
       } else if (morseText.length()) {
@@ -2003,7 +2175,8 @@ static void onMorseKey(int id) {
       }
       break;
   }
-  Serial.printf("morse code=\"%s\" text=\"%s\"\n", morseCode.c_str(), morseText.c_str());
+  Serial.printf("morse code=\"%s\" text=\"%s\" roma=\"%s\" kana=%d\n", morseCode.c_str(), morseText.c_str(),
+                boxes[box].roma.c_str(), boxes[box].kana);
   drawPage();
 }
 
