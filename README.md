@@ -15,6 +15,7 @@ Raspberry Pi Pico WH で作るポケベル（pokebell）。電子工作の配線
 - **Wi-Fi につながっているときは、YouTube の動画を選んで見る**（音はイヤホン、LCD 全体に 80x16 ドットの白黒の動画。PC の中継が yt-dlp と ffmpeg で作って流す）
 - **LCD でマリオのような横スクロールのゲームを遊ぶ**（ホームの Mario。曲を流しながらでも遊べる）
 - **microSD に入れた動画を LCD で見る**（ホームの Movie。YouTube と同じ白黒の動画。Wi-Fi もイヤホンも無くてよい。mp4 は PC で変換しておく）
+- **GPS で今いる場所を、家の Raspberry Pi 5 の画面の地図（OpenStreetMap）に出す**（位置は 1 分ごとに中継へ送る。8.11 節）
 
 ## 構成
 
@@ -429,6 +430,10 @@ $EDITOR espoke/arduino_secrets.h
 #define WIFI_SSID "your-ssid"
 #define WIFI_PASS "your-password"
 
+// 2 つ目の Wi-Fi（任意）。外で使うスマホのテザリングなど
+#define WIFI_SSID2 "your-phone-hotspot"
+#define WIFI_PASS2 "your-hotspot-password"
+
 // Discord の中継。tools/discord_relay.py が起動時に表示する行をそのまま書く（8 章）
 #define RELAY_HOST "dynabook.tailxxxx.ts.net"
 #define RELAY_PORT 8443
@@ -438,7 +443,10 @@ $EDITOR espoke/arduino_secrets.h
 #define RELAY_HOST2 "ubuntubook.tailxxxx.ts.net"
 ```
 
-`RELAY_HOST` を書かなければ Discord も Spotify も YouTube も使わない。Spotify と YouTube は同じ `RELAY_HOST` の 10000 番につなぐ（変えるなら `#define SPOTIFY_PORT`。7.7 節）。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
+`RELAY_HOST` を書かなければ Discord も Spotify も YouTube も使わず、GPS の位置も送らない。Discord・Spotify・YouTube はどれも同じ `RELAY_HOST` の 10000 番につなぐ（変えるなら `#define SPOTIFY_PORT`。7.7 節・8.11 節。`RELAY_PORT` は今は使っていない）。曲は microSD からだけ流す（Wi-Fi から曲を取ってくる機能は無い）。
+
+`WIFI_SSID2` を書くと、Wi-Fi につながらないとき（30 秒ごとにつなぎ直す）に、1 つ目と 2 つ目を交互に試す。
+家の Wi-Fi とスマホのテザリングを両方書いておけば、外に持ち出してもそのままつながる。今どちらにつないでいるかは System の Wi-Fi の画面の 2 行目に出る。
 
 ### 7.2 音声フォーマットの制約
 
@@ -485,6 +493,7 @@ $EDITOR espoke/arduino_secrets.h
 | `movie off` | 開いている動画を閉じてホームへ |
 | `movie invert` | 動画の白黒を入れ替える（`youtube invert` と同じもの。Movie の再生中の画面の SW4 でも） |
 | `bt` | イヤホンに1回つなぎにいく（System の Bluetooth で SW4 を押したのと同じ。7.5 節） |
+| `gps` | GPS の様子を出す。測位できているか、衛星の数、HDOP、速さ、位置とそれを読んでからの秒数、読めた RMC・GGA の数、チェックサムが合わなかった行の数、中継へ送った回数（8.11 節）。`status` の最後にも `gps=fix/8sat sent=12` のように出る |
 | `scan` | ペアリングを破棄して Bluetooth を再スキャン |
 | `relay` | Discord の中継につなぎ直す。失敗が続いて延びていた間隔も戻す（8.6 節） |
 | `relay 1` / `relay 2` | つなぎにいく入口を `RELAY_HOST` / `RELAY_HOST2`（予備の入口。8.10 節）にして、つなぎ直す |
@@ -556,7 +565,7 @@ LCD の画面は**ホーム**から選んで開く。ホームにあるのは Mu
         ├─ Discord ─┬─ Receive   受け取ったメッセージを見る
         │           └─ Send      モールスで打って送る
         ├─ Mario      横スクロールのゲーム（7.8 節）
-        └─ System     Wi-Fi / Bluetooth（イヤホンにつなぐ）/ 稼働時間と空きヒープ
+        └─ System     Wi-Fi / Bluetooth（イヤホンにつなぐ）/ GPS / 稼働時間と空きヒープ
 ```
 
 - ホームの**1行目は月日と時刻**（`10/13      14:05` のように、左に月日・右に時:分。日本時間）。
@@ -604,7 +613,8 @@ GP15 にタクトスイッチを足すと、押すたびに前の画面に戻る
 | Receive | Discord の発言者の名前と時刻（`HH:MM`） | 本文。16 文字を超えると流れる（8.6 節）。まだ無ければ中継とのつながり具合 |
 | Send | モールスで入力した文章 | 入力中の符号と、確定したときの文字。送ったあとは送った結果 |
 | Mario | 遊んでいる間は、上の段（空中）。タイトル・一時停止・GAME OVER などは文字（7.8 節） | 遊んでいる間は、下の段（地面）。一時停止中は 残り人数・コインの枚数・スコア |
-| System（Wi-Fi） | 電波強度（dBm） | IP アドレス |
+| System（Wi-Fi） | 電波強度（dBm） | IP アドレス（`WIFI_SSID2` を書いたときは、つないでいる Wi-Fi の名前）。つながっていないときは、つなぎにいっている Wi-Fi の名前 |
+| System（GPS） | `GPS fix 8sat`（測位できている。使っている衛星の数）/ `GPS no fix 5/32`（GPS は話しているが測位できていない。電波が届いている衛星の数 / 一番強い信号の dB。0/0 なら電波が届いていない）/ `GPS no data`（GPS から何も来ない） | 最後に中継へ位置を送った時刻（`sent 12:34`）。まだなら `not sent`、中継につながっていなければ `relay --` |
 | System（Bluetooth） | 接続状態 | イヤホンの MAC アドレス（コロン抜き）。つないでいないときは `SW4: connect`、つなぎにいっている間は `connecting...`、失敗したら理由（`BT timeout` など） |
 | System（その他） | 起動からの時間 | 空きヒープ |
 
@@ -650,7 +660,7 @@ SW1〜SW4（GP10〜13）の役目は、開いている画面で変わる。
 - **シャッフル中は、「次の曲」がすべてランダムな曲になる。** SW3 だけでなく、曲が終わって次へ進むとき、BOOTSEL、再生を始めるときも同じ。
   前の曲（SW2）は、曲順で1つ前に戻る。
   起動したときはシャッフルしていない
-- System の画面は SW2 / SW3 で Wi-Fi → Bluetooth → その他（稼働時間と空きヒープ）を切り替える。端まで行くと反対の端に回る
+- System の画面は SW2 / SW3 で Wi-Fi → Bluetooth → GPS → その他（稼働時間と空きヒープ）を切り替える。端まで行くと反対の端に回る
 - **イヤホンには自分からはつながない。** 起動したときも、切れたときもつなぎ直さない。
   System で Bluetooth を見ながら SW4 を押すと、1回だけつなぎにいく（最大 15 秒。その間は `connecting...`）。
   失敗したら理由が出るので、イヤホンの電源やペアリングモードを確かめてもう一度押す。
@@ -1267,6 +1277,8 @@ curl -si --http1.0 -N -H "X-Key: $KEY" --data-binary 'HELLO' $URL/stream | head 
 
 ### 8.6 Pico 側の動き
 
+- 中継の **10000 番**（中継が自分で TLS を受ける口）につなぐ。Spotify・YouTube と同じ口。前は 8443 番だったが、流れを受けている同じ接続で GPS の位置を送るために移した（8.11 節）。
+  8443 番は tailscaled の HTTP のプロキシが間にいて、要求を送り終えたあとに Pico が書いたバイトを中継へ渡さない
 - 起動後の最初の `loop()` で中継につなぐ。切れたら 30 秒ごとにつなぎ直す。つなげないことが続くと、間隔を倍ずつ延ばす（最大 8 分）。中継が落ちていると握手のタイムアウト（15 秒）まで待つので、曲の合間が何度も止まらないようにするため。中継を直したあとすぐにつなぎ直させるには、シリアルで `relay` を打つ
 - **TLS の握手に 4〜8 秒かかる**（実測。Let's Encrypt の P-384 の証明書を確かめるのが重い）。A2DP のバッファ（370ms）では持たないので、つなぐのは止まっている間か曲の合間だけにしている。
   つなぐ前に A2DP のバッファを無音で埋めるので、つなぎ直すときだけ曲の合間が 0.4 秒と握手の分（数秒）だけ空く
@@ -1701,6 +1713,71 @@ journalctl --user -u espoke-gateway -f   # 接続ごとに「tls: 85 s, to pico 
 - 公開の IPv4（`curl --resolve ubuntubook.<tailnet>.ts.net:8443:<dig @1.1.1.1 の IPv4>`）で、8443 番の `/x` に中継の 404、10000 番の `/` に中継の 200 が返った
 - `spotify_probe.py --path /youtube --connect <IPv4> https://ubuntubook.<tailnet>.ts.net:10000` で、一覧が届き、動画が 1 秒あたり 15.9KB（128kbps に足りる）で流れ、コマは遅れなかった
 - Pico が dynabook で失敗したあと ubuntubook に 4.4 秒でつながり、Discord のメッセージと YouTube の一覧が届いた
+
+### 8.11 GPS の位置と地図（Raspberry Pi 5）
+
+espoke の GPS で測った位置を 1 分ごとに中継へ送り、家の Raspberry Pi 5（`raspi`）の画面に、OpenStreetMap の地図と通った道を出す。
+
+```
+   GPS ─UART─ Pico ── Wi-Fi（家か、スマホのテザリング）── インターネット
+                                                             │ Funnel 10000（TCP のまま。TLS は中継が受ける）
+                                                             ▼
+                          dynabook: discord_relay.py ──> ~/espoke/gps.jsonl（足していくだけで消さない）
+                                                             │ tailnet の中だけ（dynabook の 100.x.x.x:8020）
+                                                             ▼
+                          Pi 5: fbservo で地図のページを全画面に出す
+```
+
+GPS は M5Stack Unit GPS v1.1（AT6668 + MAX2659）。基板の GPS 用ピン（GP4・GP5）に Grove の変換ケーブルでつなぐ（[docs/board_layout.svg](docs/board_layout.svg)）。
+配線と受信は `gps_test/` で確かめる。
+
+**Pico**
+
+- UART1（GP4 が TX、GP5 が RX、115200bps）で NMEA を読み、RMC から位置・速さ・時刻を、GGA から衛星の数と HDOP を取る。
+  GPS が話し始めたら `$PCAS03` を送り、出す文を GGA と RMC（1 秒ごと）と GSV（衛星ごとの信号の強さ。5 秒ごと）だけにする（既定の全部だと 1 秒に 1.4KB あり、TLS の握手などで `loop()` が数秒止まる間に受信の FIFO があふれる）。
+  `$PCAS03` は GPS の電源を切るまで残る。電源を切らずに `gps_test` を書き込んでも GSV が来るよう、`gps_test` は GSV も出す設定を送り直す
+- 測位できていて中継につながっていれば、**1 分ごとに**、中継とつないでいる同じ接続で次の 1 行を送る。
+  Discord の流れを受けているときはそのまま 1 行、Spotify・YouTube のときは WebSocket の `G` フレームにする。
+  つなぎ直さないので、TLS の握手（4〜8 秒）で止まることはない
+  ```
+  G <時刻（UNIX 秒、GPS の UTC）> <緯度> <経度> <km/h> <衛星の数> <HDOP>
+  ```
+- そのため、Discord の流れも 10000 番（中継が自分で TLS を受ける口）につなぐ（8.6 節）。8443 番は tailscaled の HTTP のプロキシが間にいて、要求のあとに書いたバイトを渡さない
+- 様子は System の GPS の画面（7.5 節）とシリアルの `gps` で見る
+- **PC の USB につないでいる間は、GPS がほとんど衛星をつかめない**（同じ窓ぎわで、USB では 0 個、モバイルバッテリーでは 13 個だった）。PC の USB の雑音が GPS の周波数にかかる。受信を確かめるときはバッテリーで動かす
+- **屋内（窓ぎわ）では、最初の測位（コールドスタート）が難しい**。2026-11-03 に、テザリングにつないだ espoke が窓ぎわで 10 分以上測位できなかった。
+  同じ場所で `gps_test` を動かすと測位でき、その後は espoke もスマホを近づけたまま 13〜20 個で測位を続けた。
+  一から始めると各衛星から軌道の情報を読み取る必要があり、強い電波が数十秒要る。一度測位すれば、Unit のバックアップ電池でその情報を覚えていて、弱い電波でも追える。
+  外に持ち出したら、最初は空の開けた場所で測位させるとよい。System の GPS の画面の「届いている衛星の数 / dB」で、電波が届いているかが分かる
+
+**中継**
+
+- 届いた位置を `GPS_FILE`（既定 `~/espoke/gps.jsonl`）に 1 行 1 点の JSON で足していく。消さない（1 分ごとなら 1 日 100KB ほど）
+- 地図のページは **tailnet の中からだけ**見られる（`MAP_PORT`、既定 8020）。dynabook の起動直後に tailscaled がまだ動いていなくても待てるよう、全部のアドレスで待ち、tailnet（`100.64.0.0/10`）とこの PC 自身以外からは 403 を返す。位置は個人の情報なので、Funnel にも LAN にも出さない。ログにも位置は書かない
+  - `GET /` 地図のページ
+  - `GET /track.json?since=<UNIX 秒>` それより新しい点（`{"now": 中継の今の時刻, "points": [[時刻, 緯度, 経度, km/h, 衛星の数], ...]}`）
+- 地図のページは Leaflet（1.9.4、unpkg から読む）で、地図の絵は OpenStreetMap のタイル（`tile.openstreetmap.org`）。
+  [タイルの利用の決まり](https://operations.osmfoundation.org/policies/tiles/)に従い、右下に帰属を出し、まとめて取りにいかない（地図を見ている分だけ読む）
+  - 今いる場所に青い丸、通った道を赤紫の線で描く。10 分より間が空いた点どうしは線でつながない（別の外出）
+  - 最後の位置が 5 分より古ければ、丸を灰色、左上の文字を赤にする（電源が切れた・電波が無いなど）
+  - 30 秒ごとに新しい点を読み、今いる場所を真ん中にする。拡大の度合いは `?z=15` のように変えられる（既定 16）
+  - **線と丸は Canvas で描く**（`preferCanvas`）。fbservo の Servo は SVG を描けず、Leaflet の既定（SVG）では線と丸が出ないうえ、JavaScript が途中で止まる
+
+**Pi 5（`raspi`）**
+
+- 画面には fbservo（`~/ssd/fb/fbservo`。Servo の絵をフレームバッファに直接描くブラウザ）を使う。X も Chromium も要らない
+- fbservo は Pi 5 の上でビルドした（`~/fbservo`。ubuntubook から `target/` を除いて写し、rustup の Rust で `cargo build --release`。
+  リンクは `RUSTFLAGS="-C link-arg=-fuse-ld=lld"`。29 分、空きは約 8GB 要った）。要るパッケージは `clang libclang-dev pkg-config libfontconfig1-dev lld`
+- **fbservo は 32bpp のフレームバッファにしか描けない**が、Pi 5 の `/dev/fb0` は既定で 16bpp。
+  `/boot/firmware/cmdline.txt` に `video=HDMI-A-1:1024x768-32@60` を足して 32bpp にした（解像度はつないだモニターの最大）
+- **Pi 5 の GPU（v3d）では Servo の GL のコンテキストが作れない**（`ContextCreationFailed(BadMatch)`）。`LIBGL_ALWAYS_SOFTWARE=1` で Mesa のソフトウェアの描画（llvmpipe）を使わせる。
+  1024×768 で 1 回の描画は 90〜160ms（30 秒ごとに描き直すだけなので十分）
+- 電源を入れたら地図が出るように、tty1 に自動でログインし、`~/.profile` から `~/espoke-map.sh` を呼ぶ。
+  `~/espoke-map.sh` は、ページが開けるようになるまで（起動直後は Tailscale がまだつながっていない）待ってから `fbservo --full http://100.85.213.75:8020/` を開く。
+  落ちたら 5 秒後に開き直し、Q で閉じたらシェルに戻る。自動ログインは `sudo sh ~/espoke-map-setup.sh` で入れる（`getty@tty1` の `--autologin`）
+- fbservo は終わるときに自分の描いた絵を消す。`FBSERVO_FB` でファイルに描かせて確かめるときは、動いている間に写す
+- 2026-11-03 に、Pi 5 の SD カードのファイルシステムが壊れていた（ext4 のエラー 80 件。`/usr/share/glvnd` がディレクトリでなく別のファイルになり、EGL が Mesa を見つけられなかった）。
+  fsck で直し、壊れていた 125 個のパッケージを入れ直した（`~/repair-packages.sh`）。また壊れるようなら、SD カードを替えて OS を入れ直す
 
 ## 9. トラブルシューティング
 

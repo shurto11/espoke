@@ -47,6 +47,10 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     YOUTUBE_KBPS        Pico へ流す MP3 のビットレート。既定 128
     YOUTUBE_FPS         LCD に出す動画の 1 秒あたりのコマ数。既定 6 (Pico の音が途切れるなら下げる)
     YOUTUBE_FULL        0 なら、横長の動画は LCD 全体ではなく左の 6x2 文字に収める (右に題名と時間が出る)
+    GPS_FILE            Pico から届いた GPS の位置を足していくファイル。既定 ~/espoke/gps.jsonl (消さずに増える)
+    MAP_PORT            地図のページのポート。既定 8020
+    MAP_ADDR            地図のページを待つアドレス。既定 0.0.0.0。どこで待っても、tailnet (100.64.0.0/10) と
+                        この PC 自身以外からは 403 を返す
 
 使い方:
     ~/espoke/venv/bin/python discord_relay.py                 # ~/espoke/relay.env を読んで動かす
@@ -66,6 +70,12 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
 サーバー全体を受け取るときは、本文の頭に "#チャンネル名 " を付ける。
 ID は Discord のメッセージ ID (snowflake) で、時間とともに増えるので、Pico は最後に
 受け取った ID を after に付けてつなぎ直せば取りこぼさない。
+
+/stream の流れを受けている間、Pico は同じ接続で GPS の位置を 1 分ごとに 1 行送ってくる:
+    G <時刻 (UNIX 秒、GPS の UTC)> <緯度> <経度> <km/h> <衛星の数> <HDOP> LF
+これが届くのは Funnel の TCP 転送 (10000 番、TLS はこの中継で受ける) でつないだときだけ。位置は GPS_FILE に足し、
+tailnet の中だけに開けた地図のページ (http://<この PC の tailnet の IP>:MAP_PORT/) に出す。
+Pi 5 では fbservo で全画面に開く。
 
 空行は2つの意味で送る。つないだ直後は、溜まっていた分のあとに1つ送り、「つなぐ前から
 あった分はここまで」と知らせる (Pico は起動直後の古い発言で着信を知らせないようにする)。
@@ -121,7 +131,8 @@ Spotify:
              E  エラー ("librespot down" など)
         上り C<n> 読んだ量の累計 / P<n> n 番目のプレイリストを頭から再生 / P<n>:<i> その i 番目の曲から再生 /
              U<n> シャッフルで再生 (どの曲から鳴るかもランダム) / Q<n>:<i> i 番目から SP_PAGE 曲の名前を送らせる /
-             N 次 / B 前 / K 一時停止 / R 再開 / F シャッフルの入り切り
+             N 次 / B 前 / K 一時停止 / R 再開 / F シャッフルの入り切り /
+             G GPS の位置 (/stream で送る行と同じ形。Spotify・YouTube を聞いている間も 1 分ごとに来る)
     文字はすべて LCD の文字コード (cp932 の1バイト文字)。
     中継は Pico がまだ読んでいない量を win 以下に抑える。Pico は受信リングに空きが無ければ読まないので、
     流す速さは Pico が決める。win は、曲送りのときに捨てる前の曲の量の上限でもある
@@ -156,6 +167,7 @@ import concurrent.futures
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import random
@@ -188,6 +200,7 @@ FUNNEL_PORT = 8443  # tailscale funnel で公開するポート (443 / 8443 / 10
 SPOTIFY_FUNNEL_PORT = 10000  # Spotify 用に TCP のまま公開するポート (TLS はこの中継で受ける。下の「Spotify」の節)
 SPOTIFY_TLS_PORT = 8010      # その転送先。SPOTIFY_TLS_PORT で変えられる
 CERT_CHECK = 24 * 3600       # tailscale cert で証明書を取り直す間隔 (秒)。期限が近ければ tailscaled が更新する
+MAP_PORT = 8020              # 地図のページ (tailnet の中だけ)。MAP_PORT で変えられる
 
 # 送信が詰まったまま何秒待つか。Pico は電源が落ちたり電波が切れたりすると
 # FIN を返さずに消えるので、これを入れないとスレッドが居座る
@@ -861,6 +874,9 @@ class Spotify:
         if kind == b"C":
             if arg.isdigit():
                 s.ack(int(arg))
+            return
+        if kind == b"G":   # GPS の位置 (/stream と同じ形の行。ログには出さない)
+            upstream_line(data.decode("ascii", "replace"))
             return
         sys.stderr.write("spotify: %s\n" % data.decode("ascii", "replace"))
         if kind in (b"K", b"R", b"P", b"U", b"N", b"B"):
@@ -1591,6 +1607,9 @@ class YouTube:
             if arg.isdigit():
                 s.ack(int(arg))
             return
+        if kind == b"G":   # GPS の位置 (/stream と同じ形の行。ログには出さない)
+            upstream_line(data.decode("ascii", "replace"))
+            return
         sys.stderr.write("youtube: %s\n" % data.decode("ascii", "replace"))
         if kind in (b"K", b"R", b"P", b"U", b"N", b"B"):
             s.cmds += 1
@@ -1799,6 +1818,235 @@ def youtube_test(url, cookies, deno, kbps, fps, full):
         count, count / fps, el, glyph_sum / max(count, 1), YT_GLYPHS, 100 * full // max(count, 1)))
 
 
+# ---------------- GPS と地図 ----------------
+#
+# Pico は GPS の位置を、/stream の流れを受けている同じ接続の上で 1 行ずつ送ってくる (つなぎ直すと TLS の握手で
+# 4〜8 秒止まるので)。この中継は位置をファイルに足していき、tailnet の中だけに開けた地図のページ (MAP_PORT) で見せる。
+# 位置は個人の情報なので、Funnel (外) には出さない。
+
+class GpsTrack:
+    """届いた位置を古い順に持ち、GPS_FILE に 1 行 1 点の JSON で足していく (消さない)"""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.points = []   # [t, lat, lon, km/h, 衛星の数]
+        try:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        p = json.loads(line)
+                        self.points.append([p["t"], p["lat"], p["lon"], p.get("kmh", 0), p.get("sat", 0)])
+                    except (ValueError, KeyError):
+                        pass
+        except FileNotFoundError:
+            pass
+
+    def add(self, t, lat, lon, kmh, sat, hdop):
+        with self.lock:
+            if self.points and t <= self.points[-1][0]:
+                return False   # つなぎ直したときの送り直しなど
+            self.points.append([t, lat, lon, kmh, sat])
+            with open(self.path, "a") as f:
+                f.write(json.dumps({"t": t, "lat": lat, "lon": lon, "kmh": kmh, "sat": sat, "hdop": hdop,
+                                    "recv": int(time.time())}) + "\n")
+            return True
+
+    def since(self, t):
+        with self.lock:
+            i = bisect.bisect(self.points, [t, float("inf")])
+            return self.points[i:]
+
+
+GPS = None  # main() が作る
+
+
+def upstream_line(line):
+    """Pico から届いた 1 行。"G <時刻 (UNIX 秒、GPS の UTC)> <緯度> <経度> <km/h> <衛星の数> <HDOP>" """
+    f = line.split()
+    if len(f) == 7 and f[0] == "G" and GPS:
+        try:
+            t, lat, lon, kmh, sat, hdop = int(f[1]), float(f[2]), float(f[3]), float(f[4]), int(f[5]), float(f[6])
+        except ValueError:
+            t = 0
+        if t > 1600000000 and -90 <= lat <= 90 and -180 <= lon <= 180:
+            # 位置そのものはログに残さない
+            if GPS.add(t, round(lat, 6), round(lon, 6), round(kmh, 1), sat, hdop):
+                sys.stderr.write("gps: point at %s (%d sats)\n"
+                                 % (datetime.datetime.fromtimestamp(t, JST).strftime("%H:%M:%S"), sat))
+            return
+    sys.stderr.write("upstream: bad line (%d bytes)\n" % len(line))
+
+
+def read_upstream(sock, io_lock, done):
+    """/stream の接続で Pico が送ってくる行を読む。Funnel の TCP 転送 (10000 番、TLS はこの中継) でつないだときだけ
+    届く。8443 番は tailscaled の HTTP のプロキシが間にいて、要求のあとに送られたバイトを渡さない。
+    書く側 (_stream) と同じ io_lock を取り、届いているときだけ待たずに読む (Spotify の StreamSession.read と同じ)"""
+    buf = b""
+    while not done.is_set():
+        try:
+            pending = sock.pending() if isinstance(sock, ssl.SSLSocket) else 0
+            if not pending and not select.select([sock], [], [], 1.0)[0]:
+                continue
+        except (OSError, ValueError):
+            return
+        with io_lock:
+            try:
+                sock.setblocking(False)
+                chunk = sock.recv(4096)
+            except (ssl.SSLWantReadError, BlockingIOError):
+                continue
+            except OSError:
+                return
+            finally:
+                try:
+                    sock.settimeout(STREAM_TIMEOUT)
+                except OSError:
+                    pass
+        if not chunk:
+            return
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            line = line.decode("ascii", "replace").strip()
+            if line:
+                upstream_line(line)
+        if len(buf) > 1024:
+            buf = b""
+
+
+# 地図のページ。Pi 5 の fbservo (Servo) で全画面に出す。Servo は SVG を描けないので、線と印は Canvas で描く (preferCanvas)。
+# 地図の絵は OpenStreetMap のタイル (利用の決まり https://operations.osmfoundation.org/policies/tiles/ に従い、
+# 帰属表示を出し、まとめて取りにいかない)
+MAP_HTML = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>espoke</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #ddd; }
+  #map { position: absolute; inset: 0; }
+  #info { position: absolute; z-index: 1000; left: 12px; top: 12px; padding: 8px 14px; border-radius: 6px;
+          background: rgba(255, 255, 255, .92); color: #222; font: 22px sans-serif; }
+  #info.stale { color: #b03030; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="info">位置を読み込み中</div>
+<script>
+const ZOOM = +(new URLSearchParams(location.search).get('z') || 16);
+const GAP = 10 * 60;     // これより間が空いた点どうしは線でつながない (別の外出)
+const STALE = 5 * 60;    // 最後の位置がこれより古ければ、印を灰色にする (電源が切れた・電波が無いなど)
+const POLL = 30 * 1000;
+const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([36.2, 138.25], 5);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+const marker = L.circleMarker([0, 0], { radius: 10, color: '#fff', weight: 3, fillColor: '#1f6fd1', fillOpacity: 1 });
+let line = null, last = null, since = 0, placed = false;
+
+function addPoints(points) {   // [t, lat, lon, km/h, 衛星の数]
+  for (const p of points) {
+    if (!line || (last && p[0] - last[0] > GAP)) {
+      line = L.polyline([], { color: '#d0367a', weight: 5, opacity: 0.85 }).addTo(map);
+    }
+    line.addLatLng([p[1], p[2]]);
+    last = p;
+  }
+}
+
+function two(n) { return String(n).padStart(2, '0'); }
+
+function show(now) {
+  const info = document.getElementById('info');
+  if (!last) { info.textContent = '位置はまだ届いていません'; return; }
+  const d = new Date((last[0] + 9 * 3600) * 1000);   // 日本時間 (Intl に頼らない)
+  const age = Math.max(0, Math.floor((now - last[0]) / 60));
+  const stale = now - last[0] > STALE;
+  info.textContent = (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' ' + two(d.getUTCHours()) + ':' +
+    two(d.getUTCMinutes()) + '（' + (age ? age + ' 分前' : 'いま') + '）  ' + Math.round(last[3]) + ' km/h  衛星 ' + last[4];
+  info.className = stale ? 'stale' : '';
+  marker.setStyle({ fillColor: stale ? '#888' : '#1f6fd1' });
+  marker.setLatLng([last[1], last[2]]).addTo(map);
+  map.setView([last[1], last[2]], placed ? map.getZoom() : ZOOM);
+  placed = true;
+}
+
+async function poll() {
+  try {
+    const r = await fetch('track.json?since=' + since, { cache: 'no-store' });
+    const j = await r.json();
+    if (j.points.length) {
+      addPoints(j.points);
+      since = last[0];
+    }
+    show(j.now);
+  } catch (e) {
+    document.getElementById('info').textContent = '中継から読めない: ' + e;
+  }
+}
+poll();
+setInterval(poll, POLL);
+</script>
+</body>
+</html>
+"""
+
+
+# 地図のページを見せてよい相手。tailnet (Tailscale の IP) と、この PC 自身
+MAP_ALLOW = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48", "127.0.0.0/8", "::1/128")]
+
+
+class MapHandler(BaseHTTPRequestHandler):
+    """tailnet の中だけに見せる地図のサーバー。/ が地図のページ、/track.json?since=<t> が t より新しい点。
+    起動したときに tailscaled がまだ動いていなくても待てるよう、全部のアドレスで待ち、tailnet の外からは断る"""
+
+    def log_message(self, fmt, *args):
+        pass   # 30 秒ごとに読まれるので、ログには出さない
+
+    def _allowed(self):
+        try:
+            ip = ipaddress.ip_address(self.client_address[0].removeprefix("::ffff:"))
+        except ValueError:
+            return False
+        return any(ip in n for n in MAP_ALLOW)
+
+    def _send(self, body, ctype):
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if not self._allowed():
+            return self.send_error(403)
+        url = urllib.parse.urlparse(self.path)
+        if url.path == "/":
+            return self._send(MAP_HTML, "text/html; charset=utf-8")
+        if url.path == "/track.json":
+            since = urllib.parse.parse_qs(url.query).get("since", ["0"])[0]
+            points = GPS.since(int(since) if since.isdigit() else 0)
+            return self._send(json.dumps({"now": int(time.time()), "points": points}, separators=(",", ":")),
+                              "application/json")
+        self.send_error(404)
+
+
+def tailnet_ip():
+    """この PC の tailnet の IPv4 (地図の URL を表示するため)。分からなければ None"""
+    try:
+        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5).stdout.split()
+        return out[0] if out else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 # ---------------- HTTP ----------------
 
 def stream_after(url):
@@ -1885,12 +2133,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Sent", sent)
         self.end_headers()
 
+        # Pico が流れの途中で送ってくる行 (GPS の位置) を別のスレッドで読む。TLS の読み書きは io_lock で順番にする
+        io_lock = threading.Lock()
+        done = threading.Event()
+        threading.Thread(target=read_upstream, args=(self.connection, io_lock, done), daemon=True).start()
+
+        def write(data):
+            with io_lock:
+                self.wfile.write(data)
+
         sent = 0
         try:
             # 溜まっていた分のあとに空行を1つ送る。Pico はここまでを「前からあった分」として扱う
             with STORE.cond:
                 items = STORE.since(after)
-            self.wfile.write(b"".join(line for _, line in items) + b"\n")
+            write(b"".join(line for _, line in items) + b"\n")
             if items:
                 after = items[-1][0]
                 sent += len(items)
@@ -1901,15 +2158,20 @@ class Handler(BaseHTTPRequestHandler):
                         STORE.cond.wait(HEARTBEAT)
                         items = STORE.since(after)
                 if items:
-                    self.wfile.write(b"".join(line for _, line in items))
+                    write(b"".join(line for _, line in items))
                     after = items[-1][0]
                     sent += len(items)
                 else:
-                    self.wfile.write(b"\n")
+                    write(b"\n")
         except (BrokenPipeError, ConnectionResetError):
             sys.stderr.write("  stream closed by client (%d sent)\n" % sent)
         except (TimeoutError, socket.timeout):
             sys.stderr.write("  client gone, %ds no progress (%d sent)\n" % (STREAM_TIMEOUT, sent))
+        except OSError as e:
+            # TLS (10000 番) でつないだ Pico が切ったあと、生存確認を書くと SSLEOFError になる
+            sys.stderr.write("  stream closed (%r, %d sent)\n" % (e, sent))
+        finally:
+            done.set()
 
 
 class TLSHTTPServer(ThreadingHTTPServer):
@@ -2247,21 +2509,32 @@ def main():
         print("youtube: %s kbps の MP3 と、%d コマ/秒の LCD の動画 (%s) にして流す"
               % (yt_kbps, yt_fps, "LCD 全体" if yt_full else "横長の動画は左の 6x2 文字"))
 
+    # GPS の位置。地図のサーバーは tailnet の IP だけで待つ (Funnel にも LAN にも出さない)
+    global GPS
+    GPS = GpsTrack(os.path.expanduser(os.environ.get("GPS_FILE", "~/espoke/gps.jsonl")))
+    map_port = int(os.environ.get("MAP_PORT", MAP_PORT))
+    map_server = ThreadingHTTPServer((os.environ.get("MAP_ADDR", "0.0.0.0"), map_port), MapHandler)
+    threading.Thread(target=map_server.serve_forever, daemon=True).start()
+    print("gps: %s (%d 点)。地図 (tailnet の中だけ): http://%s:%d/"
+          % (GPS.path, len(GPS.points), tailnet_ip() or "<この PC の tailnet の IP>", map_port))
+
     # Funnel が 127.0.0.1 へ中継してくるので、外には直接開けない
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     host = funnel_host() or "<マシン名>.<tailnet>.ts.net"
     print("  http://127.0.0.1:%d/" % args.port)
     print()
     print("公開していなければ:  tailscale funnel --bg --https=%d %d" % (FUNNEL_PORT, args.port))
-    if SPOTIFY or YOUTUBE:
-        # Spotify と YouTube は TLS をここで受ける。証明書は tailscale cert で Funnel と同じものを取り出す
+    cert, key = (os.path.join(os.path.dirname(env), name) for name in ("tls.crt", "tls.key"))
+    if SPOTIFY or YOUTUBE or funnel_host() or os.path.exists(cert):
+        # Spotify と YouTube と、GPS の位置を送ってくる /stream は TLS をここで受ける。
+        # 証明書は tailscale cert で Funnel と同じものを取り出す
         tls_port = int(os.environ.get("SPOTIFY_TLS_PORT", SPOTIFY_TLS_PORT))
-        cert, key = (os.path.join(os.path.dirname(env), name) for name in ("tls.crt", "tls.key"))
         if funnel_host():
             threading.Thread(target=keep_cert, args=(host, cert, key), daemon=True).start()
         tls_server = TLSHTTPServer(("127.0.0.1", tls_port), Handler, cert, key)
         threading.Thread(target=tls_server.serve_forever, daemon=True).start()
-        print("Spotify と YouTube も: tailscale funnel --bg --tcp=%d tcp://127.0.0.1:%d" % (SPOTIFY_FUNNEL_PORT, tls_port))
+        print("Spotify・YouTube・GPS: tailscale funnel --bg --tcp=%d tcp://127.0.0.1:%d"
+              % (SPOTIFY_FUNNEL_PORT, tls_port))
     print()
     print("espoke/arduino_secrets.h に書く:")
     print('  #define RELAY_HOST "%s"' % host)

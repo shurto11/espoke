@@ -94,10 +94,17 @@
 #define RELAY_HOST2 ""
 #endif
 #ifndef RELAY_PORT
-#define RELAY_PORT 8443  // tailscale funnel が使えるのは 443 / 8443 / 10000
+#define RELAY_PORT 8443  // 使っていない (古い arduino_secrets.h のため)。Discord の流れも SPOTIFY_PORT につなぐ
 #endif
 #ifndef SPOTIFY_PORT
-#define SPOTIFY_PORT 10000  // Spotify は中継が TLS を受ける (Funnel の TCP 転送)。tools/discord_relay.py の「Spotify」の節
+// 中継が自分で TLS を受けるポート (Funnel の TCP 転送)。Spotify・YouTube と、Discord の流れ (/stream) もここにつなぐ。
+// /stream の途中で GPS の位置を送るため (8443 番は tailscaled の HTTP のプロキシが間にいて、要求のあとのバイトを渡さない)
+#define SPOTIFY_PORT 10000
+#endif
+// 2 つ目の Wi-Fi (外で使うスマホのテザリングなど)。あれば、つながらないときに 1 つ目と交互に試す。空なら使わない
+#ifndef WIFI_SSID2
+#define WIFI_SSID2 ""
+#define WIFI_PASS2 ""
 #endif
 
 // --- 設定 ---
@@ -353,8 +360,44 @@ static const int DISCORD_COUNT = sizeof(DISCORD_MENU) / sizeof(DISCORD_MENU[0]);
 static int    homeSel = 0;                 // ホームで選んでいる項目
 static int    discordSel = 0;              // Discord の画面で選んでいる項目
 // System の画面で見るもの。SW2 / SW3 で切り替える
-enum SysView { SYS_WIFI, SYS_BT, SYS_INFO, SYS_COUNT };
+enum SysView { SYS_WIFI, SYS_BT, SYS_GPS, SYS_INFO, SYS_COUNT };
 static int    sysView = SYS_WIFI;
+static int    wifiIdx = 0;  // つなぎにいっている Wi-Fi (0: WIFI_SSID、1: WIFI_SSID2)
+
+// GPS (M5Stack Unit GPS v1.1 = AT6668)。UART1 で NMEA を読み、位置を 1 分ごとに中継へ送る。中継はそれを
+// tailnet の中だけの地図のページに出す (Pi 5 の fbservo で見る。tools/discord_relay.py の「GPS と地図」)
+static const int           PIN_GPS_TX   = 4;      // GP4 (物理6番) UART1 TX → GPS の入力 (Grove の白)
+static const int           PIN_GPS_RX   = 5;      // GP5 (物理7番) UART1 RX ← GPS の出力 (Grove の黄)
+static const uint32_t      GPS_BAUD     = 115200; // Unit GPS v1.1 の既定
+static const unsigned long GPS_SEND_MS  = 60000;  // 位置を中継へ送る間隔
+static const unsigned long GPS_FRESH_MS = 5000;   // これより前に読んだ位置は送らない (測位が外れたあと)
+static const int           GPS_LINE_MAX = 100;
+struct GpsFix {
+  bool          valid = false;  // RMC の状態が A (測位できている)
+  double        lat = 0, lon = 0;
+  float         kmh = 0, hdop = 0;
+  int           sats = 0;       // GGA の、測位に使っている衛星の数
+  int           quality = 0;    // GGA の測位の品質。0 は測位できていない
+  uint32_t      unixTime = 0;   // GPS の UTC (UNIX 秒)
+  unsigned long at = 0;         // それを読んだ millis()
+};
+static GpsFix        gps;
+static char          gpsLine[GPS_LINE_MAX];
+static int           gpsLen = -1;             // 読んでいる行の長さ。-1 は '$' を待っている
+static bool          gpsConfigured = false;   // 出す文を GGA と RMC だけにする命令を送った
+static uint32_t      gpsRmc = 0, gpsGga = 0, gpsBad = 0;  // 読めた RMC・GGA と、チェックサムが合わなかった行の数
+static unsigned long gpsLastSent = 0;
+static uint32_t      gpsSentTime = 0;         // 最後に送った位置の時刻 (UNIX 秒)
+static uint32_t      gpsSentCount = 0;
+// 衛星系ごとの、電波が届いている (SNR > 0) 衛星の数と一番強い SNR。GSV を 1 巡読むたびに確定する。
+// 測位できないとき、電波が届いていないのか (0 個)、弱いのか (数個で 20dB 台) を System の GPS の画面で見るため
+struct GpsSky {
+  char          talker[3];     // "GP" "BD" "GB" "GL" "GA" "GQ"
+  int           heard, maxSnr;  // 確定した値
+  int           curHeard, curMax;
+  unsigned long at;             // 確定した millis()
+};
+static GpsSky gpsSky[] = {{"GP"}, {"BD"}, {"GB"}, {"GL"}, {"GA"}, {"GQ"}};
 // Music の画面の見え方。Spotify と同じく アルバムの一覧 → 曲選択 → 再生中 の順に進み、SW1 で戻る。
 // アルバムの番号は、0 が全曲 (All tracks)、i (1 から) がフォルダ sdAlbums[i - 1]
 enum MuView { MU_ALBUMS, MU_TRACKS, MU_NOW };
@@ -1502,10 +1545,32 @@ static void drawPage() {
     case PAGE_SYSTEM:
       if (sysView == SYS_WIFI && WiFi.status() == WL_CONNECTED) {
         drawRow(0, "WiFi " + String(WiFi.RSSI()) + "dBm");
-        drawRow(1, WiFi.localIP().toString());
+        drawRow(1, WIFI_SSID2[0] ? String(wifiSsid()) : WiFi.localIP().toString());  // 2 つあるときはどちらにつないだか
       } else if (sysView == SYS_WIFI) {
         drawRow(0, "WiFi --");
-        drawRow(1, WIFI_SSID);
+        drawRow(1, wifiSsid());
+      } else if (sysView == SYS_GPS) {
+        // 1 行目: 測位できているか。2 行目: 最後に中継へ送った位置の時刻 (日本時間)
+        // 測位できていないときは、電波が届いている衛星の数 / 一番強い SNR (dB) も出す ("GPS no fix 5/32")
+        if (gps.valid) {
+          drawRow(0, "GPS fix " + String(gps.sats) + "sat");
+        } else if (gpsRmc) {
+          int heard, maxSnr;
+          gpsHeard(&heard, &maxSnr);
+          drawRow(0, "GPS no fix " + String(heard) + "/" + String(maxSnr));
+        } else {
+          drawRow(0, "GPS no data");
+        }
+        if (gpsSentCount) {
+          time_t t = gpsSentTime;
+          struct tm tm;
+          localtime_r(&t, &tm);
+          char buf[17];
+          snprintf(buf, sizeof(buf), "sent %02d:%02d", tm.tm_hour, tm.tm_min);
+          drawRow(1, buf);
+        } else {
+          drawRow(1, relayOpen ? "not sent" : "relay --");
+        }
       } else if (sysView == SYS_BT && a2dp.connected()) {
         // "aa:bb:cc:dd:ee:ff" は17文字で1行に収まらないのでコロンを抜く
         String addr = bd_addr_to_str(a2dp.getSinkAddress());
@@ -3534,7 +3599,7 @@ static void relayConnect() {
   uint32_t heap = rp2040.getFreeHeap();
   unsigned long t0 = millis();
   for (int tries = RELAY_HOST2[0] ? 2 : 1;; ) {
-    if (relay->connect(relayHost(), spMode ? SPOTIFY_PORT : RELAY_PORT)) break;
+    if (relay->connect(relayHost(), SPOTIFY_PORT)) break;  // Discord の流れも 10000 番 (SPOTIFY_PORT の説明)
     char err[64] = "";
     int code = relay->getLastSSLError(err, sizeof(err));
     Serial.printf("relay: connect to %s failed (ssl %d %s), heap %luKB\n", relayHost(), code, err,
@@ -3650,7 +3715,178 @@ static void onRelayLine(const String &line) {
 }
 
 // 届いた分だけ読んで1行ずつ処理する。待たないので、再生中も pollAbort() から呼べる
+// ---------------- GPS ----------------
+
+// チェックサムを付けて GPS へ命令を送る。"PCAS03,..." → "$PCAS03,...*XX\r\n"
+static void gpsCommand(const char *body) {
+  uint8_t sum = 0;
+  for (const char *p = body; *p; p++) sum ^= (uint8_t)*p;
+  Serial2.printf("$%s*%02X\r\n", body, sum);
+}
+
+static void setupGPS() {
+  Serial2.setTX(PIN_GPS_TX);
+  Serial2.setRX(PIN_GPS_RX);
+  Serial2.setFIFOSize(2048);  // 受け取りは割り込みで FIFO に溜まる。loop() が止まっている間 (TLS の握手など) の分
+  Serial2.begin(GPS_BAUD);
+}
+
+// "ddmm.mmmm" と N/S (E/W) を度にする
+static double nmeaDegrees(const char *v, const char *hemi) {
+  double x = atof(v);
+  int deg = (int)(x / 100);
+  double d = deg + (x - deg * 100) / 60.0;
+  return (*hemi == 'S' || *hemi == 'W') ? -d : d;
+}
+
+static int twoDigits(const char *p) {
+  return (p[0] - '0') * 10 + (p[1] - '0');
+}
+
+// 1970-01-01 から y 年 m 月 d 日までの日数
+static int32_t daysFromCivil(int y, int m, int d) {
+  y -= m <= 2;
+  int era = (y >= 0 ? y : y - 399) / 400;
+  int yoe = y - era * 400;
+  int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+// チェックサムを確かめた 1 文 ('$' の次から '*' の前まで)。RMC から位置・速さ・時刻、GGA から衛星の数と HDOP を取る
+static void gpsSentence(char *s) {
+  char *f[20];
+  int n = 0;
+  f[n++] = s;
+  for (char *p = s; *p && n < 20; p++) {
+    if (*p == ',') {
+      *p = 0;
+      f[n++] = p + 1;
+    }
+  }
+  if (strlen(f[0]) != 5) return;
+  const char *type = f[0] + 2;  // "GNRMC" の "RMC"
+  if (!strcmp(type, "RMC") && n >= 10) {
+    gpsRmc++;
+    bool valid = f[2][0] == 'A' && f[3][0] && f[5][0] && strlen(f[1]) >= 6 && strlen(f[9]) == 6;
+    if (valid) {
+      gps.lat = nmeaDegrees(f[3], f[4]);
+      gps.lon = nmeaDegrees(f[5], f[6]);
+      gps.kmh = atof(f[7]) * 1.852f;  // ノットから
+      int32_t days = daysFromCivil(2000 + twoDigits(f[9] + 4), twoDigits(f[9] + 2), twoDigits(f[9]));
+      gps.unixTime = (uint32_t)days * 86400 + twoDigits(f[1]) * 3600 + twoDigits(f[1] + 2) * 60 + twoDigits(f[1] + 4);
+      gps.at = millis();
+    }
+    gps.valid = valid;
+  } else if (!strcmp(type, "GSV") && n >= 4) {
+    // 1 巡 (総数, 何番目) のあいだ、PRN・仰角・方位・SNR の組の SNR を見る (NMEA 4.1 は最後に信号 ID が付く)
+    for (GpsSky &k : gpsSky) {
+      if (strncmp(f[0], k.talker, 2)) continue;
+      int total = atoi(f[1]), num = atoi(f[2]);
+      if (num == 1) k.curHeard = k.curMax = 0;
+      for (int g = 4; g + 3 < n; g += 4) {
+        int snr = f[g][0] && f[g + 3][0] ? atoi(f[g + 3]) : 0;
+        if (snr > 0) k.curHeard++;
+        if (snr > k.curMax) k.curMax = snr;
+      }
+      if (num == total) {
+        k.heard = k.curHeard;
+        k.maxSnr = k.curMax;
+        k.at = millis();
+      }
+    }
+  } else if (!strcmp(type, "GGA") && n >= 9) {
+    gpsGga++;
+    gps.quality = atoi(f[6]);
+    gps.sats = atoi(f[7]);
+    gps.hdop = f[8][0] ? atof(f[8]) : 0;
+  }
+}
+
+// 1 分ごとに、今の位置を中継へ送る。Discord の流れ (/stream) なら 1 行、Spotify・YouTube なら WebSocket の G フレーム。
+// どちらも同じ形: "G <UNIX 秒> <緯度> <経度> <km/h> <衛星の数> <HDOP>"
+static void sendGPS() {
+  // RMC と GGA の両方が測位できたと言うまで送らない。測位した最初の 1 秒は、RMC が先に A になり、
+  // GGA の衛星の数がまだ 0 のことがある
+  if (!relayOpen || !relay || !gps.valid || !gps.quality || millis() - gps.at > GPS_FRESH_MS) return;
+  if (gpsSentCount && millis() - gpsLastSent < GPS_SEND_MS) return;
+  char line[96];
+  int n = snprintf(line, sizeof(line), "G %lu %.6f %.6f %.1f %d %.1f", (unsigned long)gps.unixTime, gps.lat, gps.lon,
+                   gps.kmh, gps.sats, gps.hdop);
+  if (spWs) {
+    spSend(line);
+  } else {
+    line[n++] = '\n';
+    relay->write((const uint8_t *)line, n);
+  }
+  gpsLastSent = millis();
+  gpsSentTime = gps.unixTime;
+  gpsSentCount++;
+}
+
+// 届いた NMEA を読み、送る頃なら位置を送る。pollRelay() から呼ぶ (待機中も、曲・動画・Spotify の再生中も回る)
+static void pollGPS() {
+  while (Serial2.available()) {
+    char c = (char)Serial2.read();
+    if (c == '$') {
+      gpsLen = 0;
+      continue;
+    }
+    if (gpsLen < 0) continue;
+    if (c == '\r' || c == '\n') {
+      gpsLine[gpsLen] = 0;
+      gpsLen = -1;
+      char *star = strrchr(gpsLine, '*');
+      uint8_t sum = 0;
+      for (char *p = gpsLine; star && p < star; p++) sum ^= (uint8_t)*p;
+      if (!star || strlen(star) != 3 || strtol(star + 1, nullptr, 16) != sum) {
+        gpsBad++;
+        continue;
+      }
+      *star = 0;
+      if (!gpsConfigured) {
+        // 出す文を GGA と RMC (1 秒に 1 つずつ) と、5 秒に 1 巡の GSV (衛星ごとの信号の強さ) だけにする。既定の全部
+        // (1 秒に 1.4KB) だと、loop() が数秒止まる間 (TLS の握手など) に FIFO があふれる。電源を切ると既定に戻るので、
+        // GPS が話し始めたら毎回送る
+        gpsConfigured = true;
+        gpsCommand("PCAS03,1,0,0,5,1,0,0,0,0,0,,,0,0,,,,0");
+      }
+      gpsSentence(gpsLine);
+      continue;
+    }
+    if (c < 0x20 || c > 0x7e || gpsLen >= GPS_LINE_MAX - 1) {  // 化けた文字・長すぎる行
+      gpsBad++;
+      gpsLen = -1;
+      continue;
+    }
+    gpsLine[gpsLen++] = c;
+  }
+  sendGPS();  // System の GPS の画面は、ほかの System の画面と同じく 1 秒ごとに描き直される
+}
+
+// 直近 (15 秒以内) に 1 巡読めた衛星系の、電波が届いている衛星の数の合計と、一番強い SNR
+static void gpsHeard(int *heard, int *maxSnr) {
+  *heard = *maxSnr = 0;
+  for (const GpsSky &k : gpsSky) {
+    if (!k.at || millis() - k.at > 15000) continue;
+    *heard += k.heard;
+    *maxSnr = std::max(*maxSnr, k.maxSnr);
+  }
+}
+
+static void printGPS() {
+  unsigned long age = gps.at ? (millis() - gps.at) / 1000 : 0;
+  Serial.printf("gps: %s sats=%d hdop=%.1f %.1fkm/h", gps.valid ? "fix" : "no fix", gps.sats, gps.hdop, gps.kmh);
+  if (gps.at) Serial.printf(" pos=%.6f,%.6f (%lus ago)", gps.lat, gps.lon, age);
+  int heard, maxSnr;
+  gpsHeard(&heard, &maxSnr);
+  Serial.printf(" heard=%d max=%ddB", heard, maxSnr);
+  Serial.printf(" rmc=%lu gga=%lu bad=%lu sent=%lu\n", (unsigned long)gpsRmc, (unsigned long)gpsGga,
+                (unsigned long)gpsBad, (unsigned long)gpsSentCount);
+}
+
 static void pollRelay() {
+  pollGPS();
   if (spWs) {
     pollSpotify();
     return;
@@ -4980,17 +5216,18 @@ static void printSdTracks() {
 static const char *HELP =
     "commands: sd / pause / next / prev / rand / stop / list / now / shuffle / vol [0-100|+|-] /"
     " wifi on|off|fast|save / bt / scan / relay [1|2] / spotify [n|off] / youtube [n|off|invert] /"
-    " movie [n|off|invert] / status /"
+    " movie [n|off|invert] / status / gps /"
     " lcd [chars|resync on|off] /"
     " sw <1-4> [ms] / game [lcd|level n]";
 
 static void printStatus() {
-  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s, %s) msgs=%u mode=%s\n",
+  Serial.printf("wifi=%d ip=%s bt=%d auto=%d pause=%d shuffle=%d vol=%d sd=%d tracks=%u heap=%luKB page=%s button=%s text=\"%s\" relay=%d (%s, %s) msgs=%u mode=%s gps=%s/%dsat sent=%lu\n",
                 WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
                 a2dp.connected(), autoPlay, paused, shuffle, volume, sdReady,
                 (unsigned)sdTracks.size(), (unsigned long)(rp2040.getFreeHeap() / 1024), PAGE_NAMES[page],
                 digitalRead(PIN_BUTTON) == LOW ? "pressed" : "released",
-                morseText.c_str(), relayOpen, relayStatus.c_str(), relayHost(), (unsigned)msgCount, spMode ? PAGE_NAMES[spService] : "-");
+                morseText.c_str(), relayOpen, relayStatus.c_str(), relayHost(), (unsigned)msgCount, spMode ? PAGE_NAMES[spService] : "-",
+                gps.valid ? "fix" : "nofix", gps.sats, (unsigned long)gpsSentCount);
 }
 
 static void handleCommand(String cmd) {
@@ -5005,6 +5242,10 @@ static void handleCommand(String cmd) {
   }
   if (cmd.startsWith("game")) {
     gameCommand(cmd);
+    return;
+  }
+  if (cmd == "gps") {
+    printGPS();
     return;
   }
   if (movieCommand(cmd)) return;  // "movie" と、Movie の画面での pause / next / prev / stop
@@ -5082,10 +5323,18 @@ static void handleCommand(String cmd) {
 
 // Wi-Fi につなぎ始める。WiFi.begin() はつながるまで最大 30 秒待つので、待たない方を使う。
 // つながったかは loop() が見る
+// 2 つ目 (WIFI_SSID2) があれば、つなぎ直すたびに 1 つ目と交互に試す (家とスマホのテザリングなど)
 static void startWiFi() {
+  static bool tried = false;
+  if (WIFI_SSID2[0] && tried) wifiIdx ^= 1;
+  tried = true;
   lastWiFiTry = millis();
-  status("WiFi", WIFI_SSID);
-  WiFi.beginNoBlock(WIFI_SSID, WIFI_PASS);
+  status("WiFi", wifiSsid());
+  WiFi.beginNoBlock(wifiSsid(), wifiIdx ? WIFI_PASS2 : WIFI_PASS);
+}
+
+static const char *wifiSsid() {
+  return wifiIdx ? WIFI_SSID2 : WIFI_SSID;
 }
 
 void setup() {
@@ -5128,6 +5377,7 @@ void setup() {
   }
 
   setupSD();
+  setupGPS();
   startWiFi();
   Serial.println(HELP);
 }
