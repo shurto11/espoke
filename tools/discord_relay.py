@@ -589,7 +589,7 @@ class ChatLog:
         return make_line(msg_id, datetime.datetime.fromtimestamp(t, JST), pager, text)
 
     def add(self, pager, text):
-        # Pico のカナ入力は半角カナで来る。地図のページで読みやすいよう全角にそろえる (LCD へは to_lcd が半角に戻す)
+        # Pico の和文は半角カナで来る。地図のページで読みやすいよう全角にそろえる (LCD へは to_lcd が半角に戻す)
         text = unicodedata.normalize("NFKC", text)
         t = int(time.time())
         with STORE.cond:   # ID を決めてから入れるまでに、ほかの発言が割り込まないように
@@ -2089,12 +2089,11 @@ MAP_HTML = """<!doctype html>
   #compose { position: absolute; left: 281px; right: 0; top: 0; bottom: 0; }
   #text { position: absolute; left: 18px; right: 18px; top: 10px; height: 84px; overflow: hidden;
           font-size: 30px; line-height: 42px; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
-  #text .roma { color: #1f6fd1; }
   #text .cur { color: #999; }
   #status { position: absolute; left: 18px; right: 18px; bottom: 8px; height: 24px; overflow: hidden;
             font-size: 17px; line-height: 24px; color: #555; white-space: nowrap; }
   #mode { display: inline-block; padding: 0 10px; border-radius: 4px; background: #555; color: #fff; margin-right: 10px; }
-  #mode.kana { background: #e0670b; }
+  #mode.wabun { background: #e0670b; }
   #note { margin-left: 14px; font-weight: bold; color: #2e7d32; }
   #note.err { color: #b03030; }
   #note.wait { color: #555; }
@@ -2112,7 +2111,7 @@ MAP_HTML = """<!doctype html>
   <div id="compose">
     <div id="text"></div>
     <div id="status"><span id="mode"></span><span id="who"></span><span id="note"></span>
-      <span id="help">SW1 トン (長押しでツー)　SW3 1 字消す　SW4 確定・送る　SW5 英字/カナ</span></div>
+      <span id="help">SW1 トン (長押しでツー)　SW3 1 字消す　SW4 確定・送る　SW5 英文/和文</span></div>
   </div>
 </div>
 <script>
@@ -2306,8 +2305,8 @@ function showInput(s, err) {
   if (s.held[1]) signs += '<span class="s2 held"></span>';
   put('signs', signs || '<span class="hint">トン・ツー</span>');
   put('preview', s.preview ? '= ' + esc(s.preview) : '');
-  put('text', esc(s.text) + '<span class="roma">' + esc(s.roma) + '</span><span class="cur">_</span>');
-  put('mode', s.kana ? 'カナ' : '英字', s.kana ? 'kana' : '');
+  put('text', esc(s.text) + '<span class="cur">_</span>');
+  put('mode', s.wabun ? '和文' : '英文', s.wabun ? 'wabun' : '');
   put('who', esc(label(s.name)) + ' として送る');
   if (s.help) put('help', esc(s.help));   // どのスイッチが何をするかは morse_chat.py が決める
   let note = s.note, cls = /^送れない|^知らない/.test(note) ? 'err' : '';
@@ -2320,7 +2319,7 @@ function showInput(s, err) {
   put('note', esc(note), cls);
   // 2 行に収まらなければ字を小さくする
   const t = document.getElementById('text');
-  const size = s.text.length + s.roma.length > 40 ? '22px' : '30px';
+  const size = s.text.length > 40 ? '22px' : '30px';
   if (t.style.fontSize !== size) {
     t.style.fontSize = size;
     t.style.lineHeight = size === '30px' ? '42px' : '30px';

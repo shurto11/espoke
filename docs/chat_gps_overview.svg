@@ -159,7 +159,7 @@
   <ellipse cx="1370" cy="538" rx="15" ry="7" fill="#7d1d1d"/><ellipse cx="1370" cy="533" rx="15" ry="7" fill="#d33"/>
 </g>
 <g font-size="10.5" fill="#fff" text-anchor="middle" class="b">
-  <text x="1220" y="566">トン/ツー</text><text x="1270" y="566">消す</text><text x="1320" y="566">送る</text><text x="1370" y="566">カナ</text>
+  <text x="1220" y="566">トン/ツー</text><text x="1270" y="566">消す</text><text x="1320" y="566">送る</text><text x="1370" y="566">和文</text>
 </g>
 <text x="1300" y="606" text-anchor="middle" class="name">モールス伝信機</text>
 <text x="1300" y="627" text-anchor="middle" class="sub">ボタンを押してモールスで文を打つ</text>
@@ -248,10 +248,10 @@
 <text x="76" y="952" font-size="15" class="b">モールス伝信機 → ラズパイ 5</text>
 <rect x="44" y="964" width="317" height="54" rx="6" class="exbox"/>
 <text x="54" y="986" class="ex">・ー（短く押す・長く押す）→ A</text>
-<text x="54" y="1007" class="ex">カナのとき: MATANE → マタネ</text>
+<text x="54" y="1007" class="ex">和文のとき: ・ー → イ</text>
 <text x="44" y="1040" class="tx">短く押すとトン（・）、長く押すとツー（ー）。</text>
 <text x="44" y="1059" class="tx">ラズパイ 5 がその並びを文字にする。</text>
-<text x="44" y="1078" class="tx">ボタンはほかに「1 字消す」「送る」「カナ」。</text>
+<text x="44" y="1078" class="tx">ボタンはほかに「1 字消す」「送る」「和文」。</text>
 
 <!-- 6 -->
 <rect x="395" y="920" width="345" height="172" rx="10" class="card"/>
