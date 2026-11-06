@@ -97,6 +97,8 @@ Pi 5 では fbservo で全画面に開く。左が地図 (Pico ごとに色を�
     (STORE) に入れて、つないでいる Pico 全部に流す (送った Pico にも流し返す。Pico はそれを着信として知らせない)。
     STORE は Discord とチャットを別々に KEEP 件ずつ持つので、Discord の発言が多くてもチャットは押し出されない。
     地図のページは /feed.json でチャットも読む。チャットは Discord には送らない。
+    Pi 5 のスイッチで打った文 (morse リポジトリの morse_chat.py) は、地図のサーバーの POST /chat で届く (X-Pager が名前)。
+    地図のページを ?morse=8021 を付けて開くと、下に入力欄を出し、Pi 5 の 127.0.0.1:8021 から打っている文を読んで出す。
 
 --notify:
     Bot を使えないときは、公式の Discord アプリを画面なし (Xvfb) で動かしておき、この中継が D-Bus の
@@ -2033,6 +2035,7 @@ def read_upstream(sock, io_lock, done, pager):
 
 
 # 地図のページ。Pi 5 の fbservo (Servo) で全画面に出す。左が地図、右がポケベルどうしのチャット。
+# ?morse=<ポート> を付けると、下に Pi 5 のスイッチで打つモールスの入力欄 (その Pi の 127.0.0.1:<ポート> の morse_chat.py を読む)。
 # Servo は SVG を描けないので、線と印は Canvas で描く (preferCanvas)。チャットはスクロールさせずに下から積む。
 # 地図の絵は OpenStreetMap のタイル (利用の決まり https://operations.osmfoundation.org/policies/tiles/ に従い、
 # 帰属表示を出し、まとめて取りにいかない)
@@ -2068,6 +2071,34 @@ MAP_HTML = """<!doctype html>
     #map { right: 0; bottom: 45%; }
     #side { left: 0; top: 55%; width: auto; border-left: 0; border-top: 1px solid #aaa; }
   }
+  /* ?morse=<ポート> を付けて開いたとき (Pi 5 の画面) だけ、地図とチャットの下に、Pi のスイッチで打つモールスの入力欄を出す。
+     左に打っている符号と、確定したときの文字。右に打った文 (2 行まで) と、その下に様子と打ち方 */
+  #input { display: none; position: absolute; left: 0; right: 0; bottom: 0; height: 132px;
+           background: #fff; border-top: 2px solid #888; }
+  body.morse #input { display: block; }
+  body.morse #map, body.morse #side { bottom: 134px; }
+  #code { position: absolute; left: 0; top: 0; bottom: 0; width: 280px; text-align: center;
+          background: #f6f5f2; border-right: 1px solid #ccc; }
+  #signs { height: 24px; margin-top: 30px; white-space: nowrap; overflow: hidden; }
+  #signs span { display: inline-block; height: 18px; margin: 3px 4px; border-radius: 9px; background: #222; }
+  #signs .s1 { width: 18px; }
+  #signs .s2 { width: 40px; }
+  #signs .held { background: #bbb; }
+  #signs .hint { height: auto; margin: 0; background: none; color: #999; font-size: 20px; }
+  #preview { font-size: 36px; line-height: 50px; height: 50px; margin-top: 10px; color: #333; font-weight: bold; }
+  #compose { position: absolute; left: 281px; right: 0; top: 0; bottom: 0; }
+  #text { position: absolute; left: 18px; right: 18px; top: 10px; height: 84px; overflow: hidden;
+          font-size: 30px; line-height: 42px; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
+  #text .roma { color: #1f6fd1; }
+  #text .cur { color: #999; }
+  #status { position: absolute; left: 18px; right: 18px; bottom: 8px; height: 24px; overflow: hidden;
+            font-size: 17px; line-height: 24px; color: #555; white-space: nowrap; }
+  #mode { display: inline-block; padding: 0 10px; border-radius: 4px; background: #555; color: #fff; margin-right: 10px; }
+  #mode.kana { background: #e0670b; }
+  #note { margin-left: 14px; font-weight: bold; color: #2e7d32; }
+  #note.err { color: #b03030; }
+  #note.wait { color: #555; }
+  #help { position: absolute; right: 0; top: 0; padding-left: 20px; background: #fff; color: #777; }
 </style>
 </head>
 <body>
@@ -2076,9 +2107,20 @@ MAP_HTML = """<!doctype html>
   <div id="chat"><div class="none">チャットを読み込み中</div></div>
   <div id="pagers"><div id="rows"></div><div id="err"></div></div>
 </div>
+<div id="input">
+  <div id="code"><div id="signs"></div><div id="preview"></div></div>
+  <div id="compose">
+    <div id="text"></div>
+    <div id="status"><span id="mode"></span><span id="who"></span><span id="note"></span>
+      <span id="help">SW1 トン (長押しでツー)　SW3 1 字消す　SW4 確定・送る　SW5 英字/カナ</span></div>
+  </div>
+</div>
 <script>
 const VERSION = '__VERSION__';  // 中継が新しいページに替わったら読み直す
 const ZOOM = +(new URLSearchParams(location.search).get('z') || 16);
+// Pi 5 で動かす morse_chat.py のポート (127.0.0.1)。付けたときだけ下に入力欄を出す。地図の大きさが決まる前に入れる
+const MORSE = new URLSearchParams(location.search).get('morse');
+if (MORSE) document.body.className = 'morse';
 const GAP = 10 * 60;     // これより間が空いた点どうしは線でつながない (別の外出)
 const STALE = 5 * 60;    // 最後の位置がこれより古ければ、印を灰色にする (電源が切れた・電波が無いなど)
 const POLL = 5 * 1000;
@@ -2091,6 +2133,8 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 const pagers = {};   // 名前 → { color, line, last, marker, shown }
 let gpsNext = 0, chatNext = 0, loaded = false, lastDay = '', rowsHtml = '', errText = '', fitKey = '', fitCount = 0;
+let polling = false, pollAgain = false, morseName = '', morseSent = -1;
+const shown = {};   // 入力欄の要素ごとの、今出している中身 (変わったときだけ書き換える)
 
 function pager(name) {
   if (!pagers[name]) {
@@ -2112,6 +2156,9 @@ function ago(s) {
 function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 }
+// 画面に出す名前。中継の中の名前 (X-Pager の名前。英数字だけ) と、チャットの記録はそのまま
+const LABELS = { espoke: 'ポケベル', raspi: 'モールス' };
+function label(name) { return LABELS[name] || name; }
 
 function addPoints(points) {   // [t, lat, lon, km/h, 衛星の数, 名前]
   for (const p of points) {
@@ -2140,7 +2187,7 @@ function addChat(msgs) {   // [時刻, 名前, 本文]
     const div = document.createElement('div');
     div.className = 'msg';
     div.style.borderLeftColor = g.color;
-    div.innerHTML = '<div class="head"><span class="name" style="color:' + g.color + '">' + esc(m[1]) +
+    div.innerHTML = '<div class="head"><span class="name" style="color:' + g.color + '">' + esc(label(m[1])) +
       '</span>' + hm(d) + '</div><div class="text"></div>';
     div.lastChild.textContent = m[2];
     box.appendChild(div);
@@ -2156,6 +2203,7 @@ function showPagers(now) {
   const fresh = [], all = [];
   for (const name of Object.keys(pagers)) {
     const g = pagers[name];
+    if (name === morseName && !g.last) continue;   // この画面のスイッチで打つ Pi 5 には位置が無い
     let state = '<span class="sub">位置はまだ届いていません</span>';
     if (g.last) {
       const stale = now - g.last[0] > STALE;
@@ -2172,7 +2220,7 @@ function showPagers(now) {
       all.push([g.last[1], g.last[2]]);
       if (!stale) fresh.push([g.last[1], g.last[2]]);
     }
-    html += '<div class="pager"><span class="dot" style="background:' + g.color + '"></span><b>' + esc(name) +
+    html += '<div class="pager"><span class="dot" style="background:' + g.color + '"></span><b>' + esc(label(name)) +
       '</b>  ' + state + '</div>';
   }
   if (!html) html = '<div class="pager sub">位置はまだ届いていません</div>';
@@ -2195,7 +2243,14 @@ function showError(text) {
   if (text !== errText) document.getElementById('err').textContent = errText = text;
 }
 
+// 読んでいる途中にもう一度呼ばれたら (5 秒ごとのと、送った直後のが重なったら)、終わってから読み直す。
+// 同じ gps・chat で 2 つ読むと、同じチャットが 2 回出る
 async function poll() {
+  if (polling) {
+    pollAgain = true;
+    return;
+  }
+  polling = true;
   try {
     const r = await fetch('feed.json?gps=' + gpsNext + '&chat=' + chatNext, { cache: 'no-store' });
     const j = await r.json();
@@ -2213,10 +2268,84 @@ async function poll() {
     showError('');
   } catch (e) {
     showError('中継から読めない: ' + e);
+  } finally {
+    polling = false;
+    if (pollAgain) {
+      pollAgain = false;
+      poll();
+    }
   }
 }
 poll();
 setInterval(poll, POLL);
+
+// ---- モールスの入力欄 (?morse=<ポート>)。打っている文は Pi 5 の morse_chat.py が持ち、送るのもそちら ----
+
+function put(id, html, cls) {   // 変わったときだけ書き換える (fbservo は 1 回描くのに時間がかかる)
+  const key = html + '\\n' + (cls || '');
+  if (shown[id] === key) return;
+  shown[id] = key;
+  const e = document.getElementById(id);
+  e.innerHTML = html;
+  e.className = cls || '';
+}
+
+function showInput(s, err) {
+  if (!s) {
+    put('note', 'スイッチの入力 (127.0.0.1:' + esc(MORSE) + ') につながらない: ' + esc(err), 'err');
+    return;
+  }
+  if (s.name !== morseName) {
+    morseName = s.name;
+    rowsHtml = '';   // 上の欄から Pi 5 の行を外す
+  }
+  // 符号はトンを丸、ツーを横長の棒で。押していてまだ決まっていない分はうすく
+  let signs = '';
+  for (const c of s.code) signs += '<span class="' + (c === '.' ? 's1' : 's2') + '"></span>';
+  if (s.held[0]) signs += '<span class="s1 held"></span>';
+  if (s.held[1]) signs += '<span class="s2 held"></span>';
+  put('signs', signs || '<span class="hint">トン・ツー</span>');
+  put('preview', s.preview ? '= ' + esc(s.preview) : '');
+  put('text', esc(s.text) + '<span class="roma">' + esc(s.roma) + '</span><span class="cur">_</span>');
+  put('mode', s.kana ? 'カナ' : '英字', s.kana ? 'kana' : '');
+  put('who', esc(label(s.name)) + ' として送る');
+  if (s.help) put('help', esc(s.help));   // どのスイッチが何をするかは morse_chat.py が決める
+  let note = s.note, cls = /^送れない|^知らない/.test(note) ? 'err' : '';
+  if (s.err) {
+    note = s.err;
+    cls = 'err';
+  } else if (s.busy) {
+    cls = 'wait';
+  }
+  put('note', esc(note), cls);
+  // 2 行に収まらなければ字を小さくする
+  const t = document.getElementById('text');
+  const size = s.text.length + s.roma.length > 40 ? '22px' : '30px';
+  if (t.style.fontSize !== size) {
+    t.style.fontSize = size;
+    t.style.lineHeight = size === '30px' ? '42px' : '30px';
+  }
+  if (morseSent >= 0 && s.sent > morseSent) poll();   // 送れたら、すぐチャットに出す
+  morseSent = s.sent;
+}
+
+// 変わるまで待って返してくれる (長いポーリング)。つながらなければ 3 秒おいてつなぎ直す
+async function morseLoop() {
+  let v = '';
+  for (;;) {
+    try {
+      const r = await fetch('http://127.0.0.1:' + MORSE + '/state?v=' + v, { cache: 'no-store' });
+      const s = await r.json();
+      v = s.v;
+      showInput(s);
+    } catch (e) {
+      v = '';
+      showInput(null, e);
+      await new Promise(res => setTimeout(res, 3000));
+    }
+  }
+}
+if (MORSE) morseLoop();
 </script>
 </body>
 </html>
@@ -2231,6 +2360,7 @@ MAP_ALLOW = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0:
 class MapHandler(BaseHTTPRequestHandler):
     """tailnet の中だけに見せる地図のサーバー。/ が地図とチャットのページ、
     /feed.json?gps=<n>&chat=<m> が n 点目からあとの位置と m 件目からあとのチャット。
+    POST /chat は本文を X-Pager の名前でチャットに入れる (Pi 5 のスイッチで打った文。morse/morse_chat.py が送る)。
     起動したときに tailscaled がまだ動いていなくても待てるよう、全部のアドレスで待ち、tailnet の外からは断る"""
 
     def log_message(self, fmt, *args):
@@ -2266,6 +2396,20 @@ class MapHandler(BaseHTTPRequestHandler):
                                           "gps": gps_next, "points": points, "chat": chat_next, "msgs": msgs},
                                          separators=(",", ":")), "application/json")
         self.send_error(404)
+
+    def do_POST(self):
+        if not self._allowed():
+            return self.send_error(403)
+        if urllib.parse.urlparse(self.path).path != "/chat":
+            return self.send_error(404)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 < n <= SEND_MAX * 4:
+            return self.send_error(400)
+        text = self.rfile.read(n).decode("utf-8", "replace").strip()[:SEND_MAX]
+        self._send((CHAT.add(pager_name(self.headers), text) if text else "empty") + "\n", "text/plain; charset=utf-8")
 
 
 def tailnet_ip():
