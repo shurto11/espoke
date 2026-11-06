@@ -1,0 +1,376 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="1370" viewBox="0 0 1760 1370" fill="#222" font-family="Noto Sans CJK JP, Noto Sans JP, Hiragino Sans, sans-serif">
+<style>
+
+  .m { fill: #666; }
+  .b { font-weight: bold; }
+  .mono { font-family: Noto Sans Mono CJK JP, DejaVu Sans Mono, monospace; }
+  .s9 { font-size: 9px; } .s10 { font-size: 10px; } .s11 { font-size: 11px; } .s12 { font-size: 12px; }
+  .s13 { font-size: 13px; } .s14 { font-size: 14px; } .s17 { font-size: 17px; }
+  .badge { fill: #fff; font-size: 12px; font-weight: bold; }
+  .box { fill: #fff; stroke: #b8b8b8; stroke-width: 1.2; }
+  .fb { stroke: #1f6fd1; } .fo { stroke: #d9730d; } .fg { stroke: #2e8b57; } .fp { stroke: #7b4fc4; } .fk { stroke: #666; }
+  .fl { fill: none; stroke-width: 2.4; }
+  .dash { stroke-dasharray: 6 4; }
+</style>
+<defs>
+  <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#1f6fd1"/></marker>
+  <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#d9730d"/></marker>
+  <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#2e8b57"/></marker>
+  <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#7b4fc4"/></marker>
+  <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#666"/></marker>
+  <clipPath id="mapclip"><rect x="1260" y="246" width="268" height="254"/></clipPath>
+</defs>
+<rect width="1760" height="1370" fill="#ffffff"/>
+
+<!-- ===== 題 ===== -->
+<text x="30" y="44" font-size="24" class="b">espoke の Chat と GPS のしくみ</text>
+<text x="30" y="70" class="s14 m">ポケベル（Pico）・中継（dynabook）・地図の画面（Pi 5）が、何をどうやりとりするか。丸数字は下の表と対応（2026-11-06 時点）</text>
+
+<!-- 凡例 -->
+<g class="s12">
+  <line x1="30" y1="102" x2="64" y2="102" class="fl fb" marker-end="url(#ab)"/><text x="72" y="106">ポケベル → 中継</text>
+  <line x1="200" y1="102" x2="234" y2="102" class="fl fo" marker-end="url(#ao)"/><text x="242" y="106">中継 → ポケベル</text>
+  <line x1="370" y1="102" x2="404" y2="102" class="fl fg" marker-end="url(#ag)"/><text x="412" y="106">→ Pi 5 の画面</text>
+  <line x1="30" y1="128" x2="64" y2="128" class="fl fp" marker-end="url(#ap)"/><text x="72" y="132">Pi 5 → 中継</text>
+  <line x1="200" y1="128" x2="234" y2="128" class="fl fk" marker-end="url(#ak)"/><text x="242" y="132">機械の中</text>
+  <line x1="370" y1="128" x2="404" y2="128" class="fl fk dash"/><text x="412" y="132">予備・まだ無い・作業中</text>
+</g>
+
+<!-- ===== ポケベル espoke A ===== -->
+<rect x="30" y="170" width="380" height="490" rx="10" fill="#f2f6fc" stroke="#7f9fc6" stroke-width="1.5"/>
+<text x="50" y="198" class="s17 b">ポケベル espoke A</text>
+<text x="50" y="218" class="s12 m">Pico WH・持ち歩く・PAGER_NAME=espoke</text>
+
+<rect x="50" y="240" width="160" height="72" rx="6" class="box"/>
+<text x="62" y="264" class="s13 b">Unit GPS v1.1</text>
+<text x="62" y="283" class="s11 m">AT6668・GP4 / GP5</text>
+<text x="62" y="300" class="s11 m">UART1 115200bps</text>
+
+<rect x="230" y="240" width="160" height="72" rx="6" class="box"/>
+<text x="240" y="255" class="s11 m">LCD 1602（Receive）</text>
+<rect x="240" y="262" width="140" height="42" rx="3" fill="#b9cc54" stroke="#6b7d1f"/>
+<text x="246" y="279" class="mono" font-size="12.5" fill="#1d2a05" xml:space="preserve">raspi      17:25</text>
+<text x="246" y="297" class="mono" font-size="12.5" fill="#1d2a05">ｵｶｴﾘ</text>
+
+<rect x="50" y="350" width="340" height="150" rx="6" class="box"/>
+<text x="62" y="374" class="s14 b">Pico WH（espoke.ino）</text>
+<g class="s12">
+  <text x="62" y="397">・ホームの Chat: Receive と Send の画面</text>
+  <text x="62" y="419">・Send で打った文を中継へ（③）</text>
+  <text x="62" y="441">・届いたら Receive に切り替える（直近 8 件）</text>
+  <text x="62" y="463">・GPS: 測位できていれば 1 分ごとに位置（④）</text>
+  <text x="62" y="485">・中継との接続は 1 本（TLS の握手に 4〜8 秒）</text>
+</g>
+
+<rect x="50" y="544" width="340" height="86" rx="6" class="box"/>
+<text x="62" y="567" class="s13 b">スイッチ SW1〜SW4（Send の画面）</text>
+<text x="62" y="589" class="s12">SW2 トン・SW3 ツー・SW4 確定（空白のあとで送る）</text>
+<text x="62" y="609" class="s12">SW1 1 字消す・SW4 長押しで英字 ⇄ カナ</text>
+
+<!-- ポケベルの中の矢印 -->
+<line x1="110" y1="312" x2="110" y2="349" class="fl fk" marker-end="url(#ak)"/>
+<circle cx="128" cy="331" r="9" fill="#666"/><text x="128" y="335" text-anchor="middle" class="badge" font-size="11">1</text>
+<text x="142" y="335" class="s11">NMEA</text>
+<line x1="310" y1="350" x2="310" y2="313" class="fl fk" marker-end="url(#ak)"/>
+<circle cx="328" cy="331" r="9" fill="#666"/><text x="328" y="335" text-anchor="middle" class="badge" font-size="11">2</text>
+<text x="342" y="335" class="s11">表示</text>
+<line x1="220" y1="544" x2="220" y2="501" class="fl fk" marker-end="url(#ak)"/>
+<circle cx="238" cy="522" r="9" fill="#666"/><text x="238" y="526" text-anchor="middle" class="badge" font-size="11">2</text>
+<text x="252" y="526" class="s11">打つ</text>
+
+<!-- espoke B -->
+<rect x="30" y="680" width="380" height="80" rx="10" fill="#fafafa" stroke="#999" stroke-width="1.3" class="dash"/>
+<text x="50" y="706" class="s14 b">espoke B（2 台目・まだ無い）</text>
+<text x="50" y="727" class="s12 m">PAGER_NAME を別の名前にして、A と同じく /stream に</text>
+<text x="50" y="745" class="s12 m">つなぐ。A の文は B の Receive に、B の文は A に届く</text>
+
+<!-- ===== インターネット側 ===== -->
+<rect x="445" y="236" width="160" height="64" rx="6" fill="#fafafa" stroke="#999" class="dash"/>
+<text x="525" y="257" text-anchor="middle" class="s13 b">Discord</text>
+<text x="525" y="275" text-anchor="middle" class="s11 m">Bot / アプリの通知</text>
+<text x="525" y="292" text-anchor="middle" class="s11 m">Chat とは混ざらない</text>
+<line x1="606" y1="292" x2="659" y2="292" class="fl fk dash" stroke-width="1.6" marker-start="url(#ak)" marker-end="url(#ak)"/>
+
+<text x="525" y="338" text-anchor="middle" class="s11 m">Wi-Fi（家 / スマホのテザリング）</text>
+<text x="525" y="355" text-anchor="middle" class="s11 m">→ インターネット</text>
+
+<rect x="445" y="372" width="160" height="106" rx="6" fill="#fafafa" stroke="#999" stroke-width="1.2"/>
+<text x="525" y="397" text-anchor="middle" class="s13 b">Tailscale Funnel</text>
+<text x="525" y="417" text-anchor="middle" class="s12 mono">TCP :10000</text>
+<text x="525" y="437" text-anchor="middle" class="s11 m">TLS は通すだけ</text>
+<text x="525" y="455" text-anchor="middle" class="s11 m">（公開の入口）</text>
+
+<!-- ポケベル ⇄ 中継の 1 本の接続 -->
+<line x1="390" y1="400" x2="444" y2="400" class="fl fb" marker-end="url(#ab)"/>
+<line x1="605" y1="400" x2="659" y2="400" class="fl fb" marker-end="url(#ab)"/>
+<line x1="660" y1="450" x2="606" y2="450" class="fl fo" marker-end="url(#ao)"/>
+<line x1="445" y1="450" x2="391" y2="450" class="fl fo" marker-end="url(#ao)"/>
+<circle cx="417" cy="400" r="10" fill="#1f6fd1" stroke="#fff" stroke-width="2"/><text x="417" y="404" text-anchor="middle" class="badge">3</text>
+<circle cx="632" cy="400" r="10" fill="#1f6fd1" stroke="#fff" stroke-width="2"/><text x="632" y="404" text-anchor="middle" class="badge">4</text>
+<circle cx="417" cy="450" r="10" fill="#d9730d" stroke="#fff" stroke-width="2"/><text x="417" y="454" text-anchor="middle" class="badge">5</text>
+<text x="525" y="500" text-anchor="middle" class="s12 b">1 本の TLS 接続（HTTP/1.0）</text>
+<text x="525" y="518" text-anchor="middle" class="s11 m">③ で張り直した接続で ④ を送り</text>
+<text x="525" y="534" text-anchor="middle" class="s11 m">⑤ を受け続ける</text>
+
+<!-- 予備の入口 -->
+<path d="M390,480 H425 V620 H445" class="fl fk dash" stroke-width="1.5"/>
+<path d="M605,620 H630 V470 H659" class="fl fk dash" stroke-width="1.5"/>
+<rect x="445" y="580" width="160" height="82" rx="6" fill="#fafafa" stroke="#999" class="dash"/>
+<text x="525" y="601" text-anchor="middle" class="s12 b">予備の入口</text>
+<text x="525" y="619" text-anchor="middle" class="s11">ubuntubook</text>
+<text x="525" y="636" text-anchor="middle" class="s11 mono">relay_gateway.py</text>
+<text x="525" y="653" text-anchor="middle" class="s10 m">Funnel が止まったとき</text>
+
+<!-- ===== dynabook ===== -->
+<rect x="640" y="170" width="530" height="590" rx="10" fill="#f8f6f0" stroke="#b3a37f" stroke-width="1.5"/>
+<text x="660" y="198" class="s17 b">dynabook（学校）</text>
+<text x="660" y="218" class="s12 m">tools/discord_relay.py（systemd の espoke-relay）</text>
+
+<rect x="660" y="240" width="465" height="82" rx="6" class="box"/>
+<text x="675" y="262" class="s13 b">STORE — 流す発言を覚えておく</text>
+<rect x="675" y="274" width="205" height="36" rx="4" fill="#efefef" stroke="#bbb"/>
+<text x="777" y="297" text-anchor="middle" class="s12 m">Discord 直近 20 件</text>
+<rect x="900" y="274" width="210" height="36" rx="4" fill="#e9f3ec" stroke="#2e8b57"/>
+<text x="1005" y="297" text-anchor="middle" class="s12 b">Chat 直近 20 件</text>
+
+<rect x="660" y="346" width="465" height="150" rx="6" class="box"/>
+<text x="675" y="369" class="s13 b">/stream の口 — TLS :10000 を中継が自分で受ける</text>
+<g class="s12">
+  <text x="675" y="392">・X-Key（合言葉）を確かめ、X-Pager の名前でポケベルを分ける</text>
+  <text x="675" y="413">・送られた文は Chat へ（半角カナは全角にそろえる）</text>
+  <text x="675" y="434">・STORE の新着を、つないでいる全部のポケベルへ流す</text>
+  <text x="675" y="455">・何もなければ 30 秒ごとに空行（つながっている合図）</text>
+  <text x="675" y="476" class="m">・Spotify・YouTube モードの間は Chat は届かない</text>
+</g>
+
+<!-- /stream と STORE -->
+<line x1="1000" y1="346" x2="1000" y2="323" class="fl fk" stroke-width="2" marker-end="url(#ak)"/>
+<text x="1008" y="339" class="s11">Chat を入れる</text>
+<line x1="760" y1="322" x2="760" y2="345" class="fl fk" stroke-width="2" marker-end="url(#ak)"/>
+<text x="768" y="339" class="s11">新着を全部の接続へ</text>
+
+<!-- ファイル -->
+<g>
+  <path d="M660,522 V584 A112.5,9 0 0 0 885,584 V522" fill="#fff" stroke="#b8b8b8" stroke-width="1.2"/>
+  <ellipse cx="772.5" cy="522" rx="112.5" ry="9" fill="#f4f4f4" stroke="#b8b8b8" stroke-width="1.2"/>
+  <text x="772" y="554" text-anchor="middle" class="s12 b mono">~/espoke/chat.jsonl</text>
+  <text x="772" y="573" text-anchor="middle" class="s11 m">1 行 1 発言・消さない</text>
+  <path d="M900,522 V584 A112.5,9 0 0 0 1125,584 V522" fill="#fff" stroke="#b8b8b8" stroke-width="1.2"/>
+  <ellipse cx="1012.5" cy="522" rx="112.5" ry="9" fill="#f4f4f4" stroke="#b8b8b8" stroke-width="1.2"/>
+  <text x="1012" y="554" text-anchor="middle" class="s12 b mono">~/espoke/gps.jsonl</text>
+  <text x="1012" y="573" text-anchor="middle" class="s11 m">1 行 1 点・名前つき・消さない</text>
+</g>
+<line x1="730" y1="496" x2="730" y2="512" class="fl fk" stroke-width="2" marker-end="url(#ak)"/>
+<circle cx="748" cy="504" r="9" fill="#666"/><text x="748" y="508" text-anchor="middle" class="badge" font-size="11">6</text>
+<line x1="970" y1="496" x2="970" y2="512" class="fl fk" stroke-width="2" marker-end="url(#ak)"/>
+<circle cx="988" cy="504" r="9" fill="#666"/><text x="988" y="508" text-anchor="middle" class="badge" font-size="11">6</text>
+<line x1="730" y1="594" x2="730" y2="613" class="fl fk" stroke-width="2" marker-end="url(#ak)"/>
+<text x="738" y="608" class="s11 m">読む</text>
+<line x1="970" y1="594" x2="970" y2="613" class="fl fk" stroke-width="2" marker-end="url(#ak)"/>
+<text x="978" y="608" class="s11 m">読む</text>
+
+<!-- 地図のサーバー -->
+<rect x="660" y="614" width="465" height="130" rx="6" fill="#fff" stroke="#2e8b57" stroke-width="1.4"/>
+<text x="675" y="637" class="s13 b">地図のサーバー :8020（tailnet の中だけ・外は 403）</text>
+<g class="s12">
+  <text x="675" y="660"><tspan class="mono b">GET /</tspan>  地図とチャットのページ（Leaflet）</text>
+  <text x="675" y="681"><tspan class="mono b">GET /feed.json?gps=n&amp;chat=m</tspan>  そこからあとの位置とチャット</text>
+  <text x="675" y="702"><tspan class="mono b">POST /chat</tspan>  Pi 5 で打った文 → chat.jsonl と STORE へ</text>
+  <text x="675" y="725" class="m">位置は個人の情報なので、Funnel にも LAN にも出さない</text>
+</g>
+
+<!-- ⑧ の続き: POST /chat → STORE -->
+<path d="M1125,632 H1147 V292 H1127" class="fl fp" marker-end="url(#ap)"/>
+<circle cx="1147" cy="440" r="10" fill="#7b4fc4" stroke="#fff" stroke-width="2"/><text x="1147" y="444" text-anchor="middle" class="badge">8</text>
+
+<!-- ===== tailnet ===== -->
+<text transform="translate(1196,300) rotate(-90)" text-anchor="middle" class="s11 m">tailnet（WireGuard）</text>
+<path d="M1125,680 H1200 V400 H1249" class="fl fg" marker-end="url(#ag)"/>
+<circle cx="1200" cy="540" r="10" fill="#2e8b57" stroke="#fff" stroke-width="2"/><text x="1200" y="544" text-anchor="middle" class="badge">7</text>
+<line x1="1250" y1="725" x2="1126" y2="725" class="fl fp" marker-end="url(#ap)"/>
+<circle cx="1190" cy="725" r="10" fill="#7b4fc4" stroke="#fff" stroke-width="2"/><text x="1190" y="729" text-anchor="middle" class="badge">8</text>
+
+<!-- ===== 外のサイト ===== -->
+<rect x="1440" y="92" width="150" height="54" rx="6" fill="#fafafa" stroke="#999"/>
+<text x="1515" y="114" text-anchor="middle" class="s13 b">OpenStreetMap</text>
+<text x="1515" y="133" text-anchor="middle" class="s11 m">地図のタイル</text>
+<rect x="1605" y="92" width="125" height="54" rx="6" fill="#fafafa" stroke="#999"/>
+<text x="1667" y="114" text-anchor="middle" class="s13 b">unpkg</text>
+<text x="1667" y="133" text-anchor="middle" class="s11 m">Leaflet 1.9.4</text>
+<line x1="1515" y1="146" x2="1515" y2="235" class="fl fg" marker-end="url(#ag)"/>
+<line x1="1667" y1="146" x2="1667" y2="235" class="fl fg" marker-end="url(#ag)"/>
+<circle cx="1590" cy="190" r="10" fill="#2e8b57" stroke="#fff" stroke-width="2"/><text x="1590" y="194" text-anchor="middle" class="badge" font-size="10">10</text>
+
+<!-- ===== Pi 5 ===== -->
+<rect x="1230" y="170" width="500" height="590" rx="10" fill="#f1f8f1" stroke="#86b386" stroke-width="1.5"/>
+<text x="1250" y="198" class="s17 b">Raspberry Pi 5（raspi・家）</text>
+<text x="1250" y="218" class="s12 m">自動ログイン → fbservo で全画面</text>
+
+<!-- モニター -->
+<rect x="1250" y="236" width="460" height="345" rx="10" fill="#2b2b2b"/>
+<rect x="1260" y="246" width="440" height="312" fill="#fff"/>
+<text x="1480" y="573" text-anchor="middle" font-size="10.5" fill="#bbb">1024×768 — fbservo（Servo）が /dev/fb0 に直接描く</text>
+
+<!-- 画面: 地図 -->
+<g clip-path="url(#mapclip)">
+  <rect x="1260" y="246" width="268" height="254" fill="#f2efe9"/>
+  <path d="M1270,420 L1338,412 L1350,472 L1276,482 z" fill="#cde6b6"/>
+  <path d="M1250,302 C1310,324 1376,290 1436,332 S1516,362 1540,352" fill="none" stroke="#aad3df" stroke-width="11"/>
+  <g fill="#e2dbd0">
+    <rect x="1352" y="262" width="22" height="16"/><rect x="1384" y="266" width="16" height="20"/><rect x="1468" y="392" width="24" height="18"/>
+    <rect x="1290" y="346" width="20" height="16"/><rect x="1470" y="440" width="18" height="22"/><rect x="1395" y="408" width="22" height="14"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M1330,246 L1345,500 M1450,246 L1440,500 M1260,450 L1528,440 M1380,246 L1510,500" stroke="#d6cfc2" stroke-width="7"/>
+    <path d="M1330,246 L1345,500 M1450,246 L1440,500 M1260,450 L1528,440 M1380,246 L1510,500" stroke="#fff" stroke-width="5"/>
+    <path d="M1260,380 L1528,360" stroke="#d9b45a" stroke-width="8"/>
+    <path d="M1260,380 L1528,360" stroke="#f8dd96" stroke-width="6"/>
+  </g>
+  <polyline points="1300,468 1343,446 1342,412 1340,380 1398,375 1446,369 1448,322 1450,292" fill="none" stroke="#1f6fd1" stroke-width="3.5" stroke-linejoin="round"/>
+  <circle cx="1450" cy="292" r="7" fill="#1f6fd1" stroke="#fff" stroke-width="2"/>
+  <rect x="1268" y="254" width="20" height="38" rx="3" fill="#fff" stroke="#aaa"/>
+  <text x="1278" y="268" text-anchor="middle" font-size="12" fill="#333">+</text>
+  <text x="1278" y="287" text-anchor="middle" font-size="12" fill="#333">−</text>
+  <rect x="1452" y="489" width="76" height="11" fill="#fff" fill-opacity="0.8"/>
+  <text x="1525" y="497.5" text-anchor="end" font-size="7.5" fill="#555">© OpenStreetMap</text>
+</g>
+
+<!-- 画面: 右の欄 -->
+<line x1="1528" y1="246" x2="1528" y2="500" stroke="#aaa"/>
+<circle cx="1540" cy="262" r="4" fill="#1f6fd1"/>
+<text x="1548" y="266" font-size="10" class="b">ポケベル</text>
+<text x="1540" y="282" font-size="9" class="m">17:26 ・ 1 分前 ・ 4 km/h</text>
+<line x1="1528" y1="292" x2="1700" y2="292" stroke="#ddd"/>
+<text x="1614" y="364" text-anchor="middle" font-size="8.5" class="m">11/6</text>
+<g>
+  <rect x="1534" y="372" width="3" height="34" fill="#1f6fd1"/>
+  <text x="1542" y="383" font-size="9"><tspan fill="#1f6fd1" font-weight="bold">ポケベル</tspan><tspan fill="#888">  17:22</tspan></text>
+  <text x="1542" y="400" font-size="11">HELLO</text>
+  <rect x="1534" y="414" width="3" height="34" fill="#e07b00"/>
+  <text x="1542" y="425" font-size="9"><tspan fill="#e07b00" font-weight="bold">モールス</tspan><tspan fill="#888">  17:25</tspan></text>
+  <text x="1542" y="442" font-size="11">オカエリ</text>
+  <rect x="1534" y="456" width="3" height="34" fill="#1f6fd1"/>
+  <text x="1542" y="467" font-size="9"><tspan fill="#1f6fd1" font-weight="bold">ポケベル</tspan><tspan fill="#888">  17:26</tspan></text>
+  <text x="1542" y="484" font-size="11">アリガトウ</text>
+</g>
+
+<!-- 画面: 下の入力欄 (?morse=8021) -->
+<rect x="1260" y="500" width="440" height="58" fill="#fff"/>
+<line x1="1260" y1="500" x2="1700" y2="500" stroke="#888" stroke-width="2"/>
+<rect x="1260" y="501" width="82" height="57" fill="#f6f5f2"/>
+<line x1="1342" y1="501" x2="1342" y2="558" stroke="#ccc"/>
+<circle cx="1301" cy="517" r="4.5" fill="#222"/>
+<text x="1301" y="545" text-anchor="middle" font-size="15" class="b" fill="#333">= E</text>
+<text x="1352" y="527" font-size="17">マタ<tspan fill="#1f6fd1">n</tspan><tspan fill="#999">_</tspan></text>
+<rect x="1352" y="541" width="28" height="13" rx="2" fill="#e0670b"/>
+<text x="1366" y="551" text-anchor="middle" font-size="9" fill="#fff">カナ</text>
+<text x="1386" y="551" font-size="9" class="m">モールス として送る</text>
+
+<!-- morse_chat.py とスイッチ -->
+<rect x="1250" y="630" width="285" height="114" rx="6" fill="#fff" stroke="#7b4fc4" stroke-width="1.3" class="dash"/>
+<text x="1262" y="653" class="s13 b mono">morse_chat.py</text>
+<rect x="1376" y="641" width="46" height="16" rx="3" fill="#7b4fc4"/>
+<text x="1399" y="653" text-anchor="middle" font-size="10" fill="#fff">作業中</text>
+<g class="s11">
+  <text x="1262" y="676">・スイッチのモールスを英字・カナに</text>
+  <text x="1262" y="697">・打ちかけの文を 127.0.0.1:8021 で配る</text>
+  <text x="1262" y="718">・SW4 で送る（POST /chat、X-Pager: raspi）</text>
+</g>
+<rect x="1570" y="630" width="140" height="114" rx="6" class="box"/>
+<text x="1582" y="652" class="s12 b">Pi 5 のスイッチ</text>
+<g class="s11">
+  <text x="1582" y="672">SW1 トン（長押しツー）</text>
+  <text x="1582" y="691">SW3 1 字消す</text>
+  <text x="1582" y="710">SW4 確定・送る</text>
+  <text x="1582" y="729">SW5 英字 / カナ</text>
+</g>
+<line x1="1570" y1="687" x2="1536" y2="687" class="fl fp" marker-end="url(#ap)"/>
+<line x1="1330" y1="630" x2="1330" y2="582" class="fl fg" marker-end="url(#ag)"/>
+<circle cx="1348" cy="606" r="10" fill="#2e8b57" stroke="#fff" stroke-width="2"/><text x="1348" y="610" text-anchor="middle" class="badge">9</text>
+<text x="1364" y="610" class="s11">/state（打ちかけの文）</text>
+
+<!-- ===== 表: やりとりするデータ ===== -->
+<line x1="30" y1="784" x2="1730" y2="784" stroke="#ccc"/>
+<text x="30" y="814" font-size="18" class="b">やりとりするデータ</text>
+
+<g class="s12">
+  <!-- 1 -->
+  <circle cx="44" cy="846" r="10" fill="#666"/><text x="44" y="850" text-anchor="middle" class="badge">1</text>
+  <text x="64" y="850" class="s13 b">GPS → Pico</text>
+  <text x="64" y="868" class="s11 m">UART1 115200bps（GP4・GP5）</text>
+  <text x="340" y="850">NMEA の文。RMC（位置・速さ・UTC の時刻）と GGA（衛星の数・HDOP）が 1 秒ごと、GSV（衛星ごとの信号の強さ）が 5 秒ごと。</text>
+  <text x="340" y="869">Pico は GPS が話し始めたら <tspan class="mono">$PCAS03</tspan> を送り、出す文をこの 3 つに絞る（全部だと 1 秒に 1.4KB あり、TLS の握手の間に受信があふれる）。</text>
+  <line x1="30" y1="882" x2="1730" y2="882" stroke="#eee"/>
+
+  <!-- 2 -->
+  <circle cx="44" cy="898" r="10" fill="#666"/><text x="44" y="902" text-anchor="middle" class="badge">2</text>
+  <text x="64" y="902" class="s13 b">スイッチ → Pico → LCD</text>
+  <text x="64" y="920" class="s11 m">ポケベルの中</text>
+  <text x="340" y="902">モールス（SW2 トン・SW3 ツー）を英数字と記号に。カナ入力ではローマ字をその場で半角カナに（KONNICHIHA → ｺﾝﾆﾁﾊ）。64 字まで。</text>
+  <text x="340" y="921">LCD の Receive は 1 行目が名前と時刻、2 行目が本文（16 字を超えると流れる）。SW2・SW3 で前後の発言を見る。</text>
+  <line x1="30" y1="934" x2="1730" y2="934" stroke="#eee"/>
+
+  <!-- 3 -->
+  <circle cx="44" cy="950" r="10" fill="#1f6fd1"/><text x="44" y="954" text-anchor="middle" class="badge">3</text>
+  <text x="64" y="954" class="s13 b">Pico → 中継（Chat の文）</text>
+  <text x="64" y="972" class="s11 m">Funnel の 10000 番</text>
+  <text x="340" y="954"><tspan class="mono">POST /stream?after=&lt;最後に受け取った ID&gt;&amp;to=chat</tspan>　ヘッダ <tspan class="mono">X-Key: &lt;RELAY_KEY&gt;</tspan>・<tspan class="mono">X-Pager: &lt;PAGER_NAME&gt;</tspan>　本文は UTF-8（半角カナ）。</text>
+  <text x="340" y="973">送るたびにつなぎ直し、返事の流れ（⑤）をそのまま受け続ける。結果は応答の <tspan class="mono">X-Sent</tspan> ヘッダ（ok なら LCD に sent、だめなら理由）。</text>
+  <line x1="30" y1="986" x2="1730" y2="986" stroke="#eee"/>
+
+  <!-- 4 -->
+  <circle cx="44" cy="1002" r="10" fill="#1f6fd1"/><text x="44" y="1006" text-anchor="middle" class="badge">4</text>
+  <text x="64" y="1006" class="s13 b">Pico → 中継（位置）</text>
+  <text x="64" y="1024" class="s11 m">③ と同じ接続</text>
+  <text x="340" y="1006"><tspan class="mono">G &lt;UNIX 秒（GPS の UTC）&gt; &lt;緯度&gt; &lt;経度&gt; &lt;km/h&gt; &lt;衛星の数&gt; &lt;HDOP&gt;</tspan> の 1 行を、測位できていれば 1 分ごとに。</text>
+  <text x="340" y="1025">⑤ を受けている接続にそのまま書くので、TLS の握手（4〜8 秒）は増えない。Spotify・YouTube モードの間は WebSocket の G フレームで送る。</text>
+  <line x1="30" y1="1038" x2="1730" y2="1038" stroke="#eee"/>
+
+  <!-- 5 -->
+  <circle cx="44" cy="1054" r="10" fill="#d9730d"/><text x="44" y="1058" text-anchor="middle" class="badge">5</text>
+  <text x="64" y="1058" class="s13 b">中継 → Pico（流れ）</text>
+  <text x="64" y="1076" class="s11 m">LCD の文字（cp932）</text>
+  <text x="340" y="1058"><tspan class="mono">C&lt;ID&gt; TAB &lt;HH:MM&gt; TAB &lt;名前&gt; TAB &lt;本文&gt; LF</tspan>。自分が送った文は <tspan class="mono">c&lt;ID&gt;</tspan>（画面を切り替えない）。Discord の発言は頭に C が無い行。</text>
+  <text x="340" y="1077">つないだ直後に溜まっていた分（after の続きか直近 8 件）と空行 1 つ、その後は何もなければ 30 秒ごとに空行。Pico は 90 秒届かなければ切れたとみなす。</text>
+  <line x1="30" y1="1090" x2="1730" y2="1090" stroke="#eee"/>
+
+  <!-- 6 -->
+  <circle cx="44" cy="1106" r="10" fill="#666"/><text x="44" y="1110" text-anchor="middle" class="badge">6</text>
+  <text x="64" y="1110" class="s13 b">中継 → ファイル</text>
+  <text x="64" y="1128" class="s11 m">dynabook の ~/espoke/</text>
+  <text x="340" y="1110"><tspan class="mono">chat.jsonl</tspan> に <tspan class="mono">{"id", "t", "pager", "text"}</tspan>（カナは全角にそろえる）。<tspan class="mono">gps.jsonl</tspan> に 1 点 1 行、ポケベルの名前（pager）つき。</text>
+  <text x="340" y="1129">どちらも足していくだけで消さない（位置は 1 分ごとなら 1 台 1 日 100KB ほど）。中継を起動し直すと、ここから読み直す。</text>
+  <line x1="30" y1="1142" x2="1730" y2="1142" stroke="#eee"/>
+
+  <!-- 7 -->
+  <circle cx="44" cy="1158" r="10" fill="#2e8b57"/><text x="44" y="1162" text-anchor="middle" class="badge">7</text>
+  <text x="64" y="1162" class="s13 b">地図のサーバー → Pi 5 の画面</text>
+  <text x="64" y="1180" class="s11 m">:8020・tailnet の中だけ</text>
+  <text x="340" y="1162"><tspan class="mono">GET /</tspan> で地図とチャットのページ。<tspan class="mono">GET /feed.json?gps=&lt;n&gt;&amp;chat=&lt;m&gt;</tspan> を 5 秒ごとに読み、n 点目・m 件目からあとをもらう。</text>
+  <text x="340" y="1181" class="mono" font-size="11.5">{"v", "now", "pagers", "points": [[時刻, 緯度, 経度, km/h, 衛星の数, 名前], …], "msgs": [[時刻, 名前, 本文], …]}<tspan font-family="Noto Sans CJK JP, sans-serif" font-size="12">　v（ページの版）が変われば読み直す。</tspan></text>
+  <line x1="30" y1="1194" x2="1730" y2="1194" stroke="#eee"/>
+
+  <!-- 8 -->
+  <circle cx="44" cy="1210" r="10" fill="#7b4fc4"/><text x="44" y="1214" text-anchor="middle" class="badge">8</text>
+  <text x="64" y="1214" class="s13 b">Pi 5 のスイッチ → 中継</text>
+  <text x="64" y="1232" class="s11 m">morse_chat.py・作業中</text>
+  <text x="340" y="1214">GPIO17・22・25・24（SW1・SW3・SW4・SW5）を読んでモールスにする。SW4 で <tspan class="mono">POST /chat</tspan>（本文 UTF-8、<tspan class="mono">X-Pager: raspi</tspan>）。</text>
+  <text x="340" y="1233">中継はポケベルからの文と同じく chat.jsonl と STORE の Chat に入れるので、⑤ でポケベルにも届き、⑦ で画面にも出る。</text>
+  <line x1="30" y1="1246" x2="1730" y2="1246" stroke="#eee"/>
+
+  <!-- 9 -->
+  <circle cx="44" cy="1262" r="10" fill="#2e8b57"/><text x="44" y="1266" text-anchor="middle" class="badge">9</text>
+  <text x="64" y="1266" class="s13 b">morse_chat.py → Pi 5 の画面</text>
+  <text x="64" y="1284" class="s11 m">127.0.0.1:8021</text>
+  <text x="340" y="1266"><tspan class="mono">GET /state?v=&lt;版&gt;</tspan>。版が変わるまで最長 25 秒待って返す。中身は、打っている符号・確定したときの字・打った文・英字かカナか・送れたか。</text>
+  <text x="340" y="1285">ページを <tspan class="mono">?morse=8021</tspan> を付けて開いたときだけ、地図とチャットの下に入力欄を出す。</text>
+  <line x1="30" y1="1298" x2="1730" y2="1298" stroke="#eee"/>
+
+  <!-- 10 -->
+  <circle cx="44" cy="1314" r="10" fill="#2e8b57"/><text x="44" y="1318" text-anchor="middle" class="badge" font-size="10">10</text>
+  <text x="64" y="1318" class="s13 b">インターネット → Pi 5 の画面</text>
+  <text x="64" y="1336" class="s11 m">ページが直接取りにいく</text>
+  <text x="340" y="1318">OpenStreetMap のタイル（tile.openstreetmap.org。見ている範囲の分だけ）と Leaflet 1.9.4（unpkg）。</text>
+  <text x="340" y="1337">線と丸は Canvas で描く（fbservo の Servo は SVG を描けない）。</text>
+</g>
+</svg>
