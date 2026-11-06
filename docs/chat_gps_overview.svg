@@ -1,0 +1,290 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1110" viewBox="0 0 1500 1110" fill="#222" font-family="Noto Sans CJK JP, Noto Sans JP, Hiragino Sans, sans-serif">
+<style>
+  .m { fill: #666; }
+  .b { font-weight: bold; }
+  .mono { font-family: Noto Sans Mono CJK JP, DejaVu Sans Mono, monospace; }
+  .badge { fill: #fff; font-size: 13px; font-weight: bold; }
+  .name { font-size: 18px; font-weight: bold; }
+  .sub { font-size: 12.5px; fill: #555; }
+  .zone { font-size: 16px; font-weight: bold; }
+  .lbl { font-size: 13.5px; font-weight: bold; }
+  .ex { font-size: 13px; }
+  .tx { font-size: 12.5px; }
+  .card { fill: #fff; stroke: #d8d8d8; stroke-width: 1.2; }
+  .exbox { fill: #f5f5f1; }
+</style>
+<defs>
+  <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#6b7fa3"/></marker>
+  <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#1f6fd1"/></marker>
+  <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#d9730d"/></marker>
+  <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#2e8b57"/></marker>
+  <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#a0522d"/></marker>
+  <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#7b4fc4"/></marker>
+  <marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#0f8b8d"/></marker>
+  <g id="sat">
+    <line x1="-30" y1="0" x2="30" y2="0" stroke="#888" stroke-width="2"/>
+    <rect x="-48" y="-7" width="32" height="14" fill="#3b6ea8" stroke="#2a4f7a"/>
+    <line x1="-37" y1="-7" x2="-37" y2="7" stroke="#9cc0e8"/><line x1="-27" y1="-7" x2="-27" y2="7" stroke="#9cc0e8"/>
+    <rect x="16" y="-7" width="32" height="14" fill="#3b6ea8" stroke="#2a4f7a"/>
+    <line x1="27" y1="-7" x2="27" y2="7" stroke="#9cc0e8"/><line x1="37" y1="-7" x2="37" y2="7" stroke="#9cc0e8"/>
+    <rect x="-12" y="-10" width="24" height="20" rx="2" fill="#d9d9d9" stroke="#888"/>
+    <circle cx="0" cy="12" r="3" fill="#888"/>
+  </g>
+  <clipPath id="scr"><rect x="1160" y="160" width="280" height="185"/></clipPath>
+</defs>
+<rect width="1500" height="1110" fill="#ffffff"/>
+
+<!-- ===== 題 ===== -->
+<text x="30" y="50" font-size="28" class="b">ポケベルのチャットと GPS — 何がどこへ届くのか</text>
+<text x="30" y="82" font-size="15" class="m">ポケベルの場所とチャットは、学校のサーバーを通って家のディスプレイへ。家のモールス伝信機で打った文は、ポケベルへ届く。</text>
+
+<!-- ===== 場所の区切り ===== -->
+<rect x="30" y="110" width="410" height="560" rx="14" fill="#eef4fb"/>
+<text x="48" y="138" class="zone" fill="#3b5f8a">そと（持ち歩く）</text>
+<rect x="460" y="110" width="420" height="560" rx="14" fill="#f7f3ea"/>
+<text x="478" y="138" class="zone" fill="#8a7445">学校</text>
+<rect x="900" y="110" width="570" height="560" rx="14" fill="#edf6ed"/>
+<text x="918" y="138" class="zone" fill="#3f7a3f">家</text>
+
+<!-- ===== GPS の衛星 ===== -->
+<text x="235" y="164" text-anchor="middle" class="sub">宇宙: GPS の衛星（約 2 万 km 上空を回っている）</text>
+<use href="#sat" x="95" y="196"/>
+<use href="#sat" x="235" y="184"/>
+<use href="#sat" x="375" y="200"/>
+<g stroke="#6b7fa3" stroke-width="2" stroke-dasharray="5 5" fill="none">
+  <line x1="95" y1="212" x2="296" y2="288"/>
+  <line x1="235" y1="200" x2="298" y2="286"/>
+  <line x1="375" y1="216" x2="302" y2="287" marker-end="url(#a1)"/>
+</g>
+<circle cx="168" cy="268" r="13" fill="#6b7fa3" stroke="#fff" stroke-width="2"/><text x="168" y="273" text-anchor="middle" class="badge">1</text>
+<text x="188" y="273" class="lbl" fill="#6b7fa3">電波</text>
+
+<!-- ===== ポケベル ===== -->
+<line x1="300" y1="322" x2="300" y2="294" stroke="#555" stroke-width="3"/>
+<circle cx="300" cy="291" r="5" fill="#555"/>
+<rect x="130" y="320" width="200" height="250" rx="22" fill="#34495e"/>
+<rect x="148" y="340" width="164" height="56" rx="4" fill="#b9cc54" stroke="#6b7d1f"/>
+<text x="158" y="362" class="mono" font-size="13" fill="#1d2a05" xml:space="preserve">raspi      17:25</text>
+<text x="158" y="384" class="mono" font-size="13" fill="#1d2a05">ｵｶｴﾘ</text>
+<g fill="#e6e6e6" stroke="#9aa">
+  <circle cx="170" cy="424" r="11"/><circle cx="210" cy="424" r="11"/><circle cx="250" cy="424" r="11"/><circle cx="290" cy="424" r="11"/>
+</g>
+<rect x="146" y="456" width="168" height="98" rx="8" fill="none" stroke="#7f8fa0" stroke-dasharray="4 3"/>
+<text x="156" y="472" font-size="10.5" fill="#c9d3dd">中身</text>
+<rect x="160" y="480" width="140" height="44" rx="4" fill="#2f8f3f" stroke="#1d5e28"/>
+<g fill="#c8b560"><rect x="164" y="482" width="4" height="4"/><rect x="164" y="518" width="4" height="4"/><rect x="292" y="482" width="4" height="4"/><rect x="292" y="518" width="4" height="4"/></g>
+<rect x="216" y="490" width="26" height="24" fill="#333"/>
+<text x="230" y="542" text-anchor="middle" font-size="13" class="b" fill="#fff">ラズパイ Pico</text>
+<text x="230" y="508" text-anchor="middle" font-size="9" fill="#ddd">頭脳</text>
+<text x="230" y="598" text-anchor="middle" class="name">ポケベル</text>
+<text x="230" y="620" text-anchor="middle" class="sub">画面とボタン 4 つ、GPS の受信機。</text>
+<text x="230" y="639" text-anchor="middle" class="sub">頭脳は小さなコンピューター「ラズパイ Pico」</text>
+
+<!-- ===== サーバー ===== -->
+<rect x="590" y="290" width="170" height="110" rx="6" fill="#263238" stroke="#111" stroke-width="3"/>
+<g>
+  <rect x="604" y="306" width="90" height="6" rx="3" fill="#7cb7ff"/>
+  <rect x="604" y="322" width="120" height="6" rx="3" fill="#9ccc65"/>
+  <rect x="604" y="338" width="70" height="6" rx="3" fill="#ffb74d"/>
+  <rect x="604" y="354" width="110" height="6" rx="3" fill="#7cb7ff"/>
+  <rect x="604" y="370" width="80" height="6" rx="3" fill="#9ccc65"/>
+</g>
+<path d="M565,400 H785 L802,416 H548 z" fill="#9aa3ab" stroke="#6f777e"/>
+<text x="675" y="446" text-anchor="middle" class="name">サーバー</text>
+<text x="675" y="468" text-anchor="middle" class="sub">学校のノート PC（dynabook）</text>
+<text x="675" y="487" text-anchor="middle" class="sub">ずっと電源が入っていて、</text>
+<text x="675" y="506" text-anchor="middle" class="sub">受け取る・配る・書き残す</text>
+<g>
+  <rect x="595" y="526" width="62" height="70" rx="3" fill="#fff" stroke="#999"/>
+  <g fill="#999"><circle cx="602" cy="538" r="2"/><circle cx="602" cy="554" r="2"/><circle cx="602" cy="570" r="2"/><circle cx="602" cy="586" r="2"/></g>
+  <g stroke="#ccc"><line x1="610" y1="542" x2="650" y2="542"/><line x1="610" y1="554" x2="650" y2="554"/><line x1="610" y1="566" x2="645" y2="566"/><line x1="610" y1="578" x2="650" y2="578"/></g>
+  <rect x="693" y="526" width="62" height="70" rx="3" fill="#fff" stroke="#999"/>
+  <g fill="#999"><circle cx="700" cy="538" r="2"/><circle cx="700" cy="554" r="2"/><circle cx="700" cy="570" r="2"/><circle cx="700" cy="586" r="2"/></g>
+  <g stroke="#ccc"><line x1="708" y1="542" x2="748" y2="542"/><line x1="708" y1="554" x2="748" y2="554"/><line x1="708" y1="566" x2="743" y2="566"/><line x1="708" y1="578" x2="748" y2="578"/></g>
+  <text x="626" y="617" text-anchor="middle" class="tx">チャットの記録</text>
+  <text x="724" y="617" text-anchor="middle" class="tx">場所の記録</text>
+  <text x="675" y="639" text-anchor="middle" class="sub">どちらも消さずに足していく</text>
+</g>
+
+<!-- ===== ラズパイ 5 ===== -->
+<text x="995" y="290" text-anchor="middle" class="name">ラズパイ 5</text>
+<text x="995" y="309" text-anchor="middle" class="sub">家の小さなコンピューター</text>
+<rect x="920" y="320" width="150" height="105" rx="6" fill="#3a8c3a" stroke="#256125"/>
+<g fill="#c8b560">
+  <rect x="930" y="325" width="5" height="5"/><rect x="938" y="325" width="5" height="5"/><rect x="946" y="325" width="5" height="5"/><rect x="954" y="325" width="5" height="5"/>
+  <rect x="962" y="325" width="5" height="5"/><rect x="970" y="325" width="5" height="5"/><rect x="978" y="325" width="5" height="5"/><rect x="986" y="325" width="5" height="5"/>
+  <rect x="994" y="325" width="5" height="5"/><rect x="1002" y="325" width="5" height="5"/><rect x="1010" y="325" width="5" height="5"/><rect x="1018" y="325" width="5" height="5"/>
+</g>
+<rect x="945" y="350" width="38" height="38" fill="#4a4a4a"/>
+<rect x="995" y="356" width="26" height="26" fill="#333"/>
+<g fill="#b8bec4" stroke="#7d848a"><rect x="1048" y="340" width="26" height="20"/><rect x="1048" y="366" width="26" height="20"/><rect x="1048" y="392" width="26" height="24"/></g>
+
+<!-- ===== ディスプレイ ===== -->
+<rect x="1150" y="150" width="300" height="220" rx="10" fill="#2b2b2b"/>
+<rect x="1160" y="160" width="280" height="185" fill="#fff"/>
+<g clip-path="url(#scr)">
+  <rect x="1160" y="160" width="170" height="155" fill="#f2efe9"/>
+  <path d="M1150,205 C1200,222 1250,198 1300,228 S1330,240 1340,236" fill="none" stroke="#aad3df" stroke-width="9"/>
+  <g fill="none" stroke-linecap="round">
+    <path d="M1200,160 L1210,315 M1280,160 L1272,315 M1160,290 L1330,284" stroke="#d6cfc2" stroke-width="6"/>
+    <path d="M1200,160 L1210,315 M1280,160 L1272,315 M1160,290 L1330,284" stroke="#fff" stroke-width="4"/>
+    <path d="M1160,255 L1330,245" stroke="#d9b45a" stroke-width="7"/>
+    <path d="M1160,255 L1330,245" stroke="#f8dd96" stroke-width="5"/>
+  </g>
+  <polyline points="1180,302 1208,288 1207,252 1272,248 1276,200" fill="none" stroke="#1f6fd1" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="1276" cy="200" r="6" fill="#1f6fd1" stroke="#fff" stroke-width="2"/>
+  <line x1="1330" y1="160" x2="1330" y2="315" stroke="#aaa"/>
+  <rect x="1336" y="230" width="3" height="28" fill="#1f6fd1"/>
+  <text x="1344" y="240" font-size="8" fill="#1f6fd1" class="b">ポケベル</text>
+  <text x="1344" y="254" font-size="10">HELLO</text>
+  <rect x="1336" y="270" width="3" height="28" fill="#e07b00"/>
+  <text x="1344" y="280" font-size="8" fill="#e07b00" class="b">モールス</text>
+  <text x="1344" y="294" font-size="10">オカエリ</text>
+  <line x1="1160" y1="315" x2="1440" y2="315" stroke="#888" stroke-width="1.5"/>
+  <rect x="1160" y="316" width="50" height="29" fill="#f6f5f2"/>
+  <circle cx="1185" cy="330" r="3.5" fill="#222"/>
+  <text x="1220" y="336" font-size="13">マタ<tspan fill="#1f6fd1">n</tspan><tspan fill="#999">_</tspan></text>
+</g>
+<rect x="1285" y="370" width="30" height="16" fill="#444"/>
+<rect x="1250" y="386" width="100" height="8" rx="3" fill="#444"/>
+<text x="1300" y="422" text-anchor="middle" class="name">ディスプレイ</text>
+<text x="1300" y="442" text-anchor="middle" class="sub">左に地図、右にチャット、下に打っている文字</text>
+
+<!-- ===== モールス伝信機 ===== -->
+<rect x="1180" y="512" width="240" height="66" rx="10" fill="#c8955f" stroke="#8a5f33"/>
+<g>
+  <ellipse cx="1220" cy="538" rx="15" ry="7" fill="#7d1d1d"/><ellipse cx="1220" cy="533" rx="15" ry="7" fill="#d33"/>
+  <ellipse cx="1270" cy="538" rx="15" ry="7" fill="#7d1d1d"/><ellipse cx="1270" cy="533" rx="15" ry="7" fill="#d33"/>
+  <ellipse cx="1320" cy="538" rx="15" ry="7" fill="#7d1d1d"/><ellipse cx="1320" cy="533" rx="15" ry="7" fill="#d33"/>
+  <ellipse cx="1370" cy="538" rx="15" ry="7" fill="#7d1d1d"/><ellipse cx="1370" cy="533" rx="15" ry="7" fill="#d33"/>
+</g>
+<g font-size="10.5" fill="#fff" text-anchor="middle" class="b">
+  <text x="1220" y="566">トン/ツー</text><text x="1270" y="566">消す</text><text x="1320" y="566">送る</text><text x="1370" y="566">カナ</text>
+</g>
+<text x="1300" y="606" text-anchor="middle" class="name">モールス伝信機</text>
+<text x="1300" y="627" text-anchor="middle" class="sub">ボタンを押してモールスで文を打つ</text>
+
+<!-- ===== 矢印 ===== -->
+<!-- ② ③ ポケベル ⇄ サーバー -->
+<line x1="332" y1="345" x2="586" y2="345" stroke="#1f6fd1" stroke-width="3" marker-end="url(#a2)"/>
+<line x1="588" y1="385" x2="334" y2="385" stroke="#d9730d" stroke-width="3" marker-end="url(#a3)"/>
+<circle cx="392" cy="330" r="13" fill="#1f6fd1" stroke="#fff" stroke-width="2"/><text x="392" y="335" text-anchor="middle" class="badge">2</text>
+<text x="412" y="335" class="lbl" fill="#1f6fd1">場所・チャット</text>
+<circle cx="392" cy="402" r="13" fill="#d9730d" stroke="#fff" stroke-width="2"/><text x="392" y="407" text-anchor="middle" class="badge">3</text>
+<text x="412" y="407" class="lbl" fill="#d9730d">新しいチャット</text>
+<text x="425" y="434" text-anchor="middle" class="sub">インターネット</text>
+<text x="425" y="452" text-anchor="middle" class="sub">（Wi-Fi・スマホのテザリング）</text>
+
+<!-- ④ ⑥ サーバー ⇄ ラズパイ 5 -->
+<line x1="764" y1="345" x2="916" y2="345" stroke="#2e8b57" stroke-width="3" marker-end="url(#a4)"/>
+<line x1="918" y1="385" x2="766" y2="385" stroke="#7b4fc4" stroke-width="3" marker-end="url(#a6)"/>
+<circle cx="784" cy="330" r="13" fill="#2e8b57" stroke="#fff" stroke-width="2"/><text x="784" y="335" text-anchor="middle" class="badge">4</text>
+<text x="802" y="335" class="lbl" fill="#2e8b57">地図とチャット</text>
+<circle cx="784" cy="402" r="13" fill="#7b4fc4" stroke="#fff" stroke-width="2"/><text x="784" y="407" text-anchor="middle" class="badge">6</text>
+<text x="802" y="407" class="lbl" fill="#7b4fc4">家で打った文</text>
+<text x="840" y="434" text-anchor="middle" class="sub">自分の機械どうしの</text>
+<text x="840" y="452" text-anchor="middle" class="sub">専用の道（Tailscale）</text>
+
+<!-- ⑦ ラズパイ 5 → ディスプレイ -->
+<line x1="1076" y1="360" x2="1146" y2="360" stroke="#0f8b8d" stroke-width="3" marker-end="url(#a7)"/>
+<circle cx="1110" cy="340" r="13" fill="#0f8b8d" stroke="#fff" stroke-width="2"/><text x="1110" y="345" text-anchor="middle" class="badge">7</text>
+<text x="1110" y="384" text-anchor="middle" class="lbl" fill="#0f8b8d">映像</text>
+
+<!-- ⑤ モールス伝信機 → ラズパイ 5 -->
+<path d="M1180,545 H995 V429" fill="none" stroke="#a0522d" stroke-width="3" marker-end="url(#a5)"/>
+<circle cx="995" cy="490" r="13" fill="#a0522d" stroke="#fff" stroke-width="2"/><text x="995" y="495" text-anchor="middle" class="badge">5</text>
+<text x="1015" y="495" class="lbl" fill="#a0522d">トン・ツー</text>
+
+<!-- ===== やりとりするデータ ===== -->
+<text x="30" y="716" font-size="21" class="b">やりとりするデータ</text>
+
+<!-- 1 -->
+<rect x="30" y="732" width="345" height="172" rx="10" class="card"/>
+<circle cx="54" cy="758" r="13" fill="#6b7fa3"/><text x="54" y="763" text-anchor="middle" class="badge">1</text>
+<text x="76" y="764" font-size="15" class="b">GPS の衛星 → ポケベル</text>
+<rect x="44" y="776" width="317" height="54" rx="6" class="exbox"/>
+<text x="54" y="798" class="ex">時刻: 17:26:03.1204…</text>
+<text x="54" y="819" class="ex">衛星の位置（軌道の情報）</text>
+<text x="44" y="852" class="tx">衛星は、時刻と自分の位置を電波で流し続ける。</text>
+<text x="44" y="871" class="tx">4 つ以上の電波が届くまでの時間の差から、</text>
+<text x="44" y="890" class="tx">ポケベルが自分のいる場所を計算する。</text>
+
+<!-- 2 -->
+<rect x="395" y="732" width="345" height="172" rx="10" class="card"/>
+<circle cx="419" cy="758" r="13" fill="#1f6fd1"/><text x="419" y="763" text-anchor="middle" class="badge">2</text>
+<text x="441" y="764" font-size="15" class="b">ポケベル → サーバー</text>
+<rect x="409" y="776" width="317" height="54" rx="6" class="exbox"/>
+<text x="419" y="798" class="ex">場所: 17:26 北緯 35.68 東経 139.76 時速 4km</text>
+<text x="419" y="819" class="ex">チャット: HELLO（ボタンで打った文）</text>
+<text x="409" y="852" class="tx">場所は 1 分ごとに自動で送る。チャットは、</text>
+<text x="409" y="871" class="tx">ボタンでモールスを打って送ったとき。</text>
+<text x="409" y="890" class="tx">Wi-Fi かスマホのテザリングでつなぐ。</text>
+
+<!-- 3 -->
+<rect x="760" y="732" width="345" height="172" rx="10" class="card"/>
+<circle cx="784" cy="758" r="13" fill="#d9730d"/><text x="784" y="763" text-anchor="middle" class="badge">3</text>
+<text x="806" y="764" font-size="15" class="b">サーバー → ポケベル</text>
+<rect x="774" y="776" width="317" height="54" rx="6" class="exbox"/>
+<text x="784" y="798" class="ex">チャット: raspi 17:25 <tspan class="mono">ｵｶｴﾘ</tspan></text>
+<text x="784" y="819" class="ex">30 秒ごとに「つながってるよ」の合図</text>
+<text x="774" y="852" class="tx">新しいチャットが来たら、すぐ届ける。</text>
+<text x="774" y="871" class="tx">ポケベルはサーバーと電話をつなぎっぱなし</text>
+<text x="774" y="890" class="tx">にしているので、待たずに受け取れる。</text>
+
+<!-- 4 -->
+<rect x="1125" y="732" width="345" height="172" rx="10" class="card"/>
+<circle cx="1149" cy="758" r="13" fill="#2e8b57"/><text x="1149" y="763" text-anchor="middle" class="badge">4</text>
+<text x="1171" y="764" font-size="15" class="b">サーバー → ラズパイ 5</text>
+<rect x="1139" y="776" width="317" height="54" rx="6" class="exbox"/>
+<text x="1149" y="798" class="ex">場所が 1 つ増えた: 17:26 北緯… 東経…</text>
+<text x="1149" y="819" class="ex">チャットが 1 件増えた: ポケベル「HELLO」</text>
+<text x="1139" y="852" class="tx">ラズパイ 5 が 5 秒ごとに「新しいのある？」と</text>
+<text x="1139" y="871" class="tx">聞きに行き、前の回から増えた分だけもらう。</text>
+<text x="1139" y="890" class="tx">地図に道を描き足し、チャットを並べる。</text>
+
+<!-- 5 -->
+<rect x="30" y="920" width="345" height="172" rx="10" class="card"/>
+<circle cx="54" cy="946" r="13" fill="#a0522d"/><text x="54" y="951" text-anchor="middle" class="badge">5</text>
+<text x="76" y="952" font-size="15" class="b">モールス伝信機 → ラズパイ 5</text>
+<rect x="44" y="964" width="317" height="54" rx="6" class="exbox"/>
+<text x="54" y="986" class="ex">・ー（短く押す・長く押す）→ A</text>
+<text x="54" y="1007" class="ex">カナのとき: MATANE → マタネ</text>
+<text x="44" y="1040" class="tx">短く押すとトン（・）、長く押すとツー（ー）。</text>
+<text x="44" y="1059" class="tx">ラズパイ 5 がその並びを文字にする。</text>
+<text x="44" y="1078" class="tx">ボタンはほかに「1 字消す」「送る」「カナ」。</text>
+
+<!-- 6 -->
+<rect x="395" y="920" width="345" height="172" rx="10" class="card"/>
+<circle cx="419" cy="946" r="13" fill="#7b4fc4"/><text x="419" y="951" text-anchor="middle" class="badge">6</text>
+<text x="441" y="952" font-size="15" class="b">ラズパイ 5 → サーバー</text>
+<rect x="409" y="964" width="317" height="54" rx="6" class="exbox"/>
+<text x="419" y="986" class="ex">チャット: オカエリ</text>
+<text x="419" y="1007" class="ex">名前: raspi（家のラズパイ 5 のこと）</text>
+<text x="409" y="1040" class="tx">「送る」を押すと、打った文をサーバーへ。</text>
+<text x="409" y="1059" class="tx">サーバーはこれもポケベルに配るので（③）、</text>
+<text x="409" y="1078" class="tx">ポケベルの画面に「<tspan class="mono">ｵｶｴﾘ</tspan>」と出る。</text>
+
+<!-- 7 -->
+<rect x="760" y="920" width="345" height="172" rx="10" class="card"/>
+<circle cx="784" cy="946" r="13" fill="#0f8b8d"/><text x="784" y="951" text-anchor="middle" class="badge">7</text>
+<text x="806" y="952" font-size="15" class="b">ラズパイ 5 → ディスプレイ</text>
+<rect x="774" y="964" width="317" height="54" rx="6" class="exbox"/>
+<text x="784" y="986" class="ex">左: 地図と通った道　右: チャット</text>
+<text x="784" y="1007" class="ex">下: いま打っている文字</text>
+<text x="774" y="1040" class="tx">ラズパイ 5 が地図とチャットのページを絵に</text>
+<text x="774" y="1059" class="tx">して、ケーブル（HDMI）でディスプレイに映す。</text>
+<text x="774" y="1078" class="tx">地図の絵はネットの OpenStreetMap から。</text>
+
+<!-- 安全のくふう -->
+<rect x="1125" y="920" width="345" height="172" rx="10" fill="#fffaf0" stroke="#e0c48a" stroke-width="1.2"/>
+<g transform="translate(1149,946)">
+  <rect x="-8" y="-3" width="16" height="13" rx="2" fill="#c08a1e"/>
+  <path d="M-5,-3 V-7 A5,5 0 0 1 5,-7 V-3" fill="none" stroke="#c08a1e" stroke-width="2.4"/>
+</g>
+<text x="1171" y="952" font-size="15" class="b">安全のくふう</text>
+<text x="1139" y="984" class="tx">・インターネットを通る ②③ は暗号をかける。</text>
+<text x="1139" y="1003" class="tx">　合言葉を知らないとサーバーに入れない</text>
+<text x="1139" y="1028" class="tx">・場所は個人情報なので、④⑥ は自分の</text>
+<text x="1139" y="1047" class="tx">　機械どうしの専用の道だけで通す</text>
+<text x="1139" y="1072" class="tx">・サーバーは届いたものを全部書き残す</text>
+</svg>
