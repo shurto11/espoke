@@ -50,7 +50,8 @@ https://<マシン名>.<tailnet>.ts.net:8443 として公開し、Pico から HT
     YOUTUBE_KBPS        Pico へ流す MP3 のビットレート。既定 128
     YOUTUBE_FPS         LCD に出す動画の 1 秒あたりのコマ数。既定 6 (Pico の音が途切れるなら下げる)
     YOUTUBE_FULL        0 なら、横長の動画は LCD 全体ではなく左の 6x2 文字に収める (右に題名と時間が出る)
-    GPS_FILE            Pico から届いた GPS の位置を足していくファイル。既定 ~/espoke/gps.jsonl (消さずに増える)
+    GPS_FILE            Pico から届いた GPS の位置を足していくファイル。既定 ~/espoke/gps.jsonl。日付 (日本時間) が
+                        変わると、前の日までの点は gps-<日付>.jsonl に移して地図から消す
     CHAT_FILE           ポケベルどうしのチャットを足していくファイル。既定 ~/espoke/chat.jsonl (消さずに増える)
     MAP_PORT            地図のページのポート。既定 8020
     MAP_ADDR            地図のページを待つアドレス。既定 0.0.0.0。どこで待っても、tailnet (100.64.0.0/10) と
@@ -1936,45 +1937,95 @@ def youtube_test(url, cookies, deno, kbps, fps, full):
 # 4〜8 秒止まるので)。この中継は位置をファイルに足していき、tailnet の中だけに開けた地図のページ (MAP_PORT) で見せる。
 # 位置は個人の情報なので、Funnel (外) には出さない。
 
+def jst_midnight(t=None):
+    """日本時間で、t (UNIX 秒。無ければ今) の日の 0 時 (UNIX 秒)"""
+    d = datetime.datetime.fromtimestamp(time.time() if t is None else t, JST)
+    return int(d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
 class GpsTrack:
-    """届いた位置を届いた順に持ち、GPS_FILE に 1 行 1 点の JSON で足していく (消さない)。
+    """届いた位置を届いた順に持ち、GPS_FILE に 1 行 1 点の JSON で足していく。
+    地図に出すのは今日 (日本時間) の点だけ。日付が変わったら、前の日までの点は GPS_FILE から
+    日付ごとのファイル (gps.jsonl なら gps-2026-11-06.jsonl) に移して、地図から消す (消さずに残る)。
     Pico が何台あっても 1 つのファイルで、点ごとに Pico の名前を持つ (名前の無い古い点は PAGER_DEFAULT)"""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        self.points = []   # [t, lat, lon, km/h, 衛星の数, 名前]
-        self.last = {}     # 名前 → その Pico の最後の点の時刻
+        self.points = []   # 今日の点。[t, lat, lon, km/h, 衛星の数, 名前]
+        self.last = {}     # 名前 → その Pico の最後の点の時刻 (前の日の分も。送り直しを捨てるため)
+        self.day = jst_midnight()
+        self._load()
+
+    def _archive_path(self, t):
+        base, ext = os.path.splitext(self.path)
+        return "%s-%s%s" % (base, datetime.datetime.fromtimestamp(t, JST).strftime("%Y-%m-%d"), ext)
+
+    def _load(self):
+        """GPS_FILE を読み、今日の点を持つ。前の日までの点は日付ごとのファイルに移し、GPS_FILE は今日の分だけにする"""
+        today, old = [], collections.defaultdict(list)
         try:
-            with open(path) as f:
+            with open(self.path) as f:
                 for line in f:
                     try:
                         p = json.loads(line)
+                        t = p["t"]
                         name = p.get("pager", PAGER_DEFAULT)
-                        self.points.append([p["t"], p["lat"], p["lon"], p.get("kmh", 0), p.get("sat", 0), name])
-                        self.last[name] = max(self.last.get(name, 0), p["t"])
-                        PAGERS.seen(name, p["t"])
+                        point = [t, p["lat"], p["lon"], p.get("kmh", 0), p.get("sat", 0), name]
                     except (ValueError, KeyError, TypeError):
-                        pass
+                        continue
+                    self.last[name] = max(self.last.get(name, 0), t)
+                    PAGERS.seen(name, t)   # 色の順は、前の日の点も入れて決める (日が変わっても色が変わらない)
+                    if t >= self.day:
+                        today.append((point, line))
+                    else:
+                        old[self._archive_path(t)].append(line)
         except FileNotFoundError:
             pass
+        self.points = [point for point, _ in today]
+        if not old:
+            return
+        for path, lines in old.items():
+            with open(path, "a") as f:
+                f.writelines(lines)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            f.writelines(line for _, line in today)
+        os.replace(tmp, self.path)
+        sys.stderr.write("gps: moved %d old points to %s\n"
+                         % (sum(map(len, old.values())), ", ".join(sorted(os.path.basename(p) for p in old))))
+
+    def _roll(self):
+        """日付が変わっていたら、前の日までの点を地図から消す (lock を持って呼ぶ)"""
+        day = jst_midnight()
+        if day > self.day:
+            self.day = day
+            self._load()
 
     def add(self, pager, t, lat, lon, kmh, sat, hdop):
         with self.lock:
+            self._roll()
             if t <= self.last.get(pager, 0):
                 return False   # つなぎ直したときの送り直しなど
             self.last[pager] = t
-            self.points.append([t, lat, lon, kmh, sat, pager])
-            with open(self.path, "a") as f:
-                f.write(json.dumps({"t": t, "lat": lat, "lon": lon, "kmh": kmh, "sat": sat, "hdop": hdop,
-                                    "pager": pager, "recv": int(time.time())}) + "\n")
+            line = json.dumps({"t": t, "lat": lat, "lon": lon, "kmh": kmh, "sat": sat, "hdop": hdop,
+                               "pager": pager, "recv": int(time.time())}) + "\n"
+            if t >= self.day:
+                self.points.append([t, lat, lon, kmh, sat, pager])
+                path = self.path
+            else:   # 日付が変わってから届いた、前の日の点
+                path = self._archive_path(t)
+            with open(path, "a") as f:
+                f.write(line)
         PAGERS.seen(pager, t)
         return True
 
     def since(self, n):
-        """n 点目からあと (届いた順) と、今の点の数。地図のページは前回の数を渡して、新しい点だけを読む"""
+        """今日の n 点目からあと (届いた順) と、今日の点の数と、今日 (0 時の UNIX 秒)。
+        地図のページは前回の数を渡して新しい点だけを読み、今日が変わったら読み直して線を消す"""
         with self.lock:
-            return self.points[n:], len(self.points)
+            self._roll()
+            return self.points[n:], len(self.points), self.day
 
 
 GPS = None  # main() が作る
@@ -2131,7 +2182,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
 const pagers = {};   // 名前 → { color, line, last, marker, shown }
-let gpsNext = 0, chatNext = 0, loaded = false, lastDay = '', rowsHtml = '', errText = '', fitKey = '', fitCount = 0;
+let gpsNext = 0, gpsDay = 0, chatNext = 0, loaded = false, lastDay = '', rowsHtml = '', errText = '', fitKey = '', fitCount = 0;
 let polling = false, pollAgain = false, morseName = '', morseSent = -1;
 const shown = {};   // 入力欄の要素ごとの、今出している中身 (変わったときだけ書き換える)
 
@@ -2253,10 +2304,12 @@ async function poll() {
   try {
     const r = await fetch('feed.json?gps=' + gpsNext + '&chat=' + chatNext, { cache: 'no-store' });
     const j = await r.json();
-    if (j.v !== VERSION || j.gps < gpsNext || j.chat < chatNext) {   // 中継が替わった・ファイルが替わった
+    // 中継が替わった・ファイルが替わった・日付が変わった (中継が前の日の点を消した) なら、読み直して線も消す
+    if (j.v !== VERSION || j.gps < gpsNext || j.chat < chatNext || (gpsDay && j.day !== gpsDay)) {
       location.reload();
       return;
     }
+    gpsDay = j.day;
     for (const name of j.pagers) pager(name);   // 中継が最初に見かけた順に色を決める
     addPoints(j.points);
     addChat(j.msgs);
@@ -2389,10 +2442,11 @@ class MapHandler(BaseHTTPRequestHandler):
             return self._send(MAP_HTML.replace("__VERSION__", MAP_VERSION), "text/html; charset=utf-8")
         if url.path == "/feed.json":
             q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
-            points, gps_next = GPS.since(int(q["gps"]) if q.get("gps", "").isdigit() else 0)
+            points, gps_next, gps_day = GPS.since(int(q["gps"]) if q.get("gps", "").isdigit() else 0)
             msgs, chat_next = CHAT.since(int(q["chat"]) if q.get("chat", "").isdigit() else 0)
             return self._send(json.dumps({"v": MAP_VERSION, "now": int(time.time()), "pagers": PAGERS.names(),
-                                          "gps": gps_next, "points": points, "chat": chat_next, "msgs": msgs},
+                                          "day": gps_day, "gps": gps_next, "points": points,
+                                          "chat": chat_next, "msgs": msgs},
                                          separators=(",", ":")), "application/json")
         self.send_error(404)
 
