@@ -2123,7 +2123,7 @@ MAP_HTML = """<!doctype html>
     #side { left: 0; top: 55%; width: auto; border-left: 0; border-top: 1px solid #aaa; }
   }
   /* ?morse=<ポート> を付けて開いたとき (Pi 5 の画面) だけ、地図とチャットの下に、Pi のスイッチで打つモールスの入力欄を出す。
-     左に打っている符号と、確定したときの文字。右に打った文 (2 行まで) と、その下に様子と打ち方 */
+     左に打っている符号と、確定したときの文字。右に英文か和文か (大きく) と、その右に打った文 (2 行まで)、下に様子 */
   #input { display: none; position: absolute; left: 0; right: 0; bottom: 0; height: 132px;
            background: #fff; border-top: 2px solid #888; }
   body.morse #input { display: block; }
@@ -2138,17 +2138,17 @@ MAP_HTML = """<!doctype html>
   #signs .hint { height: auto; margin: 0; background: none; color: #999; font-size: 20px; }
   #preview { font-size: 36px; line-height: 50px; height: 50px; margin-top: 10px; color: #333; font-weight: bold; }
   #compose { position: absolute; left: 281px; right: 0; top: 0; bottom: 0; }
-  #text { position: absolute; left: 18px; right: 18px; top: 10px; height: 84px; overflow: hidden;
+  #text { position: absolute; left: 162px; right: 18px; top: 10px; height: 84px; overflow: hidden;
           font-size: 30px; line-height: 42px; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
   #text .cur { color: #999; }
-  #status { position: absolute; left: 18px; right: 18px; bottom: 8px; height: 24px; overflow: hidden;
+  #status { position: absolute; left: 162px; right: 18px; bottom: 8px; height: 24px; overflow: hidden;
             font-size: 17px; line-height: 24px; color: #555; white-space: nowrap; }
-  #mode { display: inline-block; padding: 0 10px; border-radius: 4px; background: #555; color: #fff; margin-right: 10px; }
+  #mode { position: absolute; left: 18px; top: 10px; width: 128px; height: 84px; line-height: 84px; text-align: center;
+          border-radius: 8px; background: #555; color: #fff; font-size: 44px; font-weight: bold; }
   #mode.wabun { background: #e0670b; }
   #note { margin-left: 14px; font-weight: bold; color: #2e7d32; }
   #note.err { color: #b03030; }
   #note.wait { color: #555; }
-  #help { position: absolute; right: 0; top: 0; padding-left: 20px; background: #fff; color: #777; }
 </style>
 </head>
 <body>
@@ -2161,8 +2161,8 @@ MAP_HTML = """<!doctype html>
   <div id="code"><div id="signs"></div><div id="preview"></div></div>
   <div id="compose">
     <div id="text"></div>
-    <div id="status"><span id="mode"></span><span id="who"></span><span id="note"></span>
-      <span id="help">SW1 トン (長押しでツー)　SW3 1 字消す　SW4 確定・送る　SW5 英文/和文</span></div>
+    <div id="mode"></div>
+    <div id="status"><span id="who"></span><span id="note"></span></div>
   </div>
 </div>
 <script>
@@ -2361,7 +2361,6 @@ function showInput(s, err) {
   put('text', esc(s.text) + '<span class="cur">_</span>');
   put('mode', s.wabun ? '和文' : '英文', s.wabun ? 'wabun' : '');
   put('who', esc(label(s.name)) + ' として送る');
-  if (s.help) put('help', esc(s.help));   // どのスイッチが何をするかは morse_chat.py が決める
   let note = s.note, cls = /^送れない|^知らない/.test(note) ? 'err' : '';
   if (s.err) {
     note = s.err;
@@ -2370,12 +2369,12 @@ function showInput(s, err) {
     cls = 'wait';
   }
   put('note', esc(note), cls);
-  // 2 行に収まらなければ字を小さくする
+  // 2 行に収まらなければ字を小さくして 3 行に (1024 幅の画面で、全角 36 字までは 2 行、64 字まで 3 行)
   const t = document.getElementById('text');
-  const size = s.text.length > 40 ? '22px' : '30px';
+  const size = s.text.length > 36 ? '22px' : '30px';
   if (t.style.fontSize !== size) {
     t.style.fontSize = size;
-    t.style.lineHeight = size === '30px' ? '42px' : '30px';
+    t.style.lineHeight = size === '30px' ? '42px' : '28px';
   }
   if (morseSent >= 0 && s.sent > morseSent) poll();   // 送れたら、すぐチャットに出す
   morseSent = s.sent;
